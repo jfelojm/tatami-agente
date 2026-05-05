@@ -4,3 +4,6 @@ credentials/
 __pycache__/
 *.pyc
 logs/
+smartmenu_ventas.html
+smartmenu_js_scriptVentas.js
+fix_stock_sheets.py
