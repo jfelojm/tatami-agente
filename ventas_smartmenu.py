@@ -254,6 +254,7 @@ def construir_lineas_hist_ventas(header: dict, detalles: list[dict]) -> list[dic
                 "variedad_smart_menu": match["variedad_matched"] or detalle_plato or None,
                 "cod_producto": match["cod_producto"],
                 "nombre_producto": match["nombre_producto"],
+                "cod_receta": match.get("cod_receta"),
                 "cantidad_vendida": cantidad,
                 "precio_unitario": precio_u,
                 "subtotal": subtotal,
