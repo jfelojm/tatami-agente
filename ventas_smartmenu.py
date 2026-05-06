@@ -1,6 +1,7 @@
 import os
 import re
-from datetime import date, datetime
+import time
+from datetime import date, datetime, timedelta
 from urllib.parse import quote
 
 import requests
@@ -452,9 +453,10 @@ def guardar_ventas(lineas: list) -> dict:
     return {"insertadas": insertadas, "duplicadas": duplicadas, "errores": errores}
 
 
-# ── MAIN ──────────────────────────────────────────────────────
-if __name__ == "__main__":
-    fecha = _normalize_fecha_input(input("Fecha a procesar (YYYY-MM-DD) [Enter = hoy]: ").strip())
+def _main_un_dia():
+    fecha = _normalize_fecha_input(
+        input("Fecha a procesar (YYYY-MM-DD) [Enter = hoy]: ").strip()
+    )
 
     print(f"\n{'=' * 50}")
     print(f"MODULO VENTAS — {fecha}")
@@ -467,9 +469,10 @@ if __name__ == "__main__":
     if not rows:
         print("\n  Sin datos para procesar.")
         print(f"\n{'=' * 50}")
-        raise SystemExit(0)
+        return
 
-    max_docs = int(os.getenv("SMART_MENU_MAX_DOCS", "50") or "50")
+    _max_docs_env = os.getenv("SMART_MENU_MAX_DOCS")
+    max_docs = int(_max_docs_env) if _max_docs_env else 999999
     rows = rows[:max_docs]
 
     print("\n[2] Descargando detalle por venta y guardando en Supabase...")
@@ -501,4 +504,99 @@ if __name__ == "__main__":
     print(f"  Errores:     {errores}")
 
     print(f"\n{'=' * 50}")
+
+
+def _main_carga_historica(
+    fecha_inicio: str | None = None, fecha_fin: str | None = None
+):
+    if fecha_inicio is None:
+        fecha_inicio = input(
+            "Fecha inicio (YYYY-MM-DD) [Enter = hoy]: "
+        ).strip()
+    if fecha_fin is None:
+        fecha_fin = input(
+            "Fecha fin    (YYYY-MM-DD) [Enter = misma fecha inicio]: "
+        ).strip()
+
+    if not fecha_inicio:
+        fecha_inicio = date.today().strftime("%Y-%m-%d")
+    if not fecha_fin:
+        fecha_fin = fecha_inicio
+
+    try:
+        d_inicio = datetime.strptime(fecha_inicio, "%Y-%m-%d").date()
+        d_fin = datetime.strptime(fecha_fin, "%Y-%m-%d").date()
+    except ValueError as e:
+        print(f"ERROR: fecha invalida ({e})")
+        return
+
+    if d_fin < d_inicio:
+        d_inicio, d_fin = d_fin, d_inicio
+        fecha_inicio, fecha_fin = d_inicio.strftime("%Y-%m-%d"), d_fin.strftime(
+            "%Y-%m-%d"
+        )
+
+    fechas = []
+    d = d_inicio
+    while d <= d_fin:
+        fechas.append(d.strftime("%Y-%m-%d"))
+        d += timedelta(days=1)
+
+    print(f"\n{'=' * 50}")
+    print(
+        f"CARGA HISTORICA: {fecha_inicio} -> {fecha_fin} ({len(fechas)} dias)"
+    )
+    print(f"{'=' * 50}")
+
+    _max_docs_env = os.getenv("SMART_MENU_MAX_DOCS")
+    max_docs = int(_max_docs_env) if _max_docs_env else 999999
+    total_ins = total_dup = total_err = 0
+
+    for fecha in fechas:
+        print(f"\n--- {fecha} ---")
+        rows = descargar_ventas_grid(fecha)
+        rows = rows[:max_docs]
+        print(f"  {len(rows)} documentos")
+
+        if not rows:
+            time.sleep(0.5)
+            continue
+
+        insertadas = duplicadas = errores = 0
+        for idx, row in enumerate(rows, start=1):
+            header = _venta_header_from_row(row)
+            id_doc = header.get("id_documento", "")
+            if not id_doc:
+                continue
+            detalles = descargar_detalle_factura(id_doc)
+            lineas = construir_lineas_hist_ventas(header, detalles)
+            res = guardar_ventas(lineas)
+            insertadas += res["insertadas"]
+            duplicadas += res["duplicadas"]
+            errores += res["errores"]
+
+        print(f"  ins={insertadas} dup={duplicadas} err={errores}")
+        total_ins += insertadas
+        total_dup += duplicadas
+        total_err += errores
+        time.sleep(0.5)
+
+    print(f"\n{'=' * 50}")
+    print("RESUMEN TOTAL")
+    print(f"  Insertadas:  {total_ins}")
+    print(f"  Duplicadas:  {total_dup}")
+    print(f"  Errores:     {total_err}")
+    print(f"{'=' * 50}")
+
+
+# ── MAIN ──────────────────────────────────────────────────────
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] in ("--historico", "-H", "historico"):
+        fi = sys.argv[2] if len(sys.argv) > 2 else None
+        ff = sys.argv[3] if len(sys.argv) > 3 else None
+        _main_carga_historica(fecha_inicio=fi, fecha_fin=ff)
+    else:
+        _main_un_dia()
 
