@@ -46,38 +46,122 @@ def _daterange(start: str, end: str) -> list[str]:
     return out
 
 
-def _consumo_promedio_diario_por_mp(fecha_inicio: str, fecha_fin: str) -> dict[str, float]:
-    """
-    Calcula consumo diario promedio en base a mov_inventario SALIDA_VENTA.
-    consumo_diario = total_salidas / numero_dias_en_rango
-    """
-    dias = _daterange(fecha_inicio, fecha_fin)
-    if not dias:
-        return {}
+def _cargar_recetas_detalle() -> list[dict]:
+    sh = _get_sheet()
+    ws = sh.worksheet("BD_RECETAS_DETALLE")
+    values = ws.get_all_values()
+    headers = values[2]
+    rows = values[4:]
+    out: list[dict] = []
+    for row in rows:
+        if not any(c.strip() for c in row):
+            continue
+        r = {
+            headers[i].strip(): row[i].strip()
+            for i in range(min(len(headers), len(row)))
+            if headers[i].strip()
+        }
+        out.append(r)
+    return out
 
-    # En Supabase, 'fecha' suele ser timestamp (sin tz). No se puede ilike.
-    # Consultamos todo el rango [inicio, fin+1) y promediamos por nro de días.
-    start_ts = f"{fecha_inicio}T00:00:00"
-    end_ts = f"{(datetime.strptime(fecha_fin, '%Y-%m-%d').date() + timedelta(days=1)).strftime('%Y-%m-%d')}T00:00:00"
 
-    resp = (
-        supabase.table("mov_inventario")
-        .select("cod_mp_sistema,cantidad_mov")
-        .eq("tipo_mov", "SALIDA_VENTA")
-        .gte("fecha", start_ts)
-        .lt("fecha", end_ts)
-        .execute()
+def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
+    print("  Leyendo hist_ventas desde Supabase...")
+
+    todas_ventas: list[dict] = []
+    offset = 0
+    while True:
+        r = (
+            supabase.table("hist_ventas")
+            .select("cod_receta,variedad_smart_menu,cantidad_vendida,fecha")
+            .eq("estado_match", "PROCESADO")
+            .range(offset, offset + 999)
+            .execute()
+        )
+        if not r.data:
+            break
+        todas_ventas.extend(r.data)
+        if len(r.data) < 1000:
+            break
+        offset += 1000
+
+    print(f"  {len(todas_ventas)} ventas cargadas")
+
+    lookup_recetas: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for ing in recetas:
+        cod_r = ing.get("cod_receta", "").strip()
+        var = ing.get("variedad_smart_menu", "").strip().upper()
+        lookup_recetas[(cod_r, var)].append(ing)
+
+    consumo_total: dict[str, float] = defaultdict(float)
+    fechas_activas: set[str] = set()
+
+    for venta in todas_ventas:
+        cod_r = (venta.get("cod_receta") or "").strip()
+        variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
+        cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
+        fecha = (venta.get("fecha") or "").strip()
+
+        if not cod_r:
+            continue
+        if fecha:
+            fechas_activas.add(fecha)
+
+        ingredientes = (
+            lookup_recetas.get((cod_r, variedad))
+            or lookup_recetas.get((cod_r, ""))
+            or []
+        )
+
+        for ing in ingredientes:
+            cod_mp = ing.get("cod_mp_sistema", "").strip()
+            if not cod_mp or cod_mp.startswith("#"):
+                continue
+            gramaje = _safe_float(ing.get("cantidad", 0))
+            pct_aplicacion = _safe_float(ing.get("pct_aplicacion", 1) or 1) or 1.0
+            merma_pct = _safe_float(ing.get("merma_pct", 0) or 0)
+            consumo_total[cod_mp] += (
+                cantidad * gramaje * pct_aplicacion * (1 + merma_pct)
+            )
+
+    dias_activos = len(fechas_activas)
+    print(f"  {dias_activos} dias activos | {len(consumo_total)} MPs con consumo")
+
+    papa = consumo_total.get("120", 0)
+    print(
+        f"  DEBUG papa(120): consumo_total={papa:.0f}g | "
+        f"diario={round(papa/dias_activos,2) if dias_activos else 0}g"
     )
 
-    total_por_mp: dict[str, float] = defaultdict(float)
-    for m in resp.data:
-        cod = (m.get("cod_mp_sistema") or "").strip()
-        if not cod:
+    print("  DEBUG desglose papa(120) por receta:")
+    consumo_por_receta: dict[str, float] = defaultdict(float)
+    for venta in todas_ventas:
+        cod_r = (venta.get("cod_receta") or "").strip()
+        variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
+        cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
+        if not cod_r or cantidad <= 0:
             continue
-        total_por_mp[cod] += _safe_float(m.get("cantidad_mov"))
 
-    n_dias = len(dias)
-    return {cod: total / n_dias for cod, total in total_por_mp.items()}
+        ingredientes = (
+            lookup_recetas.get((cod_r, variedad))
+            or lookup_recetas.get((cod_r, ""))
+            or []
+        )
+        for ing in ingredientes:
+            if (ing.get("cod_mp_sistema", "") or "").strip() == "120":
+                gramaje = _safe_float(ing.get("cantidad", 0))
+                if gramaje:
+                    consumo_por_receta[cod_r] += cantidad * gramaje
+
+    for cod_r, consumo in sorted(
+        consumo_por_receta.items(), key=lambda x: -x[1]
+    ):
+        print(f"    receta={cod_r} consumo={consumo:.0f}g")
+
+    if dias_activos == 0:
+        return {}
+
+    return {cod_mp: round(total / dias_activos, 4) for cod_mp, total in consumo_total.items()}
 
 
 def calcular_par_levels(dry_run: bool = False):
@@ -92,17 +176,14 @@ def calcular_par_levels(dry_run: bool = False):
       - par_level
       - consumo_diario_calculado
     """
-    fecha_fin = date.today().strftime("%Y-%m-%d")
-    dias_ventana = int(os.getenv("PAR_LEVEL_DIAS_VENTANA", "30") or "30")
-    fecha_inicio = (date.today() - timedelta(days=dias_ventana - 1)).strftime("%Y-%m-%d")
     dias_cobertura = float(os.getenv("PAR_LEVEL_DIAS_COBERTURA", "7") or "7")
 
-    print(f"Ventana consumo: {fecha_inicio} -> {fecha_fin} ({dias_ventana} dias)")
     print(f"Dias cobertura (par): {dias_cobertura}")
 
-    print("[1] Calculando consumos desde Supabase...")
-    consumo_diario = _consumo_promedio_diario_por_mp(fecha_inicio, fecha_fin)
-    print(f"  MPs con consumo en ventana: {len(consumo_diario)}")
+    print("[1] Cargando recetas (BD_RECETAS_DETALLE) y calculando consumos...")
+    recetas = _cargar_recetas_detalle()
+    consumo_diario = calcular_consumo_diario(recetas)
+    print(f"  MPs con consumo diario calculado: {len(consumo_diario)}")
 
     print("[2] Leyendo BD_MP_SISTEMA...")
     sh = _get_sheet()
