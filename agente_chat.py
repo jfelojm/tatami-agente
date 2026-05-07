@@ -177,14 +177,21 @@ def responder(pregunta: str) -> str:
     if not q:
         return ""
 
+    # Palabras que suelen significar "ventas" aunque el usuario no diga 'ventas'
+    es_consulta_ventas = (
+        any(k in q for k in ["venta", "ventas", "cierre", "cerraron", "total"])
+        or bool(re.search(r"\bvend", q))  # vendio/vendió/vendido/vendimos/vendieron...
+        or ("cuanto" in q and any(k in q for k in ["hoy", "ayer", "anteayer"]))
+    )
+
     # 1) Fecha explícita, respondemos ese día.
     fecha = _parse_fecha_en_texto(q)
-    if fecha and any(k in q for k in ["venta", "ventas", "cierre", "cerraron", "total"]):
+    if fecha and es_consulta_ventas:
         return ventas_dia(fecha)
 
     # 2) Lenguaje natural: hoy/ayer/anteayer.
     rel = _parse_fecha_relativa(q)
-    if rel and any(k in q for k in ["venta", "ventas", "cierre", "cerraron", "total", "actualiza", "actualizar"]):
+    if rel and (es_consulta_ventas or any(k in q for k in ["actualiza", "actualizar"])):
         return ventas_dia(rel)
 
     if any(k in q for k in ["semana", "semanal"]) and any(k in q for k in ["venta", "ventas"]):
