@@ -1,4 +1,6 @@
 import os
+import argparse
+from datetime import date, timedelta
 from datetime import datetime
 
 import gspread
@@ -385,11 +387,60 @@ def procesar_descargo(fecha: str | None = None):
     print(f"  MPs actualizados:       {len(stocks_actualizados)}")
 
 
+def resetear_descargo_dia(fecha: str):
+    """
+    Rehace el descargo de un día:
+    - Borra movimientos SALIDA_VENTA originados por Smart Menu en ese rango de fecha.
+    - Resetea flags descargado/fecha_descargo en hist_ventas de ese día.
+    """
+    fecha = (fecha or "").strip()
+    if not fecha:
+        raise ValueError("fecha requerida (YYYY-MM-DD)")
+
+    try:
+        d = datetime.strptime(fecha, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError("fecha invalida, use YYYY-MM-DD")
+
+    desde = f"{fecha}T00:00:00"
+    hasta = f"{(d + timedelta(days=1)).strftime('%Y-%m-%d')}T00:00:00"
+
+    print("\n[0] Rehacer activado: borrando SALIDA_VENTA del día en mov_inventario...")
+    try:
+        res_del = (
+            supabase.table("mov_inventario")
+            .delete()
+            .eq("tipo_mov", "SALIDA_VENTA")
+            .eq("origen_documento", "VENTA_SMART_MENU")
+            .gte("fecha", desde)
+            .lt("fecha", hasta)
+            .execute()
+        )
+        print(f"  -> movimientos borrados (aprox): {len(res_del.data or [])}")
+    except Exception as e:
+        print(f"  WARN no se pudo borrar mov_inventario del día: {e}")
+
+    print("[0b] Reseteando flags descargado en hist_ventas del día...")
+    try:
+        supabase.table("hist_ventas").update(
+            {"descargado": False, "fecha_descargo": None}
+        ).eq("fecha", fecha).execute()
+        print("  -> OK")
+    except Exception as e:
+        print(f"  WARN no se pudo resetear hist_ventas: {e}")
+
+
 if __name__ == "__main__":
-    fecha = (
-        input("Fecha a descargar (YYYY-MM-DD) [Enter = todas pendientes]: ").strip()
-        or None
+    p = argparse.ArgumentParser(description="Descargo inventario desde hist_ventas -> mov_inventario")
+    p.add_argument("--fecha", help="YYYY-MM-DD (opcional; default=todas pendientes)", default=None)
+    p.add_argument(
+        "--rehacer",
+        action="store_true",
+        help="Borra SALIDA_VENTA del día y resetea descargado antes de descargar",
     )
+    a = p.parse_args()
+
+    fecha = (a.fecha or "").strip() or None
 
     print(f"\n{'=' * 50}")
     print(f"MODULO DESCARGO — {fecha or 'TODAS PENDIENTES'}")
@@ -398,6 +449,9 @@ if __name__ == "__main__":
     print("\n[1] Cargando catálogos...")
     cargar_recetas()
     cargar_mp_sistema()
+
+    if a.rehacer and fecha:
+        resetear_descargo_dia(fecha)
 
     print("\n[2] Procesando descargo...")
     procesar_descargo(fecha)

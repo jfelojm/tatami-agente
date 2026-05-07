@@ -10,6 +10,8 @@ from googleapiclient.discovery import build
 from gspread.utils import rowcol_to_a1
 from supabase import create_client
 
+from config_sheets import cfg
+
 load_dotenv(override=True)
 
 SCOPES = [
@@ -276,7 +278,7 @@ def procesar_variacion_precio(item_prov: dict, factura: dict, item_factura: dict
     costo_efectivo = item_factura["costo_efectivo"]
     precio_u_xml = item_factura["precio_unitario_xml"]
 
-    umbral = float(os.getenv("UMBRAL_ALERTA_PRECIO", "0.05"))
+    umbral = float(cfg("umbral_alerta_precio", os.getenv("UMBRAL_ALERTA_PRECIO", "0.05")))
 
     if not precio_ref_str:
         print(f"    Primera factura para {cod_catalogo} → precio_ref={costo_efectivo}")

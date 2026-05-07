@@ -1,4 +1,5 @@
 import os
+import argparse
 import re
 import time
 from datetime import date, datetime, timedelta
@@ -453,6 +454,90 @@ def guardar_ventas(lineas: list) -> dict:
     return {"insertadas": insertadas, "duplicadas": duplicadas, "errores": errores}
 
 
+def borrar_hist_ventas_dia(fecha: str) -> int:
+    """
+    Borra TODAS las filas de hist_ventas para una fecha (YYYY-MM-DD).
+    Útil para "refrescar" el día desde Smart Menu.
+    """
+    try:
+        res = (
+            supabase.table("hist_ventas")
+            .delete()
+            .eq("fecha", fecha)
+            .execute()
+        )
+        # supabase-py no siempre expone count; devolvemos len(data) como aproximación.
+        return len(res.data or [])
+    except Exception as e:
+        print(f"  ERROR borrando hist_ventas fecha={fecha}: {e}")
+        return 0
+
+
+def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
+    fecha = _normalize_fecha_input(fecha)
+    if " " in fecha:
+        fecha = fecha.split(" ", 1)[0]
+
+    print(f"\n{'=' * 50}")
+    print(f"MODULO VENTAS — {fecha}")
+    print(f"{'=' * 50}")
+
+    if reemplazar:
+        print("\n[0] Reemplazo activado: borrando hist_ventas del día...")
+        borradas = borrar_hist_ventas_dia(fecha)
+        print(f"  -> filas borradas (aprox): {borradas}")
+
+    print("\n[1] Descargando cabeceras de ventas (Smart Menu)...")
+    rows = descargar_ventas_grid(fecha)
+    print(f"  -> {len(rows)} filas encontradas (grid XML)")
+
+    if not rows:
+        print("\n  Sin datos para procesar.")
+        print(f"\n{'=' * 50}")
+        return {"insertadas": 0, "duplicadas": 0, "errores": 0, "docs": 0}
+
+    _max_docs_env = os.getenv("SMART_MENU_MAX_DOCS")
+    max_docs = int(_max_docs_env) if _max_docs_env else 999999
+    rows = rows[:max_docs]
+
+    print("\n[2] Descargando detalle por venta y guardando en Supabase...")
+    insertadas = duplicadas = errores = 0
+
+    for idx, row in enumerate(rows, start=1):
+        header = _venta_header_from_row(row)
+        id_doc = header.get("id_documento") or ""
+        if not id_doc:
+            print(f"  WARN fila sin idDocumento (idx={idx})")
+            continue
+
+        detalles = descargar_detalle_factura(id_doc)
+        lineas = construir_lineas_hist_ventas(header, detalles)
+
+        res = guardar_ventas(lineas)
+        insertadas += res["insertadas"]
+        duplicadas += res["duplicadas"]
+        errores += res["errores"]
+
+        print(
+            f"  doc {idx}/{len(rows)} idDocumento={id_doc} items={len(lineas)} "
+            f"(ins={res['insertadas']} dup={res['duplicadas']} err={res['errores']})"
+        )
+
+    print("\nResumen:")
+    print(f"  Documentos:  {len(rows)}")
+    print(f"  Insertadas:  {insertadas}")
+    print(f"  Duplicadas:  {duplicadas}")
+    print(f"  Errores:     {errores}")
+
+    print(f"\n{'=' * 50}")
+    return {
+        "insertadas": insertadas,
+        "duplicadas": duplicadas,
+        "errores": errores,
+        "docs": len(rows),
+    }
+
+
 def _main_un_dia():
     fecha = _normalize_fecha_input(
         input("Fecha a procesar (YYYY-MM-DD) [Enter = hoy]: ").strip()
@@ -593,10 +678,33 @@ def _main_carga_historica(
 if __name__ == "__main__":
     import sys
 
-    if len(sys.argv) > 1 and sys.argv[1] in ("--historico", "-H", "historico"):
-        fi = sys.argv[2] if len(sys.argv) > 2 else None
-        ff = sys.argv[3] if len(sys.argv) > 3 else None
-        _main_carga_historica(fecha_inicio=fi, fecha_fin=ff)
+    # CLI moderno (no-interactivo)
+    if any(a in ("--fecha", "--reemplazar") for a in sys.argv[1:]):
+        p = argparse.ArgumentParser(description="Carga ventas Smart Menu -> hist_ventas")
+        p.add_argument("--fecha", required=False, help="YYYY-MM-DD (default: hoy)")
+        p.add_argument(
+            "--reemplazar",
+            action="store_true",
+            help="Borra hist_ventas del día antes de reimportar",
+        )
+        p.add_argument(
+            "--historico",
+            nargs=2,
+            metavar=("FECHA_INI", "FECHA_FIN"),
+            help="Carga histórica por rango YYYY-MM-DD YYYY-MM-DD",
+        )
+        a = p.parse_args()
+
+        if a.historico:
+            _main_carga_historica(fecha_inicio=a.historico[0], fecha_fin=a.historico[1])
+        else:
+            procesar_un_dia(a.fecha or date.today().strftime("%Y-%m-%d"), reemplazar=a.reemplazar)
     else:
-        _main_un_dia()
+        # Modo legacy (interactivo)
+        if len(sys.argv) > 1 and sys.argv[1] in ("--historico", "-H", "historico"):
+            fi = sys.argv[2] if len(sys.argv) > 2 else None
+            ff = sys.argv[3] if len(sys.argv) > 3 else None
+            _main_carga_historica(fecha_inicio=fi, fecha_fin=ff)
+        else:
+            _main_un_dia()
 

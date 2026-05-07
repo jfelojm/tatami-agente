@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 from collections import defaultdict
 
+from config_sheets import cfg_tokens
+
 load_dotenv(override=True)
 
 # ── Constantes ──────────────────────────────────────────────
@@ -17,8 +19,11 @@ SCOPES = [
 ]
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 
-# Nombres a validar (se compara contra nombre_proveedor upper)
-PROVEEDORES_PILOTO_TOKENS = {"ITALDELI", "GALABDISTRI", "MARAMAR", "PACHECO", "ELJURI"}
+# Nombres a validar (se compara contra razon_social upper)
+PROVEEDORES_PILOTO_TOKENS = cfg_tokens(
+    "proveedores_piloto_tokens",
+    default={"ITALDELI", "GALABDISTRI", "MARAMAR", "PACHECO", "ELJURI"},
+)
 
 
 # ── Conexiones ───────────────────────────────────────────────
@@ -278,8 +283,7 @@ def generar_mensaje_whatsapp(items: list[dict]) -> str:
 
 # ── Generación de pedidos ────────────────────────────────────
 def generar_pedidos(dry_run: bool = False):
-    # hoy = date.today()
-    hoy = date(2026, 5, 5)  # martes - activa ITALDELI, PACHECO, ELJURI
+    hoy = date.today()
     dia_nombre = [
         "Lunes",
         "Martes",

@@ -9,6 +9,8 @@ from google.oauth2.service_account import Credentials
 from gspread.utils import rowcol_to_a1
 from supabase import create_client
 
+from config_sheets import cfg
+
 load_dotenv(override=True)
 
 SCOPES = [
@@ -176,7 +178,9 @@ def calcular_par_levels(dry_run: bool = False):
       - par_level
       - consumo_diario_calculado
     """
-    dias_cobertura = float(os.getenv("PAR_LEVEL_DIAS_COBERTURA", "7") or "7")
+    dias_cobertura = float(
+        cfg("par_level_dias_cobertura", os.getenv("PAR_LEVEL_DIAS_COBERTURA", "7") or "7")
+    )
 
     print(f"Dias cobertura (par): {dias_cobertura}")
 

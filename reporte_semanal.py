@@ -17,6 +17,9 @@ SCOPES = [
 SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 TZ = pytz.timezone("America/Guayaquil")
 
+# Fuente oficial de total de ventas: Smart Menu grid (SUBTOTAL sin IVA por documento)
+from ventas_smartmenu_total import calcular_total_smartmenu
+
 
 def conectar_supabase():
     return create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
@@ -57,7 +60,12 @@ def seccion_ventas(sb, fecha_ini, fecha_fin):
     if not rows:
         return "Sin datos de ventas para el periodo.", 0.0, 0
 
-    total_ventas = sum(_safe_float(r.get("total")) for r in rows)
+    # Total oficial: Smart Menu grid (SUBTOTAL sin IVA por documento), sumado día a día.
+    total_ventas = 0.0
+    d = fecha_ini
+    while d <= fecha_fin:
+        total_ventas += calcular_total_smartmenu(d.isoformat(), sin_iva=True).get("total", 0.0)
+        d += timedelta(days=1)
     total_tickets = len(
         set(r.get("num_documento") for r in rows if (r.get("num_documento") or "").strip())
     )
