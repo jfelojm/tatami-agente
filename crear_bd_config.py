@@ -39,6 +39,18 @@ def main():
         ["par_level_dias_cobertura", "7", "Dias de cobertura para par_level", "int"],
         ["smartmenu_sucursal", "1", "Sucursal Smart Menu (param sucursal)", "int"],
         ["smartmenu_caja", "1", "Caja Smart Menu (param caja)", "int"],
+        [
+            "chat_habilitar_tipos",
+            "ventas_dia,ventas_semana,stock_critico,bodega_producto,traslado_bodegas,ventas_por_plato,rotacion_productos,inventario_ingrediente",
+            "WhatsApp/agente: tipos de consulta activos (coma). Vacío = todos. Ver CHAT_TIPOS en agente_chat.py",
+            "csv",
+        ],
+        [
+            "chat_traslados_ejecutar",
+            "false",
+            "Si true, los traslados por chat actualizan cod_bodega en BD_MP_SISTEMA (Sheets). Por defecto solo simula.",
+            "bool",
+        ],
     ]
 
     ws.update("A1:D1", headers)

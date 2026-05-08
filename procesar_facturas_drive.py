@@ -10,6 +10,7 @@ from googleapiclient.discovery import build
 from gspread.utils import rowcol_to_a1
 from supabase import create_client
 
+from codigo_factura_match import normalizar_cod_item_para_match
 from config_sheets import cfg
 
 load_dotenv(override=True)
@@ -240,24 +241,28 @@ def cargar_lookup_ruc() -> dict[str, str]:
 
 
 def buscar_item_prov(
-    ruc: str, cod_item_xml: str, descripcion: str = ""
+    ruc: str, cod_item_xml: str, descripcion: str = "", razon_social: str = ""
 ) -> dict | None:
     items = cargar_bd_items_prov()
 
     lookup_ruc = cargar_lookup_ruc()
     cod_prov = lookup_ruc.get(ruc.strip(), "")
 
-    cod_item_norm = cod_item_xml.strip().lstrip("0")
+    cod_item_norm = normalizar_cod_item_para_match(cod_item_xml, razon_social, ruc)
 
     for item in items:
         if item.get("cod_proveedor", "").strip() != cod_prov:
             continue
-        item_cod = item.get("cod_item_prov", "").strip().lstrip("0")
+        item_cod = normalizar_cod_item_para_match(
+            item.get("cod_item_prov", ""), razon_social, ruc
+        )
         if item_cod == cod_item_norm:
             return item
 
     for item in items:
-        item_cod = item.get("cod_item_prov", "").strip().lstrip("0")
+        item_cod = normalizar_cod_item_para_match(
+            item.get("cod_item_prov", ""), razon_social, ruc
+        )
         if item_cod == cod_item_norm:
             return item
 
@@ -453,7 +458,10 @@ def procesar_facturas(dry_run: bool = False):
             print(f"    cantidad={item['cantidad']} | costo_efectivo={item['costo_efectivo']}")
 
             item_prov = buscar_item_prov(
-                factura["ruc"], item["cod_item_xml"], item["descripcion_proveedor"]
+                factura["ruc"],
+                item["cod_item_xml"],
+                item["descripcion_proveedor"],
+                factura.get("razon_social", ""),
             )
 
             if not item_prov:

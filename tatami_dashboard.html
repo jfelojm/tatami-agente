@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tatami — Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root {
+    --navy: #0D1B2A;
+    --navy2: #1A2E42;
+    --teal: #0D9488;
+    --teal-l: #CCFBF1;
+    --amber: #D97706;
+    --amber-l: #FEF3C7;
+    --red: #DC2626;
+    --green: #059669;
+    --white: #F8FAFC;
+    --gray: #94A3B8;
+    --gray-l: #1E3A4A;
+    --border: rgba(13,148,136,0.15);
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: var(--navy);
+    color: var(--white);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+  }
+
+  /* HEADER */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1.25rem 2rem;
+    border-bottom: 1px solid var(--border);
+    background: rgba(13,27,42,0.95);
+    position: sticky; top: 0; z-index: 100;
+    backdrop-filter: blur(8px);
+  }
+  .logo {
+    display: flex; align-items: center; gap: 0.75rem;
+  }
+  .logo-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--teal);
+    box-shadow: 0 0 8px var(--teal);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .logo-text { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.05em; }
+  .logo-sub { font-size: 0.75rem; color: var(--gray); font-family: 'DM Mono', monospace; }
+  .header-right { display: flex; align-items: center; gap: 1rem; }
+  .last-update { font-size: 0.72rem; color: var(--gray); font-family: 'DM Mono', monospace; }
+  .btn-refresh {
+    background: var(--gray-l); border: 1px solid var(--border);
+    color: var(--teal); padding: 0.4rem 0.9rem;
+    border-radius: 6px; cursor: pointer; font-size: 0.8rem;
+    font-family: 'DM Sans', sans-serif; font-weight: 500;
+    transition: all 0.2s;
+  }
+  .btn-refresh:hover { background: var(--teal); color: var(--navy); }
+
+  /* MAIN */
+  main { padding: 1.75rem 2rem; max-width: 1400px; margin: 0 auto; }
+
+  /* STAT CARDS ROW */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .stat-card {
+    background: var(--navy2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.2s;
+  }
+  .stat-card:hover { transform: translateY(-2px); }
+  .stat-card::before {
+    content: '';
+    position: absolute; top:0; left:0; right:0; height: 2px;
+  }
+  .stat-card.teal::before { background: var(--teal); }
+  .stat-card.amber::before { background: var(--amber); }
+  .stat-card.red::before { background: var(--red); }
+  .stat-card.green::before { background: var(--green); }
+  .stat-label { font-size: 0.72rem; color: var(--gray); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.5rem; }
+  .stat-value { font-size: 2rem; font-weight: 600; line-height: 1; margin-bottom: 0.25rem; }
+  .stat-value.teal { color: var(--teal); }
+  .stat-value.amber { color: var(--amber); }
+  .stat-value.red { color: var(--red); }
+  .stat-value.green { color: var(--green); }
+  .stat-sub { font-size: 0.75rem; color: var(--gray); }
+
+  /* GRID 2 COL */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+  .grid-3 { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+
+  /* PANEL */
+  .panel {
+    background: var(--navy2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .panel-header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .panel-title { font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: var(--gray); }
+  .panel-badge {
+    font-size: 0.7rem; font-family: 'DM Mono', monospace;
+    background: var(--gray-l); color: var(--teal);
+    padding: 0.2rem 0.5rem; border-radius: 4px;
+  }
+  .panel-body { padding: 1rem 1.5rem; }
+
+  /* TOP PLATOS */
+  .plato-row {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .plato-row:last-child { border-bottom: none; }
+  .plato-rank { font-family: 'DM Mono', monospace; font-size: 0.75rem; color: var(--gray); width: 1.5rem; }
+  .plato-name { flex: 1; font-size: 0.875rem; font-weight: 500; }
+  .plato-bar-wrap { width: 100px; height: 4px; background: rgba(255,255,255,0.08); border-radius: 2px; }
+  .plato-bar { height: 4px; background: var(--teal); border-radius: 2px; transition: width 0.8s ease; }
+  .plato-count { font-family: 'DM Mono', monospace; font-size: 0.8rem; color: var(--teal); width: 2.5rem; text-align: right; }
+
+  /* STOCK CRÍTICO */
+  .stock-row {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.45rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .stock-row:last-child { border-bottom: none; }
+  .stock-name { flex: 1; font-size: 0.82rem; }
+  .stock-val { font-family: 'DM Mono', monospace; font-size: 0.75rem; color: var(--gray); white-space: nowrap; }
+  .deficit-badge {
+    font-size: 0.68rem; font-family: 'DM Mono', monospace;
+    padding: 0.15rem 0.4rem; border-radius: 3px; white-space: nowrap;
+  }
+  .deficit-high { background: rgba(220,38,38,0.15); color: #FCA5A5; }
+  .deficit-med { background: rgba(217,119,6,0.15); color: #FCD34D; }
+
+  /* FACTURAS */
+  .factura-row {
+    display: flex; align-items: center; gap: 0.75rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .factura-row:last-child { border-bottom: none; }
+  .factura-prov { font-size: 0.82rem; font-weight: 500; flex: 1; }
+  .factura-fecha { font-family: 'DM Mono', monospace; font-size: 0.72rem; color: var(--gray); }
+  .factura-monto { font-family: 'DM Mono', monospace; font-size: 0.82rem; color: var(--amber); }
+
+  /* ALERTAS */
+  .alerta-row {
+    display: flex; align-items: flex-start; gap: 0.75rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .alerta-row:last-child { border-bottom: none; }
+  .alerta-dot { width: 6px; height: 6px; border-radius: 50%; margin-top: 0.35rem; flex-shrink: 0; }
+  .alerta-dot.red { background: var(--red); }
+  .alerta-dot.amber { background: var(--amber); }
+  .alerta-info { flex: 1; }
+  .alerta-titulo { font-size: 0.82rem; font-weight: 500; }
+  .alerta-sub { font-size: 0.72rem; color: var(--gray); margin-top: 0.1rem; }
+  .alerta-pct { font-family: 'DM Mono', monospace; font-size: 0.78rem; }
+  .alerta-pct.red { color: #FCA5A5; }
+  .alerta-pct.amber { color: #FCD34D; }
+
+  /* LOADING / EMPTY */
+  .loading { color: var(--gray); font-size: 0.8rem; padding: 1rem 0; text-align: center; font-family: 'DM Mono', monospace; }
+  .empty { color: var(--gray); font-size: 0.8rem; padding: 0.5rem 0; }
+
+  /* FOOD COST */
+  .fc-display { display: flex; align-items: baseline; gap: 0.5rem; margin: 0.75rem 0; }
+  .fc-pct { font-size: 3rem; font-weight: 600; color: var(--teal); line-height: 1; }
+  .fc-label { font-size: 0.75rem; color: var(--gray); }
+  .fc-bar-wrap { height: 8px; background: rgba(255,255,255,0.08); border-radius: 4px; margin: 0.5rem 0; }
+  .fc-bar { height: 8px; border-radius: 4px; transition: width 1s ease; }
+  .fc-range { display: flex; justify-content: space-between; font-size: 0.68rem; color: var(--gray); font-family: 'DM Mono', monospace; }
+
+  @media (max-width: 768px) {
+    main { padding: 1rem; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+    .grid-2, .grid-3 { grid-template-columns: 1fr; }
+    header { padding: 1rem; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    <div>
+      <div class="logo-text">TATAMI BAO BAR</div>
+      <div class="logo-sub">dashboard operativo</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="last-update" id="last-update">cargando...</span>
+    <button class="btn-refresh" onclick="loadAll()">↻ actualizar</button>
+  </div>
+</header>
+
+<main>
+  <!-- STATS ROW -->
+  <div class="stats-row">
+    <div class="stat-card teal">
+      <div class="stat-label">Ventas hoy</div>
+      <div class="stat-value teal" id="ventas-hoy">—</div>
+      <div class="stat-sub" id="tickets-hoy">— tickets</div>
+    </div>
+    <div class="stat-card amber">
+      <div class="stat-label">Ventas esta semana</div>
+      <div class="stat-value amber" id="ventas-semana">—</div>
+      <div class="stat-sub" id="dias-semana">— días activos</div>
+    </div>
+    <div class="stat-card red">
+      <div class="stat-label">Stock bajo par level</div>
+      <div class="stat-value red" id="bajo-par">—</div>
+      <div class="stat-sub">insumos críticos</div>
+    </div>
+    <div class="stat-card green">
+      <div class="stat-label">Alertas de precio</div>
+      <div class="stat-value green" id="alertas-precio">—</div>
+      <div class="stat-sub">esta semana</div>
+    </div>
+  </div>
+
+  <!-- FILA 2 -->
+  <div class="grid-3">
+    <!-- TOP PLATOS -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Top platos — semana</span>
+        <span class="panel-badge" id="semana-label">—</span>
+      </div>
+      <div class="panel-body" id="top-platos">
+        <div class="loading">cargando...</div>
+      </div>
+    </div>
+
+    <!-- FOOD COST -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Food cost</span>
+        <span class="panel-badge">semana actual</span>
+      </div>
+      <div class="panel-body">
+        <div class="fc-display">
+          <span class="fc-pct" id="fc-pct">—</span>
+          <span class="fc-label">costo / ventas</span>
+        </div>
+        <div class="fc-bar-wrap">
+          <div class="fc-bar" id="fc-bar" style="width:0%"></div>
+        </div>
+        <div class="fc-range">
+          <span>0%</span><span>ref: 28–35%</span><span>50%</span>
+        </div>
+        <div style="margin-top:1rem">
+          <div style="font-size:0.72rem;color:var(--gray);margin-bottom:0.25rem">Costo compras semana</div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.9rem;color:var(--amber)" id="fc-compras">—</div>
+        </div>
+        <div style="margin-top:0.75rem">
+          <div style="font-size:0.72rem;color:var(--gray);margin-bottom:0.25rem">Nota</div>
+          <div style="font-size:0.72rem;color:var(--gray)" id="fc-nota">Pendiente carga de costos unitarios</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FILA 3 -->
+  <div class="grid-2">
+    <!-- STOCK CRÍTICO -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Stock crítico</span>
+        <span class="panel-badge" id="stock-badge">—</span>
+      </div>
+      <div class="panel-body" id="stock-critico">
+        <div class="loading">cargando...</div>
+      </div>
+    </div>
+
+    <!-- ALERTAS PRECIO -->
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Alertas de precio</span>
+        <span class="panel-badge">variación &gt; 5%</span>
+      </div>
+      <div class="panel-body" id="alertas-panel">
+        <div class="loading">cargando...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FILA 4 — ÚLTIMAS FACTURAS -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-title">Últimas facturas procesadas</span>
+      <span class="panel-badge" id="facturas-badge">—</span>
+    </div>
+    <div class="panel-body" id="facturas-panel">
+      <div class="loading">cargando...</div>
+    </div>
+  </div>
+</main>
+
+<script>
+const SUPABASE_URL = 'https://yemyjtuhygicstflgtnl.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_L5PJEmhDZYAI0lWGFUYAaw_w-1L78k7';
+
+// Inicializar Supabase — usamos fetch directo para no depender de init complejo
+async function query(table, params = '') {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}`, {
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+    }
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+function fmt$(n) {
+  if (!n && n !== 0) return '—';
+  return '$' + Number(n).toLocaleString('es-EC', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function today() {
+  return new Date().toISOString().split('T')[0];
+}
+
+function mondayThisWeek() {
+  const d = new Date();
+  const day = d.getDay() || 7;
+  d.setDate(d.getDate() - day + 1);
+  return d.toISOString().split('T')[0];
+}
+
+function mondayLastWeek() {
+  const d = new Date();
+  const day = d.getDay() || 7;
+  d.setDate(d.getDate() - day - 6);
+  return d.toISOString().split('T')[0];
+}
+
+function sundayLastWeek() {
+  const d = new Date();
+  const day = d.getDay() || 7;
+  d.setDate(d.getDate() - day);
+  return d.toISOString().split('T')[0];
+}
+
+async function loadVentasHoy() {
+  const hoy = today();
+  const rows = await query('hist_ventas', `fecha=eq.${hoy}&select=total,num_documento,nombre_producto,cantidad_vendida`);
+  const total = rows.reduce((s, r) => s + (r.total || 0), 0);
+  const tickets = new Set(rows.filter(r => r.num_documento).map(r => r.num_documento)).size;
+  document.getElementById('ventas-hoy').textContent = fmt$(total);
+  document.getElementById('tickets-hoy').textContent = `${tickets} ticket${tickets !== 1 ? 's' : ''}`;
+  return rows;
+}
+
+async function loadVentasSemana() {
+  const lunes = mondayThisWeek();
+  const hoy = today();
+  const rows = await query('hist_ventas', `fecha=gte.${lunes}&fecha=lte.${hoy}&select=total,fecha,num_documento,nombre_producto,cantidad_vendida`);
+  const total = rows.reduce((s, r) => s + (r.total || 0), 0);
+  const dias = new Set(rows.map(r => r.fecha)).size;
+  document.getElementById('ventas-semana').textContent = fmt$(total);
+  document.getElementById('dias-semana').textContent = `${dias} día${dias !== 1 ? 's' : ''} activo${dias !== 1 ? 's' : ''}`;
+
+  // Label semana
+  const lunesD = new Date(lunes + 'T12:00:00');
+  const hoyD = new Date(hoy + 'T12:00:00');
+  const fmtD = d => `${d.getDate()}/${d.getMonth()+1}`;
+  document.getElementById('semana-label').textContent = `${fmtD(lunesD)} — ${fmtD(hoyD)}`;
+
+  // Top platos
+  const conteo = {};
+  rows.forEach(r => { conteo[r.nombre_producto] = (conteo[r.nombre_producto] || 0) + (r.cantidad_vendida || 0); });
+  const top = Object.entries(conteo).sort((a,b) => b[1]-a[1]).slice(0, 8);
+  const max = top[0]?.[1] || 1;
+  const html = top.map(([nombre, cant], i) => `
+    <div class="plato-row">
+      <span class="plato-rank">${i+1}</span>
+      <span class="plato-name">${nombre}</span>
+      <div class="plato-bar-wrap"><div class="plato-bar" style="width:${Math.round(cant/max*100)}%"></div></div>
+      <span class="plato-count">${Math.round(cant)}</span>
+    </div>`).join('');
+  document.getElementById('top-platos').innerHTML = html || '<div class="empty">Sin ventas esta semana</div>';
+
+  // Food cost
+  const compras = await query('mov_inventario', `fecha=gte.${lunes}&fecha=lte.${hoy}&tipo_mov=eq.ENTRADA_COMPRA&select=costo_total`);
+  const costoCompras = compras.reduce((s,r) => s + (r.costo_total||0), 0);
+  document.getElementById('fc-compras').textContent = fmt$(costoCompras);
+  if (total > 0 && costoCompras > 0) {
+    const pct = Math.round(costoCompras / total * 100);
+    document.getElementById('fc-pct').textContent = pct + '%';
+    const color = pct < 28 ? '#059669' : pct <= 35 ? '#0D9488' : '#DC2626';
+    document.getElementById('fc-bar').style.width = Math.min(pct * 2, 100) + '%';
+    document.getElementById('fc-bar').style.background = color;
+    document.getElementById('fc-pct').style.color = color;
+    document.getElementById('fc-nota').textContent = pct <= 35 ? 'Dentro del rango objetivo' : 'Por encima del rango — revisar';
+  } else {
+    document.getElementById('fc-pct').textContent = 'N/D';
+    document.getElementById('fc-nota').textContent = 'Pendiente carga de costos unitarios';
+  }
+}
+
+async function loadStockCritico() {
+  // Leemos via API de Supabase — BD_MP_SISTEMA está en Sheets no en Supabase
+  // Usamos mov_inventario para contar MPs con movimientos recientes
+  // Por ahora mostramos mensaje orientativo
+  document.getElementById('stock-critico').innerHTML = `
+    <div class="empty" style="color:var(--amber);font-size:0.8rem">
+      Stock en calibración — inventario físico pendiente.<br>
+      <span style="color:var(--gray);font-size:0.72rem">236 insumos bajo par level hasta cargar inventario inicial.</span>
+    </div>`;
+  document.getElementById('stock-badge').textContent = '236 bajo par';
+  document.getElementById('bajo-par').textContent = '236';
+}
+
+async function loadAlertas() {
+  const lunes = mondayThisWeek();
+  const hoy = today();
+  const rows = await query('hist_precios', `fecha_factura=gte.${lunes}&fecha_factura=lte.${hoy}&select=descripcion_proveedor,precio_anterior,precio_nuevo,variacion_pct,cod_proveedor`);
+  document.getElementById('alertas-precio').textContent = rows.length;
+  if (rows.length === 0) {
+    document.getElementById('alertas-panel').innerHTML = '<div class="empty">Sin variaciones de precio esta semana ✓</div>';
+    return;
+  }
+  const html = rows.map(r => {
+    const pct = Number(r.variacion_pct || 0);
+    const cls = Math.abs(pct) > 10 ? 'red' : 'amber';
+    const signo = pct > 0 ? '▲' : '▼';
+    return `<div class="alerta-row">
+      <div class="alerta-dot ${cls}"></div>
+      <div class="alerta-info">
+        <div class="alerta-titulo">${r.descripcion_proveedor || '—'}</div>
+        <div class="alerta-sub">${r.precio_anterior ? '$'+Number(r.precio_anterior).toFixed(2) : '—'} → $${Number(r.precio_nuevo).toFixed(2)}</div>
+      </div>
+      <span class="alerta-pct ${cls}">${signo} ${Math.abs(pct).toFixed(1)}%</span>
+    </div>`;
+  }).join('');
+  document.getElementById('alertas-panel').innerHTML = html;
+}
+
+async function loadFacturas() {
+  const rows = await query('mov_inventario', `tipo_mov=eq.ENTRADA_COMPRA&select=num_documento,origen_documento,costo_total,fecha,registrado_por&order=fecha.desc&limit=8`);
+  document.getElementById('facturas-badge').textContent = rows.length + ' recientes';
+  if (rows.length === 0) {
+    document.getElementById('facturas-panel').innerHTML = '<div class="empty">Sin facturas procesadas aún</div>';
+    return;
+  }
+  // Agrupar por num_documento
+  const seen = new Set();
+  const unique = rows.filter(r => {
+    const key = r.num_documento || r.fecha;
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+  const html = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:0.5rem">` +
+    unique.map(r => {
+      const fecha = r.fecha ? new Date(r.fecha).toLocaleDateString('es-EC') : '—';
+      const prov = r.origen_documento || r.registrado_por || 'Proveedor';
+      return `<div class="factura-row">
+        <div style="flex:1">
+          <div class="factura-prov">${prov}</div>
+          <div class="factura-fecha">${r.num_documento || '—'}</div>
+        </div>
+        <div>
+          <div class="factura-monto">${fmt$(r.costo_total)}</div>
+          <div class="factura-fecha">${fecha}</div>
+        </div>
+      </div>`;
+    }).join('') + '</div>';
+  document.getElementById('facturas-panel').innerHTML = html;
+}
+
+async function loadAll() {
+  const now = new Date().toLocaleTimeString('es-EC', { hour:'2-digit', minute:'2-digit' });
+  document.getElementById('last-update').textContent = `actualizado ${now}`;
+  try {
+    await Promise.all([
+      loadVentasHoy(),
+      loadVentasSemana(),
+      loadStockCritico(),
+      loadAlertas(),
+      loadFacturas(),
+    ]);
+  } catch(e) {
+    console.error('Error cargando datos:', e);
+  }
+}
+
+// Arrancar
+loadAll();
+// Auto-refresh cada 5 minutos
+setInterval(loadAll, 5 * 60 * 1000);
+</script>
+</body>
+</html>
