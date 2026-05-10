@@ -57,6 +57,12 @@ def main():
     p_rep = sub.add_parser("reporte", help="Reporte semanal (ventas/costos/precios/stock)")
     p_rep.add_argument("--dry-run", action="store_true", help="Solo imprime (default)")
 
+    p_prom = sub.add_parser(
+        "promover-pendientes",
+        help="Altas en BD_ITEMS_PROV desde BD_ITEMS_PENDIENTES (cod_mp ya asignado)",
+    )
+    p_prom.add_argument("--dry-run", action="store_true", help="No escribe Sheets")
+
     a = p.parse_args()
 
     if a.cmd == "ventas":
@@ -82,6 +88,12 @@ def main():
 
     if a.cmd == "reporte":
         _run("reporte_semanal.py", ["--dry-run"] if a.dry_run else [])
+
+    if a.cmd == "promover-pendientes":
+        _run(
+            "promover_pendientes_a_items_prov.py",
+            ["--dry-run"] if a.dry_run else [],
+        )
 
 
 if __name__ == "__main__":

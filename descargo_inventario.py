@@ -1,12 +1,13 @@
-import os
 import argparse
+import os
+import re
 from datetime import date, timedelta
 from datetime import datetime
 
 import gspread
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
-from gspread.utils import rowcol_to_a1
+from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
 
 from matching_productos import (
@@ -23,6 +24,14 @@ SCOPES = [
 ]
 
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+
+
+def _sheet_float(v) -> float:
+    """BD_MP_SISTEMA puede traer números con coma decimal (locale ES)."""
+    try:
+        return float(str(v).replace(",", ".").strip() or 0)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def _iso_fecha_hora_mov(fecha_v: str | None, hora_raw: str | None) -> str:
@@ -45,6 +54,8 @@ def _iso_fecha_hora_mov(fecha_v: str | None, hora_raw: str | None) -> str:
 
 def _limpiar_variedad(variedad: str | None) -> str:
     s = (variedad or "").strip().upper()
+    for ch in ("\u00a0", "\u2007", "\u2009", "\u202f", "\ufeff"):
+        s = s.replace(ch, " ")
     if "OBS:" in s:
         s = s.split("OBS:", 1)[0].strip()
     return " ".join(s.split())
@@ -57,6 +68,17 @@ def _mismo_cod_receta(a: str, b: str) -> bool:
     if a.isdigit() and b.isdigit():
         return int(a) == int(b)
     return False
+
+
+def _var_compact(variedad: str | None) -> str:
+    """Variedad sin espacios (para tolerar '330 ML' vs '330ML')."""
+    return "".join(_limpiar_variedad(variedad).split())
+
+
+def _var_alnum_key(variedad: str | None) -> str:
+    """Letras y dígitos solamente (ignora espacios, paréntesis, puntos en '330 ML.', etc.)."""
+    s = _limpiar_variedad(variedad)
+    return re.sub(r"[^A-ZÁÉÍÓÚÜÑ0-9]", "", s)
 
 
 # ── GOOGLE SHEETS ─────────────────────────────────────────────
@@ -138,6 +160,38 @@ def get_ingredientes(cod_receta: str, variedad: str | None) -> list[dict]:
                 fuzzy.append(r)
         if fuzzy:
             return fuzzy
+        vc = _var_compact(var)
+        if vc:
+            fuzzy_c = [
+                r
+                for r in candidatas
+                if _var_compact(r.get("variedad_smart_menu", "")) == vc
+            ]
+            if fuzzy_c:
+                return fuzzy_c
+        va = _var_alnum_key(var)
+        if va:
+            fuzzy_a = [
+                r
+                for r in candidatas
+                if _var_alnum_key(r.get("variedad_smart_menu", "")) == va
+            ]
+            if fuzzy_a:
+                return fuzzy_a
+    if candidatas and var:
+        distintos = sorted(
+            {
+                _limpiar_variedad(r.get("variedad_smart_menu", ""))
+                for r in candidatas
+                if _limpiar_variedad(r.get("variedad_smart_menu", ""))
+            }
+        )
+        print(
+            f"    INFO: receta={cod} tiene {len(candidatas)} filas en BD_RECETAS_DETALLE "
+            f"pero ninguna coincide con variedad buscada '{var}'. "
+            f"Variedades en hoja (no vacías): {distintos[:20]}"
+            + (" …" if len(distintos) > 20 else "")
+        )
     return []
 
 
@@ -218,7 +272,7 @@ def actualizar_stocks_sheets_batch(cod_mp_a_stock: dict[str, float]):
 
     if not data:
         return
-    ws.batch_update(data)
+    ws.batch_update(data, value_input_option=ValueInputOption.user_entered)
 
 
 _lookup_descargo = None
@@ -284,11 +338,25 @@ def procesar_descargo(fecha: str | None = None):
     stocks_actualizados: set[str] = set()
 
     for venta in ventas:
+        cod_venta = venta.get("cod_venta")
+        fecha_v = venta.get("fecha")
+        estado_doc = (venta.get("estado_documento") or "ACTIVO").strip().upper()
+        if estado_doc == "ANULADO":
+            try:
+                supabase.table("hist_ventas").update(
+                    {
+                        "descargado": True,
+                        "fecha_descargo": datetime.now().isoformat(),
+                    }
+                ).eq("cod_venta", cod_venta).execute()
+            except Exception as e:
+                print(f"  WARN: marcar anulado como descargado {cod_venta}: {e}")
+            print(f"  INFO: venta anulada — sin descargo inventario ({cod_venta})")
+            continue
+
         cod_receta = _resolver_cod_receta(venta)
         variedad = venta.get("variedad_smart_menu")
         cantidad_v = float(venta.get("cantidad_vendida", 1))
-        cod_venta = venta.get("cod_venta")
-        fecha_v = venta.get("fecha")
 
         if not cod_receta:
             print(f"  WARN: venta {cod_venta} sin cod_receta, skip")
@@ -316,7 +384,7 @@ def procesar_descargo(fecha: str | None = None):
             mp_info = mp_sistema.get(cod_mp, {})
             unidad = mp_info.get("unidad_base", "")
             bodega = mp_info.get("cod_bodega", "")
-            costo_u = float(mp_info.get("costo_unitario_ref", 0) or 0)
+            costo_u = _sheet_float(mp_info.get("costo_unitario_ref", 0) or 0)
 
             ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
             cod_mov = (
@@ -360,7 +428,7 @@ def procesar_descargo(fecha: str | None = None):
         if venta_ok:
             for cod_mp, consumo in deltas:
                 if cod_mp in mp_sistema:
-                    stock_actual = float(mp_sistema[cod_mp].get("stock_actual") or 0)
+                    stock_actual = _sheet_float(mp_sistema[cod_mp].get("stock_actual") or 0)
                     mp_sistema[cod_mp]["stock_actual"] = stock_actual - consumo
                     stocks_actualizados.add(cod_mp)
 
@@ -373,7 +441,7 @@ def procesar_descargo(fecha: str | None = None):
 
     print(f"  Actualizando {len(stocks_actualizados)} MPs en Sheets (batch)...")
     batch_stocks = {
-        cod_mp: float(mp_sistema[cod_mp].get("stock_actual") or 0)
+        cod_mp: _sheet_float(mp_sistema[cod_mp].get("stock_actual") or 0)
         for cod_mp in stocks_actualizados
     }
     try:

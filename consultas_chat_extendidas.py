@@ -71,12 +71,19 @@ def _parse_fecha_en_texto_aux(q: str) -> str | None:
 
 def _hist_ventas_en_rango(fecha_ini: str, fecha_fin: str) -> list[dict]:
     sb = _sb()
+    sel = "nombre_producto,cantidad_vendida,total,fecha"
+    try:
+        sb.table("hist_ventas").select("estado_documento").limit(1).execute()
+        sel += ",estado_documento"
+    except Exception:
+        pass
+
     out: list[dict] = []
     offset = 0
     while True:
         r = (
             sb.table("hist_ventas")
-            .select("nombre_producto,cantidad_vendida,total,fecha")
+            .select(sel)
             .gte("fecha", fecha_ini)
             .lte("fecha", fecha_fin)
             .range(offset, offset + 999)
@@ -89,7 +96,11 @@ def _hist_ventas_en_rango(fecha_ini: str, fecha_fin: str) -> list[dict]:
         if len(chunk) < 1000:
             break
         offset += 1000
-    return out
+    return [
+        r
+        for r in out
+        if (r.get("estado_documento") or "ACTIVO").strip().upper() != "ANULADO"
+    ]  # sin columna: estado_documento ausente → se cuenta como ACTIVO
 
 
 def _cargar_mp_todas_filas() -> tuple[list[str], list[list[str]], int]:

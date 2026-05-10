@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import gspread
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
-from gspread.utils import rowcol_to_a1
+from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
 
 from config_sheets import cfg
@@ -70,12 +70,19 @@ def _cargar_recetas_detalle() -> list[dict]:
 def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
     print("  Leyendo hist_ventas desde Supabase...")
 
+    sel = "cod_receta,variedad_smart_menu,cantidad_vendida,fecha"
+    try:
+        supabase.table("hist_ventas").select("estado_documento").limit(1).execute()
+        sel += ",estado_documento"
+    except Exception:
+        pass
+
     todas_ventas: list[dict] = []
     offset = 0
     while True:
         r = (
             supabase.table("hist_ventas")
-            .select("cod_receta,variedad_smart_menu,cantidad_vendida,fecha")
+            .select(sel)
             .eq("estado_match", "PROCESADO")
             .range(offset, offset + 999)
             .execute()
@@ -99,6 +106,8 @@ def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
     fechas_activas: set[str] = set()
 
     for venta in todas_ventas:
+        if (venta.get("estado_documento") or "ACTIVO").strip().upper() == "ANULADO":
+            continue
         cod_r = (venta.get("cod_receta") or "").strip()
         variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
         cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
@@ -138,6 +147,8 @@ def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
     print("  DEBUG desglose papa(120) por receta:")
     consumo_por_receta: dict[str, float] = defaultdict(float)
     for venta in todas_ventas:
+        if (venta.get("estado_documento") or "ACTIVO").strip().upper() == "ANULADO":
+            continue
         cod_r = (venta.get("cod_receta") or "").strip()
         variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
         cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
@@ -229,7 +240,8 @@ def calcular_par_levels(dry_run: bool = False):
         if cd > 0:
             print(f"  {cod}: consumo_diario={round(cd,6)} par={par_level}")
 
-        if not dry_run and par_level > 0:
+        # Escribir siempre consumo y PAR (incl. 0) para no dejar valores viejos en Sheets
+        if not dry_run:
             updates.append(
                 {"range": rowcol_to_a1(row_1based, col_par), "values": [[par_level]]}
             )
@@ -242,7 +254,10 @@ def calcular_par_levels(dry_run: bool = False):
         return
 
     for i in range(0, len(updates), 50):
-        ws.batch_update(updates[i : i + 50])
+        ws.batch_update(
+            updates[i : i + 50],
+            value_input_option=ValueInputOption.user_entered,
+        )
         time.sleep(1)
 
     print("Listo.")

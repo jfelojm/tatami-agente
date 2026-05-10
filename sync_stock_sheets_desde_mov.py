@@ -14,7 +14,7 @@ from collections import defaultdict
 import gspread
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
-from gspread.utils import rowcol_to_a1
+from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
 
 load_dotenv(override=True)
@@ -127,7 +127,7 @@ def run():
     batch_size = 20
     for i in range(0, len(cell_updates), batch_size):
         lote = cell_updates[i : i + batch_size]
-        ws.batch_update(lote)
+        ws.batch_update(lote, value_input_option=ValueInputOption.user_entered)
         print(f"  Lote {i // batch_size + 1}: {len(lote)} celdas actualizadas")
         if i + batch_size < len(cell_updates):
             time.sleep(2)

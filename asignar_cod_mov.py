@@ -5,8 +5,10 @@ Lee MOV_INVENTARIO de Google Sheets, asigna cod_mov a las filas que lo tienen va
 escribe de vuelta en Sheets y sube esas filas a Supabase.
 
 Uso:
-    python asignar_cod_mov.py           # dry-run (solo muestra qué haría)
-    python asignar_cod_mov.py --commit  # ejecuta cambios reales
+    python asignar_cod_mov.py              # dry-run (solo muestra qué haría)
+    python asignar_cod_mov.py --commit     # cod_mov en Sheets + insert Supabase
+    python asignar_cod_mov.py --solo-supabase  # solo inserta en Supabase filas que ya
+                                               # tienen cod_mov y cod_mp (omite duplicados)
 """
 
 import os
@@ -17,6 +19,7 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 from supabase import create_client
+from postgrest.exceptions import APIError
 
 load_dotenv()
 
@@ -29,7 +32,9 @@ HOJA_MOV            = "MOV_INVENTARIO"
 FILA_HEADER         = 3   # fila donde están los nombres de columna (1-indexed)
 FILA_DATOS_INICIO   = 4   # primera fila de datos
 
-DRY_RUN = "--commit" not in sys.argv
+COMMIT = "--commit" in sys.argv
+SOLO_SUPABASE = "--solo-supabase" in sys.argv
+DRY_RUN = not COMMIT and not SOLO_SUPABASE
 
 # ── Columnas esperadas (en orden) ────────────────────────────────────────────
 COLS = [
@@ -101,7 +106,99 @@ def parse_numero(val):
     except ValueError:
         return None
 
+
+def _dt_desde_fila(r: dict) -> datetime:
+    """Fecha de la fila para cod_mov / Supabase; si falla, hoy."""
+    fecha_str = r.get("fecha", "")
+    try:
+        if "/" in fecha_str:
+            return datetime.strptime(fecha_str, "%d/%m/%Y")
+        return datetime.strptime(fecha_str[:10], "%Y-%m-%d")
+    except Exception:
+        return datetime.today()
+
+
+def construir_fila_supabase(r: dict, cod_mov: str) -> tuple[dict | None, str | None]:
+    """
+    Arma el dict para mov_inventario. Devuelve (None, motivo) si cod_mp_sistema
+    es obligatorio en BD y viene vacío.
+    """
+    cod_mp = (r.get("cod_mp_sistema") or "").strip()
+    if not cod_mp:
+        return None, "sin cod_mp_sistema"
+
+    fecha_str = (r.get("fecha") or "").strip()
+    dt = _dt_desde_fila(r)
+    cantidad = parse_numero(r.get("cantidad_mov", ""))
+    costo_u = parse_numero(r.get("costo_unitario", ""))
+    costo_t = parse_numero(r.get("costo_total", ""))
+
+    fila = {
+        "cod_mov": cod_mov,
+        "fecha": dt.strftime("%Y-%m-%dT00:00:00") if fecha_str else None,
+        "tipo_mov": r.get("tipo_mov", ""),
+        "cod_mp_sistema": cod_mp,
+        "nombre_mp": r.get("nombre_mp", "") or None,
+        "cod_bodega_origen": r.get("cod_bodega_origen", "") or None,
+        "cod_bodega_destino": r.get("cod_bodega_destino", "") or None,
+        "cantidad_mov": cantidad,
+        "unidad_base": r.get("unidad_base", "") or None,
+        "costo_unitario": costo_u,
+        "costo_total": costo_t,
+        "origen_documento": r.get("origen_documento", "") or None,
+        "num_documento": r.get("num_documento", "") or None,
+        "registrado_por": r.get("registrado_por", "") or None,
+        "observaciones": r.get("observaciones", "") or None,
+    }
+    return fila, None
+
+
+def main_solo_supabase():
+    print("[SOLO-SUPABASE] Insert desde hoja: filas con cod_mov y cod_mp_sistema\n")
+    print("Conectando a Google Sheets...")
+    wb = conectar_sheets()
+    ws, col_idx, rows = leer_hoja(wb)
+    print(f"  {len(rows)} filas leidas desde {HOJA_MOV}\n")
+
+    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+    ok = dup = err = omit = 0
+    errores_detalle: list[str] = []
+
+    for r in rows:
+        cod = (r.get("cod_mov") or "").strip()
+        if not cod:
+            continue
+        fila, motivo = construir_fila_supabase(r, cod)
+        if fila is None:
+            omit += 1
+            if motivo:
+                errores_detalle.append(f"  Fila {r['_sheet_row']}: {r.get('nombre_mp','?')} ({motivo})")
+            continue
+        try:
+            sb.table("mov_inventario").insert([fila]).execute()
+            ok += 1
+        except APIError as e:
+            msg = str(e)
+            if "23505" in msg or "duplicate" in msg.lower() or "unique" in msg.lower():
+                dup += 1
+            else:
+                err += 1
+                errores_detalle.append(f"  Fila {r['_sheet_row']}: {cod} -> {e}")
+
+    print(f"Insertadas: {ok} | Duplicadas (omitidas): {dup} | Sin cod_mp: {omit} | Errores: {err}")
+    if errores_detalle:
+        print("\nDetalle (primeros 25):")
+        for line in errores_detalle[:25]:
+            print(line)
+        if len(errores_detalle) > 25:
+            print(f"  ... y {len(errores_detalle) - 25} mas")
+
+
 def main():
+    if SOLO_SUPABASE:
+        main_solo_supabase()
+        return
+
     print(f"{'[DRY-RUN]' if DRY_RUN else '[COMMIT]'} asignar_cod_mov.py\n")
     
     # ── Conectar ─────────────────────────────────────────────────────────────
@@ -170,33 +267,15 @@ def main():
             "value": cod
         })
         
-        # Preparar fila para Supabase
-        cantidad = parse_numero(r.get("cantidad_mov", ""))
-        costo_u  = parse_numero(r.get("costo_unitario", ""))
-        costo_t  = parse_numero(r.get("costo_total", ""))
-        
-        fila_sb = {
-            "cod_mov":           cod,
-            "fecha":             dt.strftime("%Y-%m-%dT00:00:00") if fecha_str else None,
-            "tipo_mov":          r.get("tipo_mov", ""),
-            "cod_mp_sistema":    r.get("cod_mp_sistema", "") or None,
-            "nombre_mp":         r.get("nombre_mp", "") or None,
-            "cod_bodega_origen": r.get("cod_bodega_origen", "") or None,
-            "cod_bodega_destino":r.get("cod_bodega_destino", "") or None,
-            "cantidad_mov":      cantidad,
-            "unidad_base":       r.get("unidad_base", "") or None,
-            "costo_unitario":    costo_u,
-            "costo_total":       costo_t,
-            "origen_documento":  r.get("origen_documento", "") or None,
-            "num_documento":     r.get("num_documento", "") or None,
-            "registrado_por":    r.get("registrado_por", "") or None,
-            "observaciones":     r.get("observaciones", "") or None,
-        }
-        # Limpiar Nones en campos de texto vacíos
-        filas_supabase.append(fila_sb)
+        fila_sb, om = construir_fila_supabase(r, cod)
+        if fila_sb is None:
+            print(f"  (Supabase omitida: fila {r['_sheet_row']} {r.get('nombre_mp','?')} — {om})")
+        else:
+            filas_supabase.append(fila_sb)
     
     print(f"\nResumen: {len(actualizaciones_sheets)} cod_mov a escribir en Sheets")
-    print(f"         {len(filas_supabase)} filas a insertar en Supabase\n")
+    print(f"         {len(filas_supabase)} filas a insertar en Supabase")
+    print(f"         ({len(actualizaciones_sheets) - len(filas_supabase)} filas solo Sheets: sin cod_mp_sistema)\n")
     
     if DRY_RUN:
         print("DRY-RUN: no se escribio nada. Usa --commit para ejecutar.")

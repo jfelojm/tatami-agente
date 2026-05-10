@@ -1,3 +1,24 @@
+.env
+.env.*
+!.env.example
+
+# credentials / secrets
+credentials/
+*.pem
+*.key
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# logs / local artifacts
+*.log
+
 credentials/
 *.json
 .env

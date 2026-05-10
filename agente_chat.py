@@ -102,13 +102,20 @@ def ventas_dia(fecha_iso: str) -> str:
     total_ventas = float(total_sm.get("total") or 0.0)
     docs = int(total_sm.get("docs") or 0)
 
-    res = (
-        sb.table("hist_ventas")
-        .select("nombre_producto,cantidad_vendida,num_documento", count="exact")
-        .eq("fecha", fecha_iso)
-        .execute()
-    )
+    sel = "nombre_producto,cantidad_vendida,num_documento"
+    try:
+        sb.table("hist_ventas").select("estado_documento").limit(1).execute()
+        sel += ",estado_documento"
+    except Exception:
+        pass
+
+    res = sb.table("hist_ventas").select(sel, count="exact").eq("fecha", fecha_iso).execute()
     rows = res.data or []
+    rows = [
+        r
+        for r in rows
+        if (r.get("estado_documento") or "ACTIVO").strip().upper() != "ANULADO"
+    ]
     tickets = len(
         set(r.get("num_documento") for r in rows if (r.get("num_documento") or "").strip())
     )

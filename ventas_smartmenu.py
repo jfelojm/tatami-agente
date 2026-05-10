@@ -194,6 +194,15 @@ def _venta_header_from_row(row: list[str]) -> dict:
     fecha_hora = (row[3] if len(row) > 3 else "").strip()
     total_doc = (row[7] if len(row) > 7 else "").strip()
     info_pago = (row[30] if len(row) > 30 else "").strip()
+    # Col 9: vacío o "0" = venta activa; "ANULADO" = documento anulado (mismo endpoint los trae).
+    raw_estado_venta = (row[9] if len(row) > 9 else "").strip().upper()
+    detalle_anulacion = (row[11] if len(row) > 11 else "").strip()
+    if not detalle_anulacion and len(row) > 24:
+        detalle_anulacion = (row[24] or "").strip()
+    if "ANULADO" in raw_estado_venta:
+        estado_documento = "ANULADO"
+    else:
+        estado_documento = "ACTIVO"
 
     fecha_part = fecha_hora[:10] if len(fecha_hora) >= 10 else ""
     hora_part = fecha_hora[11:16] if len(fecha_hora) >= 16 else None
@@ -215,6 +224,8 @@ def _venta_header_from_row(row: list[str]) -> dict:
         "periodo_mes": periodo_mes,
         "total_documento": _safe_float(total_doc),
         "forma_pago": info_pago,
+        "estado_documento": estado_documento,
+        "detalle_anulacion": detalle_anulacion or None,
     }
 
 
@@ -267,6 +278,8 @@ def construir_lineas_hist_ventas(header: dict, detalles: list[dict]) -> list[dic
                 "forma_pago": header.get("forma_pago", ""),
                 "propina": 0.0,
                 "estado_match": match["estado_match"],
+                "estado_documento": header.get("estado_documento") or "ACTIVO",
+                "detalle_anulacion": header.get("detalle_anulacion"),
             }
         )
     return lineas
@@ -274,16 +287,22 @@ def construir_lineas_hist_ventas(header: dict, detalles: list[dict]) -> list[dic
 
 # ── DESCARGA VENTAS DESDE SMART MENU (DHTMLX XML) ─────────────
 def descargar_ventas_grid(fecha: str) -> list[list[str]]:
+    """
+    Grid comprasloadVentas.php: incluye ventas activas y anuladas en la misma respuesta.
+    Columna 9 = 'ANULADO' si el documento fue anulado (no hace falta otro endpoint).
+    """
     fecha_inicial, fecha_final = _smartmenu_dt_range(fecha)
     url = f"{SMART_MENU_URL}/comprasloadVentas.php"
+    suc = os.getenv("SMART_MENU_SUCURSAL", "1")
+    caj = os.getenv("SMART_MENU_CAJA", "1")
     params = {
         "fechaInicial": fecha_inicial,
         "fechaFinal": fecha_final,
         "tipo": "0",
         "campo": "",
         "valor": "",
-        "sucursal": os.getenv("SMART_MENU_SUCURSAL", "1"),
-        "caja": os.getenv("SMART_MENU_CAJA", "1"),
+        "sucursal": suc,
+        "caja": caj,
         "empleado": os.getenv("SMART_MENU_EMPLEADO", "0"),
         "tipopago": os.getenv("SMART_MENU_TIPOPAGO", "-1"),
         "tipodoc": os.getenv("SMART_MENU_TIPODOC", "-1"),
@@ -293,6 +312,10 @@ def descargar_ventas_grid(fecha: str) -> list[list[str]]:
     }
 
     print(f"  Consultando: {url}")
+    print(
+        f"  Params (debe coincidir con VENTAS TOTALES en Smart Menu): "
+        f"sucursal={suc} | caja={caj} | rango={fecha_inicial} .. {fecha_final}"
+    )
     try:
         resp = _http.get(url, params=params, timeout=20)
         resp.raise_for_status()
@@ -454,6 +477,79 @@ def guardar_ventas(lineas: list) -> dict:
     return {"insertadas": insertadas, "duplicadas": duplicadas, "errores": errores}
 
 
+_hist_ventas_tiene_estado_documento: bool | None = None
+
+
+def _hist_ventas_columna_estado_disponible() -> bool:
+    """Cache: existe columna estado_documento en hist_ventas (tras migración SQL)."""
+    global _hist_ventas_tiene_estado_documento
+    if _hist_ventas_tiene_estado_documento is not None:
+        return _hist_ventas_tiene_estado_documento
+    try:
+        supabase.table("hist_ventas").select("estado_documento").limit(1).execute()
+        _hist_ventas_tiene_estado_documento = True
+    except Exception:
+        _hist_ventas_tiene_estado_documento = False
+    return _hist_ventas_tiene_estado_documento
+
+
+def auditar_hist_ventas_dia(fecha: str) -> dict:
+    """
+    Lee hist_ventas en Supabase para la fecha y devuelve totales (cuadre post-carga).
+    Si existe estado_documento: también netos excluyendo líneas ANULADO.
+    """
+    fecha = (fecha or "").strip().split()[0]
+    con_estado = _hist_ventas_columna_estado_disponible()
+    sel = (
+        "subtotal,descuento_valor,total,estado_documento"
+        if con_estado
+        else "subtotal,descuento_valor,total"
+    )
+    out = {
+        "lineas": 0,
+        "sum_subtotal": 0.0,
+        "sum_desc": 0.0,
+        "sum_total": 0.0,
+        "lineas_anuladas": 0,
+        "sum_subtotal_neto": 0.0,
+        "sum_desc_neto": 0.0,
+        "sum_total_neto": 0.0,
+        "columna_estado_ok": con_estado,
+    }
+    offset = 0
+    while True:
+        r = (
+            supabase.table("hist_ventas")
+            .select(sel)
+            .eq("fecha", fecha)
+            .range(offset, offset + 999)
+            .execute()
+        )
+        chunk = r.data or []
+        for row in chunk:
+            es_anul = False
+            if con_estado:
+                es_anul = (row.get("estado_documento") or "").strip().upper() == "ANULADO"
+            out["sum_subtotal"] += float(row.get("subtotal") or 0)
+            out["sum_desc"] += float(row.get("descuento_valor") or 0)
+            out["sum_total"] += float(row.get("total") or 0)
+            if not es_anul:
+                out["sum_subtotal_neto"] += float(row.get("subtotal") or 0)
+                out["sum_desc_neto"] += float(row.get("descuento_valor") or 0)
+                out["sum_total_neto"] += float(row.get("total") or 0)
+            else:
+                out["lineas_anuladas"] += 1
+        out["lineas"] += len(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+    if not con_estado:
+        out["sum_subtotal_neto"] = out["sum_subtotal"]
+        out["sum_desc_neto"] = out["sum_desc"]
+        out["sum_total_neto"] = out["sum_total"]
+    return out
+
+
 def borrar_hist_ventas_dia(fecha: str) -> int:
     """
     Borra TODAS las filas de hist_ventas para una fecha (YYYY-MM-DD).
@@ -489,7 +585,8 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
 
     print("\n[1] Descargando cabeceras de ventas (Smart Menu)...")
     rows = descargar_ventas_grid(fecha)
-    print(f"  -> {len(rows)} filas encontradas (grid XML)")
+    n_grid_total = len(rows)
+    print(f"  -> {n_grid_total} filas encontradas (grid XML)")
 
     if not rows:
         print("\n  Sin datos para procesar.")
@@ -523,11 +620,52 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
             f"(ins={res['insertadas']} dup={res['duplicadas']} err={res['errores']})"
         )
 
+    docs_anulados = sum(
+        1
+        for row in rows
+        if _venta_header_from_row(row).get("estado_documento") == "ANULADO"
+    )
     print("\nResumen:")
     print(f"  Documentos:  {len(rows)}")
+    if docs_anulados:
+        print(f"  Anulados (grid): {docs_anulados} (se cargan en hist_ventas con estado_documento=ANULADO)")
     print(f"  Insertadas:  {insertadas}")
     print(f"  Duplicadas:  {duplicadas}")
     print(f"  Errores:     {errores}")
+
+    audit = auditar_hist_ventas_dia(fecha)
+    print(f"\n[AUDITORIA hist_ventas en Supabase — fecha {fecha}]")
+    print(f"  Lineas en tabla:     {audit['lineas']}")
+    print(f"  Suma subtotal:       {audit['sum_subtotal']:.2f}")
+    print(f"  Suma descuentos:     {audit['sum_desc']:.2f}")
+    print(f"  Suma total (lineas): {audit['sum_total']:.2f}")
+    if audit.get("columna_estado_ok"):
+        print(
+            f"  (Neto operativo) Subtotal: {audit['sum_subtotal_neto']:.2f} | "
+            f"Total: {audit['sum_total_neto']:.2f} | "
+            f"Lineas anuladas: {audit['lineas_anuladas']}"
+        )
+    elif not audit.get("columna_estado_ok"):
+        print(
+            "  INFO: columna estado_documento no existe en hist_ventas; "
+            "ejecuta sql/add_hist_ventas_estado_documento.sql en Supabase para cuadre neto/anulados."
+        )
+    if errores > 0:
+        print(
+            "  WARN: hubo errores al guardar lineas; revisar logs arriba "
+            "y considerar --reemplazar si los datos quedaron incompletos."
+        )
+    if len(rows) > 0 and audit["lineas"] == 0:
+        print(
+            "  WARN: se procesaron documentos del grid pero no hay filas en hist_ventas; "
+            "revisar Supabase, permisos o consistencia de fecha."
+        )
+    max_docs_used = int(os.getenv("SMART_MENU_MAX_DOCS") or 0)
+    if max_docs_used and n_grid_total >= max_docs_used:
+        print(
+            f"  WARN: SMART_MENU_MAX_DOCS={max_docs_used} limita documentos "
+            f"(grid tenia {n_grid_total}); puede haber ventas sin cargar."
+        )
 
     print(f"\n{'=' * 50}")
     return {
@@ -535,6 +673,8 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
         "duplicadas": duplicadas,
         "errores": errores,
         "docs": len(rows),
+        "audit": audit,
+        "n_grid_total": n_grid_total,
     }
 
 
@@ -679,13 +819,24 @@ if __name__ == "__main__":
     import sys
 
     # CLI moderno (no-interactivo)
-    if any(a in ("--fecha", "--reemplazar") for a in sys.argv[1:]):
+    _cli_flags = ("--fecha", "--reemplazar", "--historico", "--strict", "--audit")
+    if any(a in _cli_flags for a in sys.argv[1:]):
         p = argparse.ArgumentParser(description="Carga ventas Smart Menu -> hist_ventas")
         p.add_argument("--fecha", required=False, help="YYYY-MM-DD (default: hoy)")
         p.add_argument(
             "--reemplazar",
             action="store_true",
             help="Borra hist_ventas del día antes de reimportar",
+        )
+        p.add_argument(
+            "--strict",
+            action="store_true",
+            help="Sale con codigo 1 si hay errores de insert o BD vacia con docs en grid",
+        )
+        p.add_argument(
+            "--audit",
+            metavar="FECHA",
+            help="Solo lee hist_ventas en Supabase para YYYY-MM-DD (sin Smart Menu)",
         )
         p.add_argument(
             "--historico",
@@ -695,10 +846,33 @@ if __name__ == "__main__":
         )
         a = p.parse_args()
 
-        if a.historico:
+        if a.audit:
+            f = _normalize_fecha_input(a.audit)
+            ad = auditar_hist_ventas_dia(f)
+            print(f"\n[AUDITORIA hist_ventas — Supabase — fecha {f}]")
+            print(f"  Lineas:          {ad['lineas']}")
+            print(f"  Suma subtotal:   {ad['sum_subtotal']:.2f}")
+            print(f"  Suma descuentos: {ad['sum_desc']:.2f}")
+            print(f"  Suma total:      {ad['sum_total']:.2f}")
+            if ad.get("columna_estado_ok"):
+                print(
+                    f"  Neto (sin anulados): subtotal {ad['sum_subtotal_neto']:.2f} | "
+                    f"total {ad['sum_total_neto']:.2f} | lineas anuladas {ad['lineas_anuladas']}"
+                )
+            print()
+        elif a.historico:
             _main_carga_historica(fecha_inicio=a.historico[0], fecha_fin=a.historico[1])
         else:
-            procesar_un_dia(a.fecha or date.today().strftime("%Y-%m-%d"), reemplazar=a.reemplazar)
+            res = procesar_un_dia(
+                a.fecha or date.today().strftime("%Y-%m-%d"),
+                reemplazar=a.reemplazar,
+            )
+            if a.strict:
+                if res.get("errores", 0) > 0:
+                    sys.exit(1)
+                audit = res.get("audit") or {}
+                if res.get("docs", 0) > 0 and audit.get("lineas", 0) == 0:
+                    sys.exit(1)
     else:
         # Modo legacy (interactivo)
         if len(sys.argv) > 1 and sys.argv[1] in ("--historico", "-H", "historico"):

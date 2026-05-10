@@ -48,15 +48,26 @@ def _safe_float(v) -> float:
 
 # ── Sección 1 — Ventas ───────────────────────────────────────
 def seccion_ventas(sb, fecha_ini, fecha_fin):
+    sel = "num_documento,nombre_producto,cantidad_vendida,total"
+    try:
+        sb.table("hist_ventas").select("estado_documento").limit(1).execute()
+        sel += ",estado_documento"
+    except Exception:
+        pass
+
     res = (
         sb.table("hist_ventas")
-        .select("num_documento,nombre_producto,cantidad_vendida,total")
+        .select(sel)
         .gte("fecha", str(fecha_ini))
         .lte("fecha", str(fecha_fin))
         .execute()
     )
 
-    rows = res.data
+    rows = [
+        r
+        for r in (res.data or [])
+        if (r.get("estado_documento") or "ACTIVO").strip().upper() != "ANULADO"
+    ]
     if not rows:
         return "Sin datos de ventas para el periodo.", 0.0, 0
 
