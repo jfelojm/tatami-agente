@@ -17,6 +17,7 @@ Documento de referencia para alinear el código y la operación (actualizado tra
 | **MOV_INVENTARIO** (hoja) | **Legacy / manual**: captura movimientos en Sheets para subir a Supabase | `asignar_cod_mov.py` escribe `cod_mov` y sincroniza a BD | Operación (solo si usan flujo hoja, no el principal) |
 | **FACTURAS_CONSOLIDADO_ITEMS** / hojas de consolidación | Ayuda matching facturas | `sugerir_matching_facturas`, `consolidar_facturas_xml_local` | Revisión compras |
 | **Reportes / otras** | Consultas | Varios scripts | — |
+| **Plantilla CONTEO** (por ciclo) | Captura del conteo físico en Google Sheets; vinculada a `conteo_ciclo.spreadsheet_id` / `sheet_name` (p. ej. pestaña `CONTEO`) | Apps Script “Iniciar” / “Enviar” (cuando existan) + backend | Bodega responsable (cocina, barra, consignación, bodega Israel, etc.) |
 
 ---
 
@@ -29,6 +30,10 @@ Documento de referencia para alinear el código y la operación (actualizado tra
 | **hist_ventas_docs** | Metadatos/documentación por venta (extensión opcional) | `backfill_hist_ventas_docs.py` |
 | **hist_precios** | Auditoría de cambios de precio por variación vs referencia | `procesar_facturas_drive` (insert al superar umbral) |
 | **facturas_procesadas** | Control de idempotencia por factura (XML Drive) | `procesar_facturas_drive` (upsert) |
+| **conteo_ciclo** | Ciclo de inventario físico (semana ISO × bodega): planificación, estado, enlace al Sheet, `snapshot_at` | Backend / SQL al crear ciclo; Apps Script + API al iniciar conteo |
+| **conteo_linea** | Líneas del ciclo (MP × bodega): snapshot de stock/costo al iniciar; `conteo_fisico` al capturar; deltas generados | Población al snapshot; sync desde Sheet o API |
+| **conteo_envio** | Un registro por cada envío exitoso del Sheet (secuencia 1, 2… correcciones); estado de aprobación hacia contabilización | Backend al validar y persistir envío |
+| **conteo_envio_detalle** | Copia inmutable por línea del envío; aprobación por ítem; `cod_mov_ajuste` enlaza con `mov_inventario` tras contabilizar | Insert junto con `conteo_envio` |
 
 **No hay réplica en Sheets de:** `mov_inventario` completo, `hist_ventas` completo, `hist_precios` (correcto: volumen + integridad en BD).
 
@@ -77,6 +82,8 @@ BD_RECETAS_DETALLE + hist_ventas ──► calcular_par_levels ──► BD_MP_S
 | **Agente (ventas)** | Carga `hist_ventas`; **descargo** genera SALIDA_VENTA y actualiza stock en Sheets para MPs tocados |
 | **Agente (planeación)** | **calcular_par_levels**: `consumo_diario_calculado` y `par_level` desde ventas + recetas + **BD_CONFIG** |
 | **Mantenimiento** | **recalcular_stock_sheets** alinear stock/costo con movimientos; **limpiar_mov_duplicados** si hubo reprocesos |
+| **Bodega (conteo)** | Completa la plantilla Sheet del ciclo; “Enviar” solo con filas válidas (sin vacíos; **0** es cantidad válida) |
+| **Moisés (conteo)** | Revisa envíos (`conteo_envio` / detalle); aprueba o rechaza por línea; tras contabilizar en `mov_inventario`, conviene **recalcular_stock_sheets --produccion** |
 
 ---
 
@@ -89,6 +96,8 @@ BD_RECETAS_DETALLE + hist_ventas ──► calcular_par_levels ──► BD_MP_S
 5. **calcular_par_levels** (sin `--dry-run`) → `consumo_diario_calculado` + `par_level`.
 
 Frecuencia PAR/consumo: al menos **diaria** si las ventas se cargan cada día; si no, tras cada carga de `hist_ventas` procesable.
+
+6. **Inventario físico cíclico (cuando aplique):** tras registrar ajustes en Supabase `mov_inventario` desde el flujo de aprobación del conteo, ejecutar **`recalcular_stock_sheets --produccion`** para alinear **BD_MP_SISTEMA** con el ledger (opción A acordada).
 
 ---
 
@@ -113,10 +122,97 @@ Frecuencia PAR/consumo: al menos **diaria** si las ventas se cargan cada día; s
 | Config | `config_sheets.py` (`cfg()` → BD_CONFIG) |
 | Duplicados mov | `limpiar_mov_duplicados.py` |
 | Hoja MOV legacy | `asignar_cod_mov.py` |
+| Inventario físico cíclico (conteo) | DDL: `sql/inventario_fisico_conteo.sql`. CLI: `conteo_fisico.py` (ciclo, snapshot, envío JSON, aprobar, contabilizar → `mov_inventario`). Apps Script + endpoint HTTP y RLS: **pendiente** si se expone a cliente |
 
 ---
 
-## 9. Ejecución automatizada (`pipeline_diario.py`)
+## 9. Inventario físico cíclico (conteo)
+
+**Objetivo:** conteo por **bodega** (cocina, barra, consignación, bodega Israel, etc.) con captura en **Google Sheets**, snapshot de stock/costo al **iniciar** conteo, **registro de cada envío** con validación estricta (ninguna fila vacía en columnas obligatorias; **0** es válido), comparación y **aprobación** (Moisés), y **contabilización solo vía** `mov_inventario` seguida de **`recalcular_stock_sheets --produccion`**.
+
+| Tabla | Idea clave |
+|-------|------------|
+| `conteo_ciclo` | Un ciclo por periodo (`anio`, `semana_iso`) y `cod_bodega`. Estados: `PLANIFICADO` → `SNAPSHOT_LISTO` → `BORRADOR_CONTEO` → `CONTABILIZADO` \| `ANULADO`. |
+| `conteo_linea` | Una fila por `(ciclo_id, cod_mp_sistema, cod_bodega)`. Snapshots: `stock_sistema_snapshot`, `costo_unitario_ref_snapshot`. `conteo_fisico` NULL en borrador; obligatorio al enviar. Columnas generadas: `delta_calculado`, `valor_delta_estimado`. |
+| `conteo_envio` | Cada “Enviar” exitoso = nueva fila; `secuencia` 1, 2… para correcciones. `estado_aprobacion`: `PENDIENTE_REVISION`, `APROBADO_TOTAL`, `APROBADO_PARCIAL`, `RECHAZADO`, `CONTABILIZADO`. |
+| `conteo_envio_detalle` | Congelado por línea al enviar. `estado_linea` por ítem; `cod_mov_ajuste` apunta al movimiento en `mov_inventario` después de contabilizar. |
+
+### Contrato HTTP (borrador): registrar envío desde Sheets / cliente
+
+Ruta sugerida: `POST /api/conteo/ciclos/{ciclo_id}/envios` (o el prefijo que use el servicio; mismo cuerpo).
+
+**Autenticación:** definir en implementación (p. ej. secreto en header `Authorization: Bearer …` o API key solo en backend/Apps Script). No exponer service role al navegador.
+
+**Precondiciones del ciclo:** el servidor debe rechazar el envío si `conteo_ciclo.estado` no permite captura (recomendado: solo `BORRADOR_CONTEO`; opcionalmente `SNAPSHOT_LISTO` si el primer envío pasa el ciclo a `BORRADOR_CONTEO` en la misma transacción). Rechazar si el ciclo está `CONTABILIZADO` o `ANULADO`.
+
+**Cuerpo JSON (mínimo):**
+
+```json
+{
+  "spreadsheet_id": "1abc…",
+  "sheet_name": "CONTEO",
+  "enviado_por": "Nombre operador",
+  "enviado_por_contacto": "+593… o correo",
+  "observaciones": "opcional",
+  "lines": [
+    {
+      "line_no": 2,
+      "cod_mp_sistema": "MP-001",
+      "cod_bodega": "BOD01",
+      "conteo_fisico": 12.5,
+      "notas": "opcional"
+    }
+  ]
+}
+```
+
+**Reglas de validación estrictas (servidor):**
+
+1. **`lines` no vacío** y debe cubrir **exactamente** el conjunto de filas activas del ciclo en `conteo_linea` (mismo `ciclo_id`): ni faltan MP, ni sobran claves. Emparejamiento recomendado por `(cod_mp_sistema, cod_bodega)`; `line_no` es auditabilidad opcional.
+2. **`conteo_fisico`:** obligatorio en cada línea; debe ser **número** (JSON number). **`0` es válido.** No aceptar `null`, cadena vacía, ni celda “vacía” mapeada a ausencia de campo.
+3. **`cod_mp_sistema` / `cod_bodega`:** obligatorios, no vacíos; deben coincidir con la línea del ciclo.
+4. **Snapshot:** para cada línea, tomar de BD los valores congelados del envío: `stock_sistema_snapshot`, `costo_unitario_ref_snapshot`, `nombre_mp`, `unidad_base` desde `conteo_linea` (no desde el payload del cliente, salvo que en el futuro se defina reconciliación explícita). Calcular `delta_calculado = conteo_fisico - stock_sistema_snapshot` y `valor_delta_estimado` igual que en columna generada (o `null` si no hay costo snapshot).
+5. **Secuencia:** `secuencia = COALESCE(MAX(secuencia), 0) + 1` por `ciclo_id` dentro de la misma transacción que inserta `conteo_envio` + filas en `conteo_envio_detalle`.
+6. **`payload_hash`:** opcional; recomendado SHA-256 del cuerpo canónico (JSON ordenado o string del Sheet) para idempotencia/dedupe.
+7. Tras insert exitoso: actualizar `conteo_linea.conteo_fisico` (y `notas` si vienen) para reflejar el último envío aceptado; opcional: dejar `conteo_ciclo.estado` en `BORRADOR_CONTEO` hasta aprobación.
+
+**Idempotencia:** header opcional `Idempotency-Key: <uuid>`. Si se repite la misma clave y mismo `ciclo_id` dentro de una ventana (p. ej. 24 h), devolver el mismo `envio_id` sin duplicar filas.
+
+**Respuesta 201 Created:**
+
+```json
+{
+  "envio_id": "uuid",
+  "ciclo_id": "uuid",
+  "secuencia": 1,
+  "lineas_persistidas": 42,
+  "payload_hash": "sha256…",
+  "estado_aprobacion": "PENDIENTE_REVISION"
+}
+```
+
+**Errores (cuerpo JSON sugerido `{ "error": { "code": "…", "message": "…", "details": {} } }`):**
+
+| HTTP | `code` | Cuándo |
+|------|--------|--------|
+| 400 | `VALIDATION_LINES_EMPTY` | `lines` ausente o arreglo vacío |
+| 400 | `VALIDATION_MISSING_LINE` | Falta alguna fila de `conteo_linea` del ciclo |
+| 400 | `VALIDATION_UNKNOWN_LINE` | Viene un `(cod_mp_sistema, cod_bodega)` que no pertenece al ciclo |
+| 400 | `VALIDATION_CONTEO_REQUIRED` | `conteo_fisico` ausente, `null` o no numérico |
+| 400 | `VALIDATION_DUPLICATE_KEY` | Duplicado de MP+bodega dentro del payload |
+| 400 | `VALIDATION_SHEET_MISMATCH` | `spreadsheet_id` / `sheet_name` no coinciden con `conteo_ciclo` (si se exige verificación) |
+| 401 | `UNAUTHORIZED` | Token o clave inválida |
+| 404 | `CICLO_NOT_FOUND` | `ciclo_id` inexistente |
+| 409 | `CICLO_WRONG_STATE` | Estado del ciclo no permite envío |
+| 409 | `SNAPSHOT_NOT_READY` | Aún no hay filas en `conteo_linea` o snapshot incompleto |
+
+**Pendiente operativo (si se desea flujo 100 % desde Sheet):** políticas **RLS** con anon key; endpoint HTTP que replique las validaciones de `conteo_fisico.py registrar-envio`; Apps Script en la plantilla. La contabilización en `mov_inventario` y **`recalcular_stock_sheets --produccion`** ya pueden ejecutarse vía CLI (`conteo_fisico.py contabilizar --recalcular-sheets`).
+
+**Endpoint relacionado (borrador):** `POST /api/conteo/ciclos/{ciclo_id}/snapshot` o acción “Iniciar” que lea stock/costo desde la fuente oficial (Sheets/Supabase), inserte/actualice `conteo_linea`, ponga `snapshot_at` y `conteo_ciclo.estado = 'SNAPSHOT_LISTO'` o `'BORRADOR_CONTEO'`.
+
+---
+
+## 10. Ejecución automatizada (`pipeline_diario.py`)
 
 Desde `tatami-agente` (idealmente con el `venv`):
 

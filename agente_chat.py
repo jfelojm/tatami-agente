@@ -25,6 +25,7 @@ CHAT_TIPOS = frozenset(
         "ventas_por_plato",
         "rotacion_productos",
         "inventario_ingrediente",
+        "consumo_ingrediente",
     }
 )
 
@@ -202,7 +203,7 @@ def chat_tipos_habilitados() -> frozenset[str]:
     Variable de entorno CHAT_HABILITAR_TIPOS (coma) tiene prioridad si está definida.
 
     Valores: ventas_dia, ventas_semana, stock_critico, bodega_producto, traslado_bodegas,
-    ventas_por_plato, rotacion_productos, inventario_ingrediente
+    ventas_por_plato, rotacion_productos, inventario_ingrediente, consumo_ingrediente
     Si falta la clave / está vacío / solo valores inválidos → todas habilitadas.
     """
     raw_env = (os.getenv("CHAT_HABILITAR_TIPOS") or "").strip()
@@ -232,6 +233,7 @@ def _mensaje_no_habilitado(tipo_pedido: str, hab: frozenset[str]) -> str:
         "ventas_por_plato": "ventas por plato ($ y cantidad)",
         "rotacion_productos": "rotación baja / productos que casi no vendieron",
         "inventario_ingrediente": "cuánto hay de un ingrediente",
+        "consumo_ingrediente": "consumo teórico de un ingrediente según recetas y ventas",
     }
     activos = sorted(hab)
     if not activos:
@@ -267,6 +269,10 @@ def _lineas_ejemplo_ayuda(hab: frozenset[str]) -> list[str]:
         )
     if "inventario_ingrediente" in hab:
         lineas.append("'cuánto tengo de harina' / 'inventario de aceite'")
+    if "consumo_ingrediente" in hab:
+        lineas.append(
+            "'¿cuánto lomo X se ha consumido esta semana?' / 'consumo teórico de aceite según recetas'"
+        )
     if "bodega_producto" in hab:
         lineas.append("'¿en qué bodega está el aceite?'")
     if "traslado_bodegas" in hab:

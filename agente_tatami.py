@@ -63,6 +63,16 @@ def main():
     )
     p_prom.add_argument("--dry-run", action="store_true", help="No escribe Sheets")
 
+    p_conteo = sub.add_parser(
+        "conteo",
+        help="Inventario físico cíclico (ver conteo_fisico.py -h)",
+    )
+    p_conteo.add_argument(
+        "passthrough",
+        nargs=argparse.REMAINDER,
+        help="Argumentos para conteo_fisico.py (ej. listar-ciclos)",
+    )
+
     a = p.parse_args()
 
     if a.cmd == "ventas":
@@ -94,6 +104,10 @@ def main():
             "promover_pendientes_a_items_prov.py",
             ["--dry-run"] if a.dry_run else [],
         )
+
+    if a.cmd == "conteo":
+        extra = list(a.passthrough or [])
+        _run("conteo_fisico.py", extra if extra else ["-h"])
 
 
 if __name__ == "__main__":

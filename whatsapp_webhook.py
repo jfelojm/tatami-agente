@@ -1,5 +1,5 @@
-# whatsapp_webhook.py v3 — 11 tools, totales via Smart Menu, paginacion correcta, traslados alineados
-import os, json, math, uuid
+# whatsapp_webhook.py v3 — tools Claude + Smart Menu, paginacion, traslados, consumo por recetas
+import os, json, math, uuid, unicodedata
 from datetime import date, timedelta, datetime
 from collections import defaultdict
 from dotenv import load_dotenv
@@ -48,6 +48,44 @@ def _paging(args: dict | None, *, default_limit: int = 50, max_limit: int = 200)
     limit = _clamp(limit, 1, max_limit)
     offset = max(0, offset)
     return limit, offset
+
+
+def _normaliza_busqueda_mp(s: str) -> str:
+    """Minúsculas y sin tildes para comparar nombres de MP."""
+    t = (s or "").lower().strip()
+    return "".join(
+        c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn"
+    )
+
+
+def _variantes_raiz_plural(ff: str) -> set[str]:
+    """Camarones/camaron, langostinos/langostino — heurística simple."""
+    out = {ff}
+    if len(ff) >= 4 and ff.endswith("es"):
+        out.add(ff[:-2])
+    if len(ff) >= 4 and ff.endswith("s") and not ff.endswith("es"):
+        out.add(ff[:-1])
+    return {x for x in out if len(x) >= 3}
+
+
+def _coincide_nombre_mp(nombre_fila: str, filtro: str) -> bool:
+    """True si el nombre en hoja coincide con lo que buscó el usuario (parcial, sin tildes)."""
+    nf = _normaliza_busqueda_mp(nombre_fila)
+    ff = _normaliza_busqueda_mp(filtro)
+    if not ff:
+        return True
+    if not nf:
+        return False
+    for v in _variantes_raiz_plural(ff):
+        if v and v in nf:
+            return True
+    for tok in ff.split():
+        if len(tok) >= 3:
+            for v in _variantes_raiz_plural(tok):
+                if v and v in nf:
+                    return True
+    return False
+
 
 # ── Conexiones ───────────────────────────────────────────────
 def conectar_supabase():
@@ -453,14 +491,19 @@ def tool_inventario_valorizado(args=None):
     """
     Valorización usando BD_MP_SISTEMA: stock_actual * costo_unitario_ref.
     args opcional:
+      - nombre_mp o buscar: texto para filtrar por nombre_mp (parcial, sin importar tildes/plural).
       - cod_bodega: filtra por bodega
       - top: int (top por valor absoluto)
       - incluir_cero: bool (default False)
       - incluir_negativos: bool (default False). Si False, negativos se tratan como 0 para valorización.
       - limit/offset: paginación del listado (si no usas top)
+
+    Si nombre_mp está definido: devuelve solo MPs que coincidan e incluye filas sin costo o con stock 0
+    (para que el usuario vea «existe pero no valoriza»).
     """
     args = args or {}
     cod_bod = str(args.get("cod_bodega", "") or "").strip()
+    buscar = str(args.get("nombre_mp") or args.get("buscar") or "").strip()
     incluir_cero = str(args.get("incluir_cero", "false")).strip().lower() in {"1", "true", "si", "sí", "yes", "y"}
     incluir_negativos = str(args.get("incluir_negativos", "false")).strip().lower() in {"1", "true", "si", "sí", "yes", "y"}
     top = _to_int(args.get("top", 0), 0)
@@ -474,28 +517,50 @@ def tool_inventario_valorizado(args=None):
         bod = str(r.get("cod_bodega", "")).strip()
         if cod_bod and bod != cod_bod:
             continue
+        if buscar and not _coincide_nombre_mp(str(r.get("nombre_mp", "")), buscar):
+            continue
+
         stock = _to_float(r.get("stock_actual", 0), 0.0)
         costo = _to_float(r.get("costo_unitario_ref", 0), 0.0)
+
         if costo <= 0:
             sin_costo += 1
+            if buscar:
+                items.append(
+                    {
+                        "cod_mp_sistema": str(r.get("cod_mp_sistema", "")).strip(),
+                        "nombre_mp": str(r.get("nombre_mp", "")).strip(),
+                        "cod_bodega": bod,
+                        "stock_actual": round(stock, 4),
+                        "stock_valorizado": round(stock, 4),
+                        "unidad": str(r.get("unidad_base", "")).strip(),
+                        "costo_unitario_ref": 0.0,
+                        "valor_usd": 0.0,
+                        "sin_costo_unitario_ref": True,
+                        "nota": "Sin costo_unitario_ref en BD_MP_SISTEMA: no se puede valorizar en USD.",
+                    }
+                )
             continue
-        if (not incluir_cero) and abs(stock) < 1e-9:
+
+        if (not incluir_cero) and abs(stock) < 1e-9 and not buscar:
             continue
+
         stock_val = stock if incluir_negativos else max(stock, 0.0)
         val = stock_val * costo
         total_usd += val
-        items.append(
-            {
-                "cod_mp_sistema": str(r.get("cod_mp_sistema", "")).strip(),
-                "nombre_mp": str(r.get("nombre_mp", "")).strip(),
-                "cod_bodega": bod,
-                "stock_actual": round(stock, 4),
-                "stock_valorizado": round(stock_val, 4),
-                "unidad": str(r.get("unidad_base", "")).strip(),
-                "costo_unitario_ref": round(costo, 6),
-                "valor_usd": round(val, 2),
-            }
-        )
+        row_item = {
+            "cod_mp_sistema": str(r.get("cod_mp_sistema", "")).strip(),
+            "nombre_mp": str(r.get("nombre_mp", "")).strip(),
+            "cod_bodega": bod,
+            "stock_actual": round(stock, 4),
+            "stock_valorizado": round(stock_val, 4),
+            "unidad": str(r.get("unidad_base", "")).strip(),
+            "costo_unitario_ref": round(costo, 6),
+            "valor_usd": round(val, 2),
+        }
+        if buscar and abs(stock) < 1e-9:
+            row_item["stock_cero"] = True
+        items.append(row_item)
 
     items.sort(key=lambda x: abs(x["valor_usd"]), reverse=True)
     total_items = len(items)
@@ -504,7 +569,8 @@ def tool_inventario_valorizado(args=None):
     else:
         items = items[offset : offset + limit]
 
-    return {
+    out = {
+        "filtro_nombre_mp": buscar or None,
         "filtro_bodega": cod_bod or None,
         "incluye_negativos": incluir_negativos,
         "total_items_con_costo": total_items,
@@ -513,6 +579,12 @@ def tool_inventario_valorizado(args=None):
         "items": items,
         "paging": None if top else {"limit": limit, "offset": offset},
     }
+    if buscar and not items:
+        out["mensaje"] = (
+            "Ninguna fila en BD_MP_SISTEMA coincide con ese texto en nombre_mp "
+            "(prueba sin tilde, singular, o parte del nombre como está en la hoja)."
+        )
+    return out
 
 
 # ── TOOL 3D — inventario por bodega (resumen) ────────────────
@@ -734,6 +806,18 @@ def tool_trasladar_mp(args):
     }
 
 # ── TOOL 8 — ventas por plato ───────────────────────────────
+def _limite_ranking(args: dict) -> int | None:
+    """Si args['limite'] es entero > 0, trunca el ranking a ese tamaño; si no, None = sin truncar."""
+    raw = args.get("limite")
+    if raw is None or raw == "":
+        return None
+    try:
+        n = int(raw)
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def tool_ventas_por_plato(args):
     sb = conectar_supabase()
     periodo = args.get("periodo","semana")
@@ -759,13 +843,17 @@ def tool_ventas_por_plato(args):
         conteo[r["nombre_producto"]]["total"] += r["total"] or 0
 
     ranking = sorted(conteo.items(), key=lambda x: x[1]["total"], reverse=True)
+    lim = _limite_ranking(args)
+    if lim is not None:
+        ranking = ranking[:lim]
     return {
         "periodo": label,
-        "total_platos": len(ranking),
+        "total_platos_distintos": len(conteo),
         "ranking": [
-            {"posicion": i+1, "plato": n, "cantidad": round(d["cantidad"]), "total_usd": round(d["total"],2)}
-            for i,(n,d) in enumerate(ranking[:15])
-        ]
+            {"posicion": i + 1, "plato": n, "cantidad": round(d["cantidad"]), "total_usd": round(d["total"], 2)}
+            for i, (n, d) in enumerate(ranking)
+        ],
+        "truncado_a": lim,
     }
 
 # ── TOOL 9 — rotación baja ──────────────────────────────────
@@ -818,7 +906,67 @@ def tool_stock_ingrediente(args):
         return {"encontrado": False, "mensaje": f"No encontre '{args.get('nombre_mp')}' en el sistema."}
     return {"encontrado": True, "resultados": resultados}
 
-# ── TOOL 11 — ventas día específico ─────────────────────────
+
+def tool_consumo_ingrediente_recetas(args):
+    """
+    Consumo teorico de materia prima segun ventas (hist_ventas PROCESADO) y BD_RECETAS_DETALLE.
+    """
+    from consultas_chat_extendidas import (
+        _buscar_mp_por_nombre_o_codigo,
+        calcular_consumo_teorico_mp,
+    )
+
+    nombre_mp = (args.get("nombre_mp") or "").strip()
+    if not nombre_mp:
+        return {"error": "Falta nombre_mp (nombre o cod_mp_sistema en BD_MP_SISTEMA)."}
+
+    fecha_ini = (args.get("fecha_ini") or "").strip()
+    fecha_fin = (args.get("fecha_fin") or "").strip()
+    periodo = (args.get("periodo") or "semana").strip().lower()
+
+    hoy = date.today()
+    if fecha_ini and fecha_fin:
+        fi, ff = fecha_ini, fecha_fin
+    elif periodo in ("hoy", "dia", "dia_actual"):
+        fi = ff = hoy.isoformat()
+    elif periodo in ("mes", "mes_actual"):
+        fi = date(hoy.year, hoy.month, 1).isoformat()
+        ff = hoy.isoformat()
+    else:
+        lunes = hoy - timedelta(days=hoy.weekday())
+        fi, ff = lunes.isoformat(), hoy.isoformat()
+
+    hits = _buscar_mp_por_nombre_o_codigo(nombre_mp)
+    if not hits:
+        return {"error": f"No encontre '{nombre_mp}' en BD_MP_SISTEMA."}
+
+    if len(hits) > 1:
+        return {
+            "ambiguo": True,
+            "opciones": [
+                {
+                    "cod_mp_sistema": (h.get("cod_mp_sistema") or "").strip(),
+                    "nombre_mp": (h.get("nombre_mp") or "").strip(),
+                }
+                for h in hits[:15]
+            ],
+            "mensaje": "Varias MPs coinciden; pide cod_mp exacto o nombre mas especifico.",
+        }
+
+    cod = (hits[0].get("cod_mp_sistema") or "").strip()
+    nom = (hits[0].get("nombre_mp") or "").strip()
+    unidad = (hits[0].get("unidad_base") or "").strip()
+
+    out = calcular_consumo_teorico_mp(fi, ff, cod)
+    if not isinstance(out, dict):
+        return {"error": "Respuesta invalida del calculo."}
+    out["nombre_mp_resuelto"] = nom
+    out["unidad_base"] = unidad
+    out["periodo_solicitado"] = {"fecha_ini": fi, "fecha_fin": ff}
+    return out
+
+
+# ── TOOL — ventas día específico ─────────────────────────
 def tool_ventas_dia(args):
     fecha = args.get("fecha","").strip()
     if not fecha: fecha = date.today().isoformat()
@@ -839,11 +987,19 @@ def tool_ventas_dia(args):
     for r in rows:
         conteo[r["nombre_producto"]]["cantidad"] += r["cantidad_vendida"] or 0
         conteo[r["nombre_producto"]]["total"] += r["total"] or 0
-    top = sorted(conteo.items(), key=lambda x: x[1]["cantidad"], reverse=True)[:10]
+    ranking = sorted(conteo.items(), key=lambda x: x[1]["cantidad"], reverse=True)
+    lim = _limite_ranking(args)
+    if lim is not None:
+        ranking = ranking[:lim]
 
     resultado = {
         "fecha": fecha,
-        "top_platos": [{"plato": n, "cantidad": round(d["cantidad"]), "total_usd": round(d["total"],2)} for n,d in top]
+        "platos": [
+            {"plato": n, "cantidad": round(d["cantidad"]), "total_usd": round(d["total"], 2)}
+            for n, d in ranking
+        ],
+        "total_productos_distintos": len(conteo),
+        "truncado_a": lim,
     }
     if total_sm is not None:
         resultado["total_ventas"] = round(total_sm, 2)
@@ -861,7 +1017,7 @@ TOOLS = [
     {"name": "ventas_semana", "description": "Ventas de la semana actual lunes a hoy: total oficial, promedio diario, top 5 platos.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "stock_critico", "description": "Listado de insumos bajo par level (par_level>0 y stock_actual<par_level) ordenado por deficit_pct. Por defecto devuelve TODO; puedes pasar top para truncar.", "input_schema": {"type": "object", "properties": {"top": {"type": "integer"}}, "required": []}},
     {"name": "stocks_negativos", "description": "Listado de materias primas con stock_actual negativo en BD_MP_SISTEMA. No inventa datos.", "input_schema": {"type": "object", "properties": {"top": {"type": "integer"}}, "required": []}},
-    {"name": "inventario_valorizado", "description": "Valorización de inventario (stock_actual*costo_unitario_ref) desde BD_MP_SISTEMA. Puede filtrar por bodega y devolver top por valor.", "input_schema": {"type": "object", "properties": {"cod_bodega": {"type": "string"}, "top": {"type": "integer"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}, "incluir_cero": {"type": "boolean"}}, "required": []}},
+    {"name": "inventario_valorizado", "description": "Valorización de inventario (stock_actual*costo_unitario_ref) desde BD_MP_SISTEMA. Si el usuario pide el valorizado de un insumo concreto (ej. camarones), pasa nombre_mp o buscar con esa palabra: busca por substring en nombre_mp sin importar tildes y singular/plural simple. Con nombre_mp se listan también MPs sin costo de referencia o con stock 0 para explicar por qué no hay valor.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}, "buscar": {"type": "string"}, "cod_bodega": {"type": "string"}, "top": {"type": "integer"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}, "incluir_cero": {"type": "boolean"}}, "required": []}},
     {"name": "inventario_por_bodega", "description": "Resumen de valor (USD) y stock total por bodega desde BD_MP_SISTEMA.", "input_schema": {"type": "object", "properties": {"incluir_sin_costo": {"type": "boolean"}}, "required": []}},
     {"name": "facturas_parciales", "description": "Facturas con estado PARCIAL en Supabase (facturas_procesadas).", "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
     {"name": "items_pendientes_factura", "description": "Ítems pendientes (BD_ITEMS_PENDIENTES) filtrando por num_factura o ruc_proveedor.", "input_schema": {"type": "object", "properties": {"num_factura": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
@@ -871,10 +1027,11 @@ TOOLS = [
     {"name": "plato_top_semana", "description": "Top 10 platos mas vendidos esta semana por cantidad.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "buscar_bodega", "description": "En que bodega se encuentra un ingrediente o insumo.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "trasladar_mp", "description": "Trasladar un insumo de una bodega a otra. Siempre pedir confirmacion antes de ejecutar.", "input_schema": {"type": "object", "properties": {"cod_mp_sistema": {"type": "string"}, "bodega_origen": {"type": "string"}, "bodega_destino": {"type": "string"}, "cantidad": {"type": "number"}, "confirmado": {"type": "boolean"}}, "required": ["cod_mp_sistema","bodega_origen","bodega_destino","cantidad","confirmado"]}},
-    {"name": "ventas_por_plato", "description": "Cuanto vendimos de cada plato en dolares y cantidad. Periodo: hoy, semana o mes.", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}}, "required": ["periodo"]}},
+    {"name": "ventas_por_plato", "description": "Listado completo de platos/productos vendidos: cantidad y USD por producto. Periodo hoy, semana o mes. Opcional limite (entero) solo si el usuario pide explicitamente top N.", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}, "limite": {"type": "integer"}}, "required": ["periodo"]}},
     {"name": "rotacion_baja", "description": "Productos con nula o baja rotacion en los ultimos N dias.", "input_schema": {"type": "object", "properties": {"dias": {"type": "integer"}, "umbral_unidades": {"type": "number"}}, "required": []}},
     {"name": "stock_ingrediente", "description": "Cuanto tengo en inventario de un ingrediente especifico.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
-    {"name": "ventas_dia", "description": "Ventas de un dia especifico. Si no se indica fecha usa hoy. Fecha en formato YYYY-MM-DD.", "input_schema": {"type": "object", "properties": {"fecha": {"type": "string"}}, "required": []}},
+    {"name": "consumo_ingrediente_recetas", "description": "Consumo teorico de una materia prima (kilos, gramos, etc.) segun ventas de platos y cantidades en BD_RECETAS_DETALLE — misma logica que el descargo de inventario; NO es stock en bodega. Parametro nombre_mp obligatorio. Periodo: usar periodo semana (default lunes a hoy), mes, hoy; o fecha_ini y fecha_fin ISO si el usuario dio fechas.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}, "periodo": {"type": "string", "enum": ["semana", "mes", "hoy"]}, "fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}}, "required": ["nombre_mp"]}},
+    {"name": "ventas_dia", "description": "Ventas de un dia (fecha YYYY-MM-DD; default hoy): total, tickets, y TODOS los productos/platos distintos con cantidad y monto. Opcional limite solo si piden top N.", "input_schema": {"type": "object", "properties": {"fecha": {"type": "string"}, "limite": {"type": "integer"}}, "required": []}},
 ]
 
 TOOL_FNS = {
@@ -894,8 +1051,9 @@ TOOL_FNS = {
     "trasladar_mp":     tool_trasladar_mp,
     "ventas_por_plato": tool_ventas_por_plato,
     "rotacion_baja":    tool_rotacion_baja,
-    "stock_ingrediente":tool_stock_ingrediente,
-    "ventas_dia":       tool_ventas_dia,
+    "stock_ingrediente": tool_stock_ingrediente,
+    "consumo_ingrediente_recetas": tool_consumo_ingrediente_recetas,
+    "ventas_dia":        tool_ventas_dia,
 }
 
 SYSTEM = """Eres el agente de gestion de Tatami Bao Bar, gastrobar asiatico en Cuenca, Ecuador.
@@ -905,9 +1063,11 @@ Usa los datos exactos de las tools. Si no hay datos dilo claramente.
 Si te piden listados de stock negativo, usa la tool stocks_negativos (no adivines nombres ni cantidades).
 Si te piden productos bajo par level, usa la tool stock_critico y devuelve el listado completo salvo que el usuario pida \"top N\".
 Si te piden valorizacion de inventario, usa inventario_valorizado (y si preguntan por bodegas usa inventario_por_bodega).
+Si piden el valorizado de un producto o materia prima por nombre (ej. camarones, aceite), llama inventario_valorizado con nombre_mp o buscar igual al texto que dio el usuario; no listes solo el top global sin filtrar por nombre.
 Si te piden facturas pendientes/parciales, usa facturas_parciales e items_pendientes_factura.
-Si el listado es largo, usa limit/offset o pregunta si lo manda en partes. No truncar sin que el usuario lo pida.
-Tus respuestas deben ser cortas y claras — es WhatsApp, no un informe.
+Si el listado es largo y el usuario pidio TODO el detalle (ej. todos los platos vendidos con cantidades y montos), enumera el listado COMPLETO que devuelve la tool sin acortar a top 10. Si no cabe en un mensaje, continua en mensajes siguientes numerados.
+Para resumenes cortos puede bastar un parrafo; para pedidos explicitos de detalle completo, no resumas.
+Si preguntan cuanto se consumio de un ingrediente o materia prima en un periodo segun las recetas de los platos vendidos (no el stock en bodega), usa la tool consumo_ingrediente_recetas. No digas que el sistema no puede cruzar ventas con recetas: esa tool existe.
 No uses markdown, asteriscos ni negritas. Solo texto plano.
 Para traslados: SIEMPRE pide confirmacion explicitamente antes de ejecutar.
 Cuando la fuente sea hist_ventas aclaralo como aproximado.

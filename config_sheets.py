@@ -46,14 +46,14 @@ def _coerce(value: str, default: Any = None) -> Any:
     return s
 
 
-@lru_cache(maxsize=1)
-def cargar_bd_config() -> dict[str, Any]:
+@lru_cache(maxsize=8)
+def _cargar_hoja_clave_valor(titulo_hoja: str) -> dict[str, Any]:
     """
-    Lee hoja BD_CONFIG (clave/valor/descripcion) y devuelve dict clave->valor (coerce).
+    Lee una pestaña con columnas clave / valor (mismo formato que BD_CONFIG).
     Si la hoja no existe, devuelve {}.
     """
     try:
-        ws = _sheet().worksheet("BD_CONFIG")
+        ws = _sheet().worksheet(titulo_hoja)
     except Exception:
         return {}
 
@@ -80,6 +80,23 @@ def cargar_bd_config() -> dict[str, Any]:
     return out
 
 
+@lru_cache(maxsize=1)
+def cargar_bd_config() -> dict[str, Any]:
+    """
+    Lee hoja BD_CONFIG (clave/valor/descripcion) y devuelve dict clave->valor (coerce).
+    Si la hoja no existe, devuelve {}.
+    """
+    return _cargar_hoja_clave_valor("BD_CONFIG")
+
+
+def cargar_parametros_sheet() -> dict[str, Any]:
+    """
+    Hoja PARAMETROS (mismo esquema clave/valor que BD_CONFIG), si existe.
+    Pensada para parámetros operativos; si no hay pestaña, {}.
+    """
+    return _cargar_hoja_clave_valor("PARAMETROS")
+
+
 def cfg(key: str, default: Any = None) -> Any:
     return cargar_bd_config().get(key, default)
 
@@ -98,3 +115,37 @@ def cfg_tokens(key: str, default: set[str] | None = None) -> set[str]:
     parts = [p.strip().upper() for p in s.replace(";", ",").split(",")]
     return {p for p in parts if p}
 
+
+def delta_abs_tol_conteo(cli_override: float | None = None) -> float:
+    """
+    Umbral |delta| por debajo del cual conteo_fisico no inserta mov_inventario (ruido de redondeo).
+
+    Precedencia: --tol CLI > CONTEO_DELTA_ABS_TOL > PARAMETROS.conteo_delta_abs_tol >
+                 BD_CONFIG.conteo_delta_abs_tol > 0.001
+    """
+    default = 0.001
+    if cli_override is not None:
+        return max(0.0, float(cli_override))
+
+    env = os.getenv("CONTEO_DELTA_ABS_TOL")
+    if env and str(env).strip():
+        try:
+            return max(0.0, float(str(env).replace(",", ".")))
+        except ValueError:
+            pass
+
+    for fuente in (cargar_parametros_sheet(), cargar_bd_config()):
+        v = fuente.get("conteo_delta_abs_tol")
+        if v is None:
+            continue
+        if isinstance(v, (int, float)):
+            return max(0.0, float(v))
+        s = str(v).strip()
+        if not s:
+            continue
+        try:
+            return max(0.0, float(s.replace(",", ".")))
+        except ValueError:
+            continue
+
+    return default
