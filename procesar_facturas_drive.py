@@ -989,14 +989,34 @@ def backfill_items_pendientes_desde_drive(*, dry_run: bool = False) -> dict[str,
     return stats
 
 
+def _lineas_whatsapp_items_sin_match(factura: dict, descripciones_sin_match: list[str]) -> list[str]:
+    """Una línea por ítem: cod_item_xml | descripción (empareja por descripcion_proveedor)."""
+    items = factura.get("items") or []
+    lineas: list[str] = []
+    for desc in descripciones_sin_match:
+        d = (desc or "").strip()
+        if not d:
+            continue
+        cod = "?"
+        texto = d
+        for it in items:
+            if (it.get("descripcion_proveedor") or "").strip() == d:
+                cod = str(it.get("cod_item_xml") or "").strip() or "?"
+                texto = (it.get("descripcion_proveedor") or "").strip() or d
+                break
+        lineas.append(f"- {cod} | {texto}")
+    return lineas
+
+
 # ── FLUJO PRINCIPAL ───────────────────────────────────────────
-def procesar_facturas(dry_run: bool = False, reprocesar: bool = False):
+def procesar_facturas(dry_run: bool = False, reprocesar: bool = False) -> dict:
     if reprocesar and not dry_run:
         print(
             "MODO --reprocesar: se ignoran facturas ya COMPLETA; "
             "puede duplicar mov_inventario, precios y stock en BD."
         )
     xmls = listar_xmls_pendientes()
+    sin_xmls = len(xmls) == 0
     print(f"XMLs en Drive: {len(xmls)}")
 
     cargar_bd_items_prov()
@@ -1005,6 +1025,10 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False):
     xmls_saltados = 0
     total_matcheados = 0
     total_warn = 0
+    completas = 0
+    parciales = 0
+    total_usd = 0.0
+    sin_match: list[str] = []
 
     for archivo in xmls:
         print(f"\n{'-' * 50}")
@@ -1028,117 +1052,54 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False):
 
         xmls_parseados += 1
 
-        print(f"  Proveedor:  {factura['razon_social']} ({factura['ruc']})")
-        print(f"  Factura:    {factura['num_factura']} | {factura['fecha_factura']}")
-        print(f"  Total:      ${factura['total_sin_impuesto']}")
-        print(f"  Items:      {len(factura['items'])}")
+        # Adjuntar metadata Drive para la hoja de pendientes (sin cambiar parsear_xml_sri)
+        factura["_archivo_drive"] = archivo
 
-        items_matcheados = 0
-        items_warn = 0
-        cod_prov_factura = cargar_lookup_ruc().get(factura["ruc"].strip(), "")
-        # Acumuladores para batch_update de BD_MP_SISTEMA al final de la factura
-        deltas_stock: dict[str, float] = {}   # cod_mp -> cantidad a sumar
-        deltas_costo: dict[str, float] = {}   # cod_mp -> nuevo costo_unitario_ref
+        resultado = procesar_factura_dict(factura, dry_run=dry_run, origen="XML")
 
-        for item in factura["items"]:
-            print(f"\n  Item: {item['cod_item_xml']} - {item['descripcion_proveedor']}")
-            print(f"    cantidad={item['cantidad']} | costo_efectivo={item['costo_efectivo']}")
+        lineas_sin_match = resultado.get("sin_match") or []
+        if not dry_run and len(lineas_sin_match) > 0:
+            try:
+                from alertas_tatami import enviar_whatsapp_texto
 
-            item_prov = buscar_item_prov(
-                factura["ruc"],
-                item["cod_item_xml"],
-                item["descripcion_proveedor"],
-                factura.get("razon_social", ""),
-            )
+                mo = (os.getenv("ALERTA_WA_MOISES") or "").strip()
+                if mo:
+                    proveedor = (factura.get("razon_social") or "").strip() or "(sin proveedor)"
+                    num_fac = (factura.get("num_factura") or "").strip() or "(sin número)"
+                    n = len(lineas_sin_match)
+                    bullets = _lineas_whatsapp_items_sin_match(factura, lineas_sin_match)
+                    cuerpo = (
+                        "⚠️ Factura sin mapear completo\n"
+                        f"Proveedor: {proveedor}\n"
+                        f"Factura: {num_fac}\n"
+                        f"Ítems sin match ({n}):\n"
+                        + "\n".join(bullets)
+                        + "\n\nAcción: completar BD_ITEMS_PROV y volver a correr."
+                    )
+                    ok, msg = enviar_whatsapp_texto(mo, cuerpo)
+                    if not ok:
+                        print(f"  WARN: WA sin_match factura {num_fac}: {msg}")
+            except Exception as e:
+                print(f"  WARN: WA sin_match factura: {e}")
 
-            if not item_prov:
-                items_warn += 1
-                print(
-                    f"    WARN: no encontrado en BD_ITEMS_PROV | ruc={factura['ruc']} | cod={item['cod_item_xml']} | desc={item['descripcion_proveedor']}"
-                )
-                registrar_item_pendiente_factura(
-                    factura,
-                    item,
-                    archivo,
-                    cod_prov_factura,
-                    dry_run=dry_run,
-                )
-                continue
+        items_matcheados = int(resultado.get("matcheados") or 0)
+        items_warn = len(resultado.get("warn") or []) + len(resultado.get("sin_match") or [])
 
-            items_matcheados += 1
-            cod_mp = item_prov.get("cod_mp_sistema", "").strip()
-            print(f"    Match: {cod_mp} - {item_prov.get('nombre_mp')}")
-
-            if not cod_mp:
-                print(
-                    "    WARN: fila en BD_ITEMS_PROV sin cod_mp_sistema — "
-                    "no hay mov ni costo en BD_MP_SISTEMA; asigna cod_mp y reprocesa."
-                )
-                items_warn += 1
-                if not dry_run:
-                    procesar_variacion_precio(item_prov, factura, item)
-                    time.sleep(1)
-                continue
-
-            if mov_entrada_factura_linea_ya_registrada(
-                factura["num_factura"], cod_mp, item
-            ):
-                print(
-                    "    INFO: esta línea ya tiene ENTRADA en mov_inventario — "
-                    "no se duplica precio/mov/stock (útil al cerrar facturas PARCIAL)"
-                )
-                continue
-
-            ok_conv, motivo_conv = conversion_compra_definida(item_prov)
-            if not ok_conv:
-                print(
-                    f"    ALERTA INVENTARIO: {motivo_conv} "
-                    "— no se registra entrada ni stock/costo en BD_MP_SISTEMA hasta corregir factor y unidad_compra."
-                )
-                print(
-                    "    INFO: se actualiza igual precio_ref / precio_unitario_xml / fecha en BD_ITEMS_PROV desde la factura."
-                )
-                items_warn += 1
-                if not dry_run:
-                    procesar_variacion_precio(item_prov, factura, item)
-                    time.sleep(1)
-                continue
-
-            if dry_run:
-                u_compra = (item_prov.get("unidad_compra") or "").strip()
-                factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
-                assert factor is not None
-                cantidad_base = item["cantidad"] * factor
-                costo_u = item["costo_efectivo"] / factor if factor else 0
-                print(
-                    f"    [DRY RUN] precio_ref={item_prov.get('precio_ref')} -> nuevo={item['costo_efectivo']}"
-                )
-                print(
-                    f"    [DRY RUN] entrada inventario: {cod_mp} +{round(cantidad_base,4)} {u_compra}"
-                )
-                print(
-                    f"    [DRY RUN] BD_MP_SISTEMA: stock_actual +{round(cantidad_base,4)} | costo_unitario_ref={round(costo_u,6)}"
-                )
-            else:
-                procesar_variacion_precio(item_prov, factura, item)
-                time.sleep(1)
-                ok = registrar_entrada_inventario(item_prov, item, factura)
-                if ok and cod_mp:
-                    # Acumular delta stock (en unidades base)
-                    factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
-                    assert factor is not None
-                    cantidad_base = item["cantidad"] * factor
-                    deltas_stock[cod_mp] = deltas_stock.get(cod_mp, 0.0) + cantidad_base
-                    # Costo: reemplaza con el más reciente de esta factura
-                    costo_u = item["costo_efectivo"] / factor if factor else 0
-                    deltas_costo[cod_mp] = costo_u
-
-        # ── Actualizar BD_MP_SISTEMA (stock + costo) ──────────
-        if not dry_run and (deltas_stock or deltas_costo):
-            _flush_mp_sistema(deltas_stock, deltas_costo)
+        est = (resultado.get("estado") or "PARCIAL").strip().upper()
+        if est == "COMPLETA":
+            completas += 1
+        else:
+            parciales += 1
+        for desc in resultado.get("sin_match") or []:
+            d = (desc or "").strip()
+            if d:
+                sin_match.append(d)
+        total_usd += _safe_float(factura.get("total_sin_impuesto"))
 
         # ── Registrar en facturas_procesadas ──────────────────
-        registrar_factura_procesada(factura, archivo, items_matcheados, items_warn, dry_run)
+        registrar_factura_procesada(
+            factura, archivo, items_matcheados, items_warn, dry_run
+        )
 
         total_matcheados += items_matcheados
         total_warn += items_warn
@@ -1149,6 +1110,16 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False):
         f"Resumen: XMLs procesados={xmls_parseados} | saltados (COMPLETA)={xmls_saltados} | "
         f"items matcheados={total_matcheados} | WARN sin match={total_warn}"
     )
+
+    resumen = {
+        "total_procesadas": xmls_parseados,
+        "completas": completas,
+        "parciales": parciales,
+        "sin_xmls": sin_xmls,
+        "total_usd": round(total_usd, 2),
+        "sin_match": sin_match,
+    }
+    return resumen
 
 
 # ── HELPERS ───────────────────────────────────────────────────
@@ -1174,6 +1145,156 @@ def _fecha_a_iso(fecha: str) -> str:
         except ValueError:
             continue
     return fecha
+
+
+def procesar_factura_dict(
+    factura: dict,
+    dry_run: bool = False,
+    origen: str = "XML",  # "XML" | "VISION"
+) -> dict:
+    """
+    Procesa una factura ya parseada (dict con keys: num_factura,
+    ruc, items, fecha_emision, etc.).
+    Retorna:
+    {
+        "estado": "COMPLETA" | "PARCIAL",
+        "matcheados": int,
+        "sin_match": list[str],   # descripciones sin match
+        "warn": list[str],
+    }
+    """
+    origen = (origen or "XML").strip().upper() or "XML"
+    if origen not in ("XML", "VISION"):
+        origen = "XML"
+
+    print(f"  Proveedor:  {factura.get('razon_social')} ({factura.get('ruc')})")
+    print(f"  Factura:    {factura.get('num_factura')} | {factura.get('fecha_factura')}")
+    print(f"  Total:      ${factura.get('total_sin_impuesto')}")
+    print(f"  Items:      {len(factura.get('items') or [])}")
+
+    sin_match: list[str] = []
+    warns: list[str] = []
+    items_matcheados = 0
+
+    cod_prov_factura = cargar_lookup_ruc().get(str(factura.get("ruc", "")).strip(), "")
+    archivo = factura.get("_archivo_drive") or {"id": "", "name": ""}
+
+    # Acumuladores para batch_update de BD_MP_SISTEMA al final de la factura
+    deltas_stock: dict[str, float] = {}  # cod_mp -> cantidad a sumar
+    deltas_costo: dict[str, float] = {}  # cod_mp -> nuevo costo_unitario_ref
+
+    for item in factura.get("items", []) or []:
+        print(f"\n  Item: {item['cod_item_xml']} - {item['descripcion_proveedor']}")
+        print(f"    cantidad={item['cantidad']} | costo_efectivo={item['costo_efectivo']}")
+
+        item_prov = buscar_item_prov(
+            factura["ruc"],
+            item["cod_item_xml"],
+            item["descripcion_proveedor"],
+            factura.get("razon_social", ""),
+        )
+
+        if not item_prov:
+            msg = (
+                f"no encontrado en BD_ITEMS_PROV | ruc={factura['ruc']} | "
+                f"cod={item['cod_item_xml']} | desc={item['descripcion_proveedor']}"
+            )
+            print(f"    WARN: {msg}")
+            sin_match.append(item["descripcion_proveedor"])
+            registrar_item_pendiente_factura(
+                factura,
+                item,
+                archivo,
+                cod_prov_factura,
+                dry_run=dry_run,
+            )
+            continue
+
+        items_matcheados += 1
+        cod_mp = item_prov.get("cod_mp_sistema", "").strip()
+        print(f"    Match: {cod_mp} - {item_prov.get('nombre_mp')}")
+
+        if not cod_mp:
+            msg = "fila en BD_ITEMS_PROV sin cod_mp_sistema (no hay mov ni costo en BD_MP_SISTEMA)"
+            print(f"    WARN: {msg}")
+            warns.append(msg)
+            if not dry_run:
+                procesar_variacion_precio(item_prov, factura, item)
+                time.sleep(1)
+            continue
+
+        # Para movimientos: agregamos ORIGEN a observaciones sin tocar registrar_entrada_inventario.
+        # registrar_entrada_inventario arma observaciones desde descripcion_proveedor + ITEM_XML.
+        item_mov = dict(item)
+        item_mov["descripcion_proveedor"] = (
+            f"{item.get('descripcion_proveedor', '').strip()} | ORIGEN:{origen}"
+        )
+
+        if mov_entrada_factura_linea_ya_registrada(
+            factura["num_factura"], cod_mp, item_mov
+        ):
+            print(
+                "    INFO: esta línea ya tiene ENTRADA en mov_inventario — "
+                "no se duplica precio/mov/stock (útil al cerrar facturas PARCIAL)"
+            )
+            continue
+
+        ok_conv, motivo_conv = conversion_compra_definida(item_prov)
+        if not ok_conv:
+            msg = (
+                f"ALERTA INVENTARIO: {motivo_conv} — no se registra entrada ni "
+                "stock/costo en BD_MP_SISTEMA hasta corregir factor y unidad_compra."
+            )
+            print(f"    {msg}")
+            print(
+                "    INFO: se actualiza igual precio_ref / precio_unitario_xml / fecha en BD_ITEMS_PROV desde la factura."
+            )
+            warns.append(motivo_conv)
+            if not dry_run:
+                procesar_variacion_precio(item_prov, factura, item)
+                time.sleep(1)
+            continue
+
+        if dry_run:
+            u_compra = (item_prov.get("unidad_compra") or "").strip()
+            factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
+            assert factor is not None
+            cantidad_base = item["cantidad"] * factor
+            costo_u = item["costo_efectivo"] / factor if factor else 0
+            print(
+                f"    [DRY RUN] precio_ref={item_prov.get('precio_ref')} -> nuevo={item['costo_efectivo']}"
+            )
+            print(
+                f"    [DRY RUN] entrada inventario: {cod_mp} +{round(cantidad_base,4)} {u_compra}"
+            )
+            print(
+                f"    [DRY RUN] BD_MP_SISTEMA: stock_actual +{round(cantidad_base,4)} | costo_unitario_ref={round(costo_u,6)}"
+            )
+        else:
+            procesar_variacion_precio(item_prov, factura, item)
+            time.sleep(1)
+            ok = registrar_entrada_inventario(item_prov, item_mov, factura)
+            if ok and cod_mp:
+                # Acumular delta stock (en unidades base)
+                factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
+                assert factor is not None
+                cantidad_base = item["cantidad"] * factor
+                deltas_stock[cod_mp] = deltas_stock.get(cod_mp, 0.0) + cantidad_base
+                # Costo: reemplaza con el más reciente de esta factura
+                costo_u = item["costo_efectivo"] / factor if factor else 0
+                deltas_costo[cod_mp] = costo_u
+
+    # ── Actualizar BD_MP_SISTEMA (stock + costo) ──────────
+    if not dry_run and (deltas_stock or deltas_costo):
+        _flush_mp_sistema(deltas_stock, deltas_costo)
+
+    estado = "COMPLETA" if (not sin_match and not warns) else "PARCIAL"
+    return {
+        "estado": estado,
+        "matcheados": items_matcheados,
+        "sin_match": sin_match,
+        "warn": warns,
+    }
 
 
 if __name__ == "__main__":
