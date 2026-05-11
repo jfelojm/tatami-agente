@@ -33,10 +33,9 @@ def _sheet():
 
 
 def _safe_float(v) -> float:
-    try:
-        return float(str(v).replace(",", "."))
-    except Exception:
-        return 0.0
+    from sheet_numbers import parse_sheet_number
+
+    return parse_sheet_number(v, 0.0)
 
 
 def _rango_semana_actual() -> tuple[str, str]:

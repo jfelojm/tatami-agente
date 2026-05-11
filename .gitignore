@@ -19,6 +19,12 @@ venv/
 # logs / local artifacts
 *.log
 
+# exportes locales de auditoría / valorizado (no versionar)
+valorizado_*.csv
+auditoria_valorizado*.csv
+auditar_facturas_vs_catalogo*.csv
+chequeo_mp*.csv
+
 credentials/
 *.json
 .env

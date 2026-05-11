@@ -171,8 +171,10 @@ def stock_critico() -> str:
         if not cod:
             continue
         try:
-            stock = float(str(r.get("stock_actual", "0") or "0").replace(",", "."))
-            par = float(str(r.get("par_level", "0") or "0").replace(",", "."))
+            from sheet_numbers import parse_sheet_number
+
+            stock = parse_sheet_number(r.get("stock_actual", "0") or "0", 0.0)
+            par = parse_sheet_number(r.get("par_level", "0") or "0", 0.0)
         except ValueError:
             continue
         if par > 0 and stock < par:

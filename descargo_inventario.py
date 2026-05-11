@@ -27,11 +27,10 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 
 def _sheet_float(v) -> float:
-    """BD_MP_SISTEMA puede traer números con coma decimal (locale ES)."""
-    try:
-        return float(str(v).replace(",", ".").strip() or 0)
-    except (ValueError, TypeError):
-        return 0.0
+    """Números desde Sheets (coma/punto/miles según formato de celda)."""
+    from sheet_numbers import parse_sheet_number
+
+    return parse_sheet_number(v, 0.0)
 
 
 def _iso_fecha_hora_mov(fecha_v: str | None, hora_raw: str | None) -> str:

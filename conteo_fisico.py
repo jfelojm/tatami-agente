@@ -47,10 +47,9 @@ def _get_sheet():
 
 
 def _sheet_float(v) -> float:
-    try:
-        return float(str(v).replace(",", ".").strip() or 0)
-    except (ValueError, TypeError):
-        return 0.0
+    from sheet_numbers import parse_sheet_number
+
+    return parse_sheet_number(v, 0.0)
 
 
 def _paginar(sb, tabla: str, select: str, filtros: list[tuple] | None = None) -> list[dict]:

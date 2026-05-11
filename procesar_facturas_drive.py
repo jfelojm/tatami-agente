@@ -539,11 +539,55 @@ def mov_entrada_factura_linea_ya_registrada(
     return False
 
 
+def _parse_factor_positivo(raw) -> float | None:
+    """Factor de compra → base: debe ser explícito y > 0 (no se asume 1 por defecto)."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        v = float(s.replace(",", "."))
+    except ValueError:
+        return None
+    if v <= 0:
+        return None
+    return v
+
+
+def conversion_compra_definida(item_prov: dict) -> tuple[bool, str]:
+    """
+    Exige factor_conversion numérico > 0 y unidad_compra no vacía en BD_ITEMS_PROV.
+    Evita desviaciones de inventario por asumir factor 1 cuando la celda está vacía.
+    """
+    fac = _parse_factor_positivo(item_prov.get("factor_conversion"))
+    if fac is None:
+        return (
+            False,
+            "factor_conversion vacío, no numérico o ≤0 en BD_ITEMS_PROV "
+            "(rellena el factor explícito; no se asume 1)",
+        )
+    u_compra = (item_prov.get("unidad_compra") or "").strip()
+    if not u_compra:
+        return (
+            False,
+            "unidad_compra vacía en BD_ITEMS_PROV "
+            "(indica la unidad en que factura el proveedor: botella, kg, caja, etc.)",
+        )
+    return True, ""
+
+
 def registrar_entrada_inventario(item_prov: dict, item_factura: dict, factura: dict):
+    ok_conv, motivo_conv = conversion_compra_definida(item_prov)
+    if not ok_conv:
+        print(f"    ALERTA INVENTARIO: {motivo_conv}")
+        return False
+
     cod_mp = item_prov.get("cod_mp_sistema", "").strip()
     bodega = item_prov.get("cod_bodega_destino", "").strip()
     unidad = item_prov.get("unidad_base_sistema", "").strip()
-    factor = _safe_float(item_prov.get("factor_conversion", "1") or "1")
+    factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
+    assert factor is not None
     cantidad_base = item_factura["cantidad"] * factor
     costo_u = item_factura["costo_efectivo"] / factor if factor else 0
 
@@ -1025,7 +1069,18 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False):
             cod_mp = item_prov.get("cod_mp_sistema", "").strip()
             print(f"    Match: {cod_mp} - {item_prov.get('nombre_mp')}")
 
-            if cod_mp and mov_entrada_factura_linea_ya_registrada(
+            if not cod_mp:
+                print(
+                    "    WARN: fila en BD_ITEMS_PROV sin cod_mp_sistema — "
+                    "no hay mov ni costo en BD_MP_SISTEMA; asigna cod_mp y reprocesa."
+                )
+                items_warn += 1
+                if not dry_run:
+                    procesar_variacion_precio(item_prov, factura, item)
+                    time.sleep(1)
+                continue
+
+            if mov_entrada_factura_linea_ya_registrada(
                 factura["num_factura"], cod_mp, item
             ):
                 print(
@@ -1034,11 +1089,25 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False):
                 )
                 continue
 
-            if dry_run:
-                u_compra = item_prov.get("unidad_compra") or item_prov.get(
-                    "unidad_base_sistema", ""
+            ok_conv, motivo_conv = conversion_compra_definida(item_prov)
+            if not ok_conv:
+                print(
+                    f"    ALERTA INVENTARIO: {motivo_conv} "
+                    "— no se registra entrada ni stock/costo en BD_MP_SISTEMA hasta corregir factor y unidad_compra."
                 )
-                factor = _safe_float(item_prov.get("factor_conversion", "1") or "1")
+                print(
+                    "    INFO: se actualiza igual precio_ref / precio_unitario_xml / fecha en BD_ITEMS_PROV desde la factura."
+                )
+                items_warn += 1
+                if not dry_run:
+                    procesar_variacion_precio(item_prov, factura, item)
+                    time.sleep(1)
+                continue
+
+            if dry_run:
+                u_compra = (item_prov.get("unidad_compra") or "").strip()
+                factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
+                assert factor is not None
                 cantidad_base = item["cantidad"] * factor
                 costo_u = item["costo_efectivo"] / factor if factor else 0
                 print(
@@ -1056,7 +1125,8 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False):
                 ok = registrar_entrada_inventario(item_prov, item, factura)
                 if ok and cod_mp:
                     # Acumular delta stock (en unidades base)
-                    factor = _safe_float(item_prov.get("factor_conversion", "1") or "1")
+                    factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
+                    assert factor is not None
                     cantidad_base = item["cantidad"] * factor
                     deltas_stock[cod_mp] = deltas_stock.get(cod_mp, 0.0) + cantidad_base
                     # Costo: reemplaza con el más reciente de esta factura

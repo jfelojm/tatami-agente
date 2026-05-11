@@ -23,10 +23,9 @@ app = FastAPI()
 
 # ── Helpers ──────────────────────────────────────────────────
 def _to_float(v, default=0.0):
-    try:
-        return float(str(v or "").replace(",", ".").strip() or default)
-    except Exception:
-        return default
+    from sheet_numbers import parse_sheet_number
+
+    return parse_sheet_number(v, default)
 
 
 def _to_int(v, default=0):
@@ -428,8 +427,8 @@ def tool_stock_critico(args=None):
     criticos = []
     for r in rows:
         try:
-            stock = float(str(r.get("stock_actual","0") or "0").replace(",","."))
-            par = float(str(r.get("par_level","0") or "0").replace(",","."))
+            stock = _to_float(r.get("stock_actual", "0") or "0")
+            par = _to_float(r.get("par_level", "0") or "0")
         except: continue
         if par > 0 and stock < par:
             cod = str(r.get("cod_mp_sistema","")).strip()
@@ -468,7 +467,7 @@ def tool_stocks_negativos(args=None):
         nombre = str(r.get("nombre_mp", cod)).strip()
         unidad = str(r.get("unidad_base", "")).strip()
         try:
-            stock = float(str(r.get("stock_actual", "0") or "0").replace(",", "."))
+            stock = _to_float(r.get("stock_actual", "0") or "0")
         except Exception:
             continue
         if stock < 0:
@@ -661,8 +660,8 @@ def tool_pedidos_hoy():
     for r in rows_mp:
         cod = str(r.get("cod_mp_sistema","")).strip()
         try:
-            stock = float(str(r.get("stock_actual","0") or "0").replace(",","."))
-            par = float(str(r.get("par_level","0") or "0").replace(",","."))
+            stock = _to_float(r.get("stock_actual", "0") or "0")
+            par = _to_float(r.get("par_level", "0") or "0")
         except: continue
         if par > 0 and stock < par:
             mps_bajo[cod] = {"nombre_mp": str(r.get("nombre_mp",cod)).strip(), "stock": stock, "par": par}
@@ -683,7 +682,7 @@ def tool_pedidos_hoy():
         key = (cod_mp, cod_prov)
         if key in seen: continue
         seen.add(key)
-        try: cant_uc = float(str(r.get("cantidad_unidad_compra","1") or "1").replace(",","."))
+        try: cant_uc = _to_float(r.get("cantidad_unidad_compra", "1") or "1", 1.0)
         except: cant_uc = 1
         falta = mps_bajo[cod_mp]["par"] - mps_bajo[cod_mp]["stock"]
         unidades = math.ceil(falta/cant_uc) if cant_uc > 0 else math.ceil(falta)
@@ -726,7 +725,7 @@ def tool_buscar_bodega(args):
     resultados = []
     for r in rows:
         if nombre in str(r.get("nombre_mp","")).strip().lower():
-            try: stock = float(str(r.get("stock_actual","0") or "0").replace(",","."))
+            try: stock = _to_float(r.get("stock_actual", "0") or "0")
             except: stock = 0
             resultados.append({
                 "cod_mp": str(r.get("cod_mp_sistema","")).strip(),
@@ -890,8 +889,8 @@ def tool_stock_ingrediente(args):
     for r in rows:
         if nombre in str(r.get("nombre_mp","")).strip().lower():
             try:
-                stock = float(str(r.get("stock_actual","0") or "0").replace(",","."))
-                par = float(str(r.get("par_level","0") or "0").replace(",","."))
+                stock = _to_float(r.get("stock_actual", "0") or "0")
+                par = _to_float(r.get("par_level", "0") or "0")
             except: stock = par = 0
             resultados.append({
                 "cod_mp": str(r.get("cod_mp_sistema","")).strip(),
