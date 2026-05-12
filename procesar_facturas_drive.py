@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from datetime import datetime
 from xml.etree import ElementTree as ET
@@ -41,22 +42,63 @@ def _get_sheet():
     return gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
 
 
+def _es_xml_factura_en_drive(f: dict) -> bool:
+    """True si el archivo parece XML de factura (nombre .xml y MIME compatible con Drive)."""
+    name = (f.get("name") or "").strip()
+    mime = (f.get("mimeType") or "").strip().lower()
+    if not name.lower().endswith(".xml"):
+        return False
+    if mime == "application/vnd.google-apps.folder":
+        return False
+    if mime.startswith("application/vnd.google-apps."):
+        return False
+    # Subidas desde Windows / correo suelen venir como octeto binario aunque sea XML válido.
+    if mime in ("application/octet-stream", "binary/octet-stream"):
+        return True
+    if "xml" in mime or mime.startswith("text/"):
+        return True
+    return False
+
+
 def listar_xmls_pendientes() -> list[dict]:
-    """Lista XMLs en la carpeta de Drive."""
+    """
+    Lista archivos .xml en la carpeta de Drive configurada en GOOGLE_DRIVE_FACTURAS_FOLDER_ID.
+
+    Incluye MIME application/octet-stream (Drive no siempre marca text/xml / application/xml).
+    Pagina resultados (carpetas con muchas facturas).
+    """
     service = _get_drive_service()
-    folder_id = os.getenv("GOOGLE_DRIVE_FACTURAS_FOLDER_ID")
+    folder_id = (os.getenv("GOOGLE_DRIVE_FACTURAS_FOLDER_ID") or "").strip()
     if not folder_id:
         return []
-    q = (
-        f"'{folder_id}' in parents and trashed=false "
-        "and (mimeType='text/xml' or mimeType='application/xml')"
-    )
-    results = (
-        service.files()
-        .list(q=q, fields="files(id,name,createdTime)")
-        .execute()
-    )
-    return results.get("files", [])
+
+    q_folder = f"'{folder_id}' in parents and trashed=false"
+    out: list[dict] = []
+    page_token: str | None = None
+    while True:
+        kwargs: dict = {
+            "q": q_folder,
+            "fields": "nextPageToken, files(id,name,createdTime,mimeType)",
+            "pageSize": 1000,
+        }
+        if page_token:
+            kwargs["pageToken"] = page_token
+        results = service.files().list(**kwargs).execute()
+        for f in results.get("files", []):
+            if not _es_xml_factura_en_drive(f):
+                continue
+            out.append(
+                {
+                    "id": f["id"],
+                    "name": f["name"],
+                    "createdTime": f.get("createdTime"),
+                    "mimeType": f.get("mimeType"),
+                }
+            )
+        page_token = results.get("nextPageToken")
+        if not page_token:
+            break
+    return out
 
 
 def descargar_xml(file_id: str) -> str:
@@ -155,11 +197,76 @@ def parsear_xml_sri(texto: str) -> dict | None:
 # ── MATCHING FACTURA → BD_ITEMS_PROV ─────────────────────────
 _items_prov_cache = None
 
+# Una sola lectura de BD_ITEMS_PROV por recarga de cache: evita 429 en _actualizar_precio_ref.
+_bd_items_prov_price_layout: dict | None = None
+
+
+def _invalidar_cache_layout_precio_items_prov() -> None:
+    global _bd_items_prov_price_layout
+    _bd_items_prov_price_layout = None
+
+
+def _fila_precio_bd_items_prov_1based(item_prov: dict, layout: dict) -> int | None:
+    """
+    Fila 1-based en BD_ITEMS_PROV para escribir precios.
+    Prioriza cod_item_prov (mapa de hoja); si está vacío o no está en el mapa,
+    usa _fila_sheet_1based asignada al cargar la fila (match por desc/mp sigue siendo válido).
+    """
+    cod = (item_prov.get("cod_item_prov") or "").strip()
+    row = layout["cod_to_row_1based"].get(cod)
+    if row is not None:
+        return row
+    fila = item_prov.get("_fila_sheet_1based")
+    if fila is not None:
+        try:
+            return int(fila)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _set_bd_items_prov_price_layout_from_values(
+    ws: gspread.Worksheet, values: list[list[str]], header_row_idx: int
+) -> None:
+    """Construye mapa cod_item_prov -> fila 1-based para actualizar precios sin releer la hoja."""
+    global _bd_items_prov_price_layout
+    headers = [h.strip() for h in values[header_row_idx]]
+    try:
+        idx_cod = headers.index("cod_item_prov")
+        col_precio_ref = headers.index("precio_ref") + 1
+        col_precio_xml = headers.index("precio_unitario_xml") + 1
+        col_fecha = headers.index("fecha_precio_ref") + 1
+    except ValueError as e:
+        print(f"  WARN columna precio en BD_ITEMS_PROV: {e}")
+        _bd_items_prov_price_layout = None
+        return
+
+    cod_to_row: dict[str, int] = {}
+    for i, row in enumerate(values[header_row_idx + 1 :]):
+        if len(row) <= idx_cod:
+            continue
+        cod = row[idx_cod].strip()
+        if not cod:
+            continue
+        row_1based = header_row_idx + i + 2
+        cod_to_row.setdefault(cod, row_1based)
+
+    _bd_items_prov_price_layout = {
+        "ws": ws,
+        "idx_cod": idx_cod,
+        "col_precio_ref": col_precio_ref,
+        "col_precio_xml": col_precio_xml,
+        "col_fecha": col_fecha,
+        "cod_to_row_1based": cod_to_row,
+    }
+
 
 def cargar_bd_items_prov() -> list[dict]:
     global _items_prov_cache
     if _items_prov_cache is not None:
         return _items_prov_cache
+
+    _invalidar_cache_layout_precio_items_prov()
 
     print("  Cargando BD_ITEMS_PROV...")
     sh = _get_sheet()
@@ -179,7 +286,7 @@ def cargar_bd_items_prov() -> list[dict]:
     headers = values[header_row_idx]
     rows = values[header_row_idx + 2 :]  # salta fila [FK][LINK][PK]...
     result = []
-    for row in rows:
+    for i, row in enumerate(rows):
         if not any(c.strip() for c in row):
             continue
         r = {
@@ -187,7 +294,11 @@ def cargar_bd_items_prov() -> list[dict]:
             for j in range(min(len(headers), len(row)))
         }
         if r.get("activo", "SI") != "NO":
+            # Fila real en Sheets (1-based) para escribir precios aunque cod_item_prov esté vacío
+            r["_fila_sheet_1based"] = header_row_idx + 3 + i
             result.append(r)
+
+    _set_bd_items_prov_price_layout_from_values(ws, values, header_row_idx)
 
     print(f"  {len(result)} items cargados en BD_ITEMS_PROV")
     _items_prov_cache = result
@@ -195,6 +306,44 @@ def cargar_bd_items_prov() -> list[dict]:
 
 
 _prov_ruc_cache = None  # ruc -> cod_proveedor
+
+
+def _ruc_claves_equivalentes(ruc: str) -> list[str]:
+    """Claves para matchear BD_PROV: texto tal cual y RUC solo dígitos (13 en Ecuador)."""
+    raw = (ruc or "").strip().strip("'")
+    out: list[str] = []
+    if raw:
+        out.append(raw)
+    digits = re.sub(r"\D+", "", raw)
+    if not digits:
+        return out
+    if len(digits) <= 13:
+        d13 = digits.zfill(13) if len(digits) < 13 else digits
+        if len(d13) == 13 and d13 not in out:
+            out.append(d13)
+    return out
+
+
+def _cod_proveedor_desde_ruc(lookup: dict[str, str], ruc: str) -> str:
+    for key in _ruc_claves_equivalentes(ruc):
+        v = lookup.get(key)
+        if v:
+            return v
+    return ""
+
+
+def _descripcion_coincide_catalogo_factura(desc_catalogo: str, desc_factura: str) -> bool:
+    """
+    True si la descripción en BD_ITEMS_PROV y la del XML describen el mismo ítem.
+    Permite que el XML sea más largo o más corto (p. ej. tras copiar mal cod_item_prov).
+    """
+    a = (desc_catalogo or "").strip().upper()
+    b = (desc_factura or "").strip().upper()
+    if not a or not b:
+        return False
+    if min(len(a), len(b)) >= 6:
+        return a in b or b in a
+    return a == b or a in b or b in a
 
 
 def cargar_lookup_ruc() -> dict[str, str]:
@@ -236,7 +385,9 @@ def cargar_lookup_ruc() -> dict[str, str]:
         cod = row[col_cod].strip()
         ruc = row[col_ruc].strip()
         if cod and ruc:
-            lookup[ruc] = cod
+            for key in _ruc_claves_equivalentes(ruc):
+                if key:
+                    lookup[key] = cod
 
     print(f"  {len(lookup)} proveedores en lookup RUC")
     _prov_ruc_cache = lookup
@@ -249,25 +400,65 @@ def buscar_item_prov(
     items = cargar_bd_items_prov()
 
     lookup_ruc = cargar_lookup_ruc()
-    cod_prov = lookup_ruc.get(ruc.strip(), "")
+    ruc_s = (ruc or "").strip().strip("'")
+    cod_prov = _cod_proveedor_desde_ruc(lookup_ruc, ruc_s)
 
-    cod_item_norm = normalizar_cod_item_para_match(cod_item_xml, razon_social, ruc)
+    cod_item_norm = normalizar_cod_item_para_match(cod_item_xml, razon_social, ruc_s)
 
     for item in items:
         if item.get("cod_proveedor", "").strip() != cod_prov:
             continue
         item_cod = normalizar_cod_item_para_match(
-            item.get("cod_item_prov", ""), razon_social, ruc
+            item.get("cod_item_prov", ""), razon_social, ruc_s
         )
         if item_cod == cod_item_norm:
             return item
 
+    # Misma factura / proveedor: descripción única (útil si cod_item_prov quedó como cod_mp u otro valor)
+    if descripcion and cod_prov:
+        hits: list[dict] = []
+        for item in items:
+            if item.get("cod_proveedor", "").strip() != cod_prov:
+                continue
+            if _descripcion_coincide_catalogo_factura(
+                item.get("descripcion_proveedor", ""), descripcion
+            ):
+                hits.append(item)
+        if len(hits) == 1:
+            return hits[0]
+
+    # cod_mp_sistema en catálogo coincide con código de línea del XML (confusión de columnas)
+    if cod_prov and cod_item_norm:
+        mp_hits = [
+            it
+            for it in items
+            if it.get("cod_proveedor", "").strip() == cod_prov
+            and normalizar_cod_item_para_match(
+                it.get("cod_mp_sistema", ""), razon_social, ruc_s
+            )
+            == cod_item_norm
+        ]
+        if len(mp_hits) == 1:
+            return mp_hits[0]
+
     for item in items:
         item_cod = normalizar_cod_item_para_match(
-            item.get("cod_item_prov", ""), razon_social, ruc
+            item.get("cod_item_prov", ""), razon_social, ruc_s
         )
         if item_cod == cod_item_norm:
             return item
+
+    if cod_item_norm:
+        mp_any = [
+            it
+            for it in items
+            if normalizar_cod_item_para_match(
+                it.get("cod_mp_sistema", ""), razon_social, ruc_s
+            )
+            == cod_item_norm
+        ]
+        if len(mp_any) == 1:
+            return mp_any[0]
 
     if descripcion:
         desc_upper = descripcion.upper()
@@ -280,40 +471,73 @@ def buscar_item_prov(
 
 
 # ── LÓGICA DE PRECIOS ─────────────────────────────────────────
-def procesar_variacion_precio(item_prov: dict, factura: dict, item_factura: dict):
-    cod_catalogo = item_prov.get("cod_item_prov", "")
-    precio_ref_str = item_prov.get("precio_ref", "").strip()
+def procesar_variacion_precio(
+    item_prov: dict,
+    factura: dict,
+    item_factura: dict,
+    *,
+    solo_escritura_precio: bool = False,
+):
+    """
+    Sincroniza BD_ITEMS_PROV con cada línea de factura matcheada: precio_ref,
+    precio_unitario_xml y fecha_precio_ref siempre reflejan la última factura procesada.
+
+    hist_precios + mensaje de ALERTA solo si la variación vs precio_ref anterior supera umbral.
+
+    solo_escritura_precio: solo escribe las 3 columnas en Sheets (p. ej. backfill masivo
+    desde XML viejos sin llenar hist_precios ni comparar umbral).
+    """
     costo_efectivo = item_factura["costo_efectivo"]
     precio_u_xml = item_factura["precio_unitario_xml"]
+    fecha_f = factura["fecha_factura"]
+
+    if solo_escritura_precio:
+        _actualizar_precio_ref(item_prov, costo_efectivo, precio_u_xml, fecha_f)
+        _patch_item_prov_cache_tras_precio(item_prov, costo_efectivo, precio_u_xml, fecha_f)
+        return
+
+    cod_catalogo = item_prov.get("cod_item_prov", "")
+    precio_ref_str = item_prov.get("precio_ref", "").strip()
 
     umbral = float(cfg("umbral_alerta_precio", os.getenv("UMBRAL_ALERTA_PRECIO", "0.05")))
 
-    if not precio_ref_str:
-        print(f"    Primera factura para {cod_catalogo} → precio_ref={costo_efectivo}")
-        _actualizar_precio_ref(
-            item_prov, costo_efectivo, precio_u_xml, factura["fecha_factura"]
-        )
-        return
+    precio_ref: float | None = None
+    if precio_ref_str:
+        try:
+            precio_ref = float(precio_ref_str.replace(",", "."))
+        except ValueError:
+            precio_ref = None
 
-    precio_ref = float(precio_ref_str.replace(",", "."))
-    if precio_ref == 0:
-        _actualizar_precio_ref(
-            item_prov, costo_efectivo, precio_u_xml, factura["fecha_factura"]
-        )
-        return
-
-    variacion = (costo_efectivo - precio_ref) / precio_ref
-
-    if abs(variacion) > umbral:
+    if precio_ref is None:
         print(
-            f"    ALERTA precio {cod_catalogo}: {precio_ref} → {costo_efectivo} ({variacion:.1%})"
+            f"    Primera factura o sin precio_ref previo para {cod_catalogo} -> {costo_efectivo}"
         )
-        _escribir_hist_precios(item_prov, factura, item_factura, precio_ref, variacion)
-        _actualizar_precio_ref(
-            item_prov, costo_efectivo, precio_u_xml, factura["fecha_factura"]
-        )
+    elif precio_ref == 0:
+        print(f"    precio_ref=0 para {cod_catalogo} -> {costo_efectivo}")
     else:
-        print(f"    Precio estable {cod_catalogo}: variación={variacion:.2%}")
+        variacion = (costo_efectivo - precio_ref) / precio_ref
+        if abs(variacion) > umbral:
+            print(
+                f"    ALERTA precio {cod_catalogo}: {precio_ref} -> {costo_efectivo} ({variacion:.1%})"
+            )
+            _escribir_hist_precios(item_prov, factura, item_factura, precio_ref, variacion)
+        else:
+            print(f"    Precio estable {cod_catalogo}: variación={variacion:.2%}")
+
+    _actualizar_precio_ref(item_prov, costo_efectivo, precio_u_xml, fecha_f)
+    _patch_item_prov_cache_tras_precio(item_prov, costo_efectivo, precio_u_xml, fecha_f)
+
+
+def _patch_item_prov_cache_tras_precio(
+    item_prov: dict,
+    costo_efectivo: float,
+    precio_u_xml: float,
+    fecha_f: str,
+) -> None:
+    """Evita comparaciones de variación obsoletas en la misma corrida (cache BD_ITEMS_PROV)."""
+    item_prov["precio_ref"] = str(costo_efectivo)
+    item_prov["precio_unitario_xml"] = str(precio_u_xml)
+    item_prov["fecha_precio_ref"] = fecha_f
 
 
 def _escribir_hist_precios(item_prov, factura, item_factura, precio_ref, variacion):
@@ -335,37 +559,70 @@ def _escribir_hist_precios(item_prov, factura, item_factura, precio_ref, variaci
     }
     try:
         supabase.table("hist_precios").insert(registro).execute()
-        print(f"    → hist_precios registrado: {cod_hist}")
+        print(f"    -> hist_precios registrado: {cod_hist}")
     except Exception as e:
         print(f"    ERROR insertando hist_precios: {e}")
 
 
 def _actualizar_precio_ref(item_prov, costo_efectivo, precio_u_xml, fecha):
-    sh = _get_sheet()
-    ws = sh.worksheet("BD_ITEMS_PROV")
-    values = ws.get_all_values()
+    global _bd_items_prov_price_layout, _items_prov_cache
+    layout = _bd_items_prov_price_layout
+    if layout is None:
+        _items_prov_cache = None
+        cargar_bd_items_prov()
+        layout = _bd_items_prov_price_layout
 
-    header_row_idx = next(
-        (i for i, r in enumerate(values) if any(c.strip() == "cod_item_prov" for c in r)),
-        None,
-    )
-    if header_row_idx is None:
+    if layout is None:
+        print("  WARN no se pudo resolver layout BD_ITEMS_PROV para precios")
         return
 
-    headers = values[header_row_idx]
-    try:
-        idx_cod = headers.index("cod_item_prov")
-        col_precio_ref = headers.index("precio_ref") + 1
-        col_precio_xml = headers.index("precio_unitario_xml") + 1
-        col_fecha = headers.index("fecha_precio_ref") + 1
-    except ValueError as e:
-        print(f"  WARN columna no encontrada en BD_ITEMS_PROV: {e}")
-        return
-
+    ws = layout["ws"]
     cod_buscar = item_prov.get("cod_item_prov", "").strip()
-    for i, row in enumerate(values[header_row_idx + 1 :]):
-        if len(row) > idx_cod and row[idx_cod].strip() == cod_buscar:
-            row_1based = header_row_idx + i + 2
+    row_1based = _fila_precio_bd_items_prov_1based(item_prov, layout)
+
+    if row_1based is None:
+        _invalidar_cache_layout_precio_items_prov()
+        _items_prov_cache = None
+        cargar_bd_items_prov()
+        layout = _bd_items_prov_price_layout
+        if layout is None:
+            print(f"  WARN no layout BD_ITEMS_PROV tras recarga (cod_item_prov={cod_buscar!r})")
+            return
+        row_1based = _fila_precio_bd_items_prov_1based(item_prov, layout)
+        if row_1based is None:
+            print(
+                f"  WARN fila precio BD_ITEMS_PROV no resuelta "
+                f"(cod_item_prov={cod_buscar!r}, sin _fila_sheet_1based)"
+            )
+            return
+
+    col_precio_ref = layout["col_precio_ref"]
+    col_precio_xml = layout["col_precio_xml"]
+    col_fecha = layout["col_fecha"]
+
+    try:
+        ws.batch_update(
+            [
+                {
+                    "range": rowcol_to_a1(row_1based, col_precio_ref),
+                    "values": [[costo_efectivo]],
+                },
+                {
+                    "range": rowcol_to_a1(row_1based, col_precio_xml),
+                    "values": [[precio_u_xml]],
+                },
+                {
+                    "range": rowcol_to_a1(row_1based, col_fecha),
+                    "values": [[fecha]],
+                },
+            ],
+            value_input_option=ValueInputOption.user_entered,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "429" in msg or "Quota" in msg:
+            print("  WARN Sheets 429 al escribir precio; reintentando en 65s...")
+            time.sleep(65)
             ws.batch_update(
                 [
                     {
@@ -383,8 +640,10 @@ def _actualizar_precio_ref(item_prov, costo_efectivo, precio_u_xml, fecha):
                 ],
                 value_input_option=ValueInputOption.user_entered,
             )
-            print(f"    → precio_ref actualizado en Sheets: {cod_buscar} = {costo_efectivo}")
-            return
+        else:
+            raise
+
+    print(f"    -> precio_ref actualizado en Sheets: {cod_buscar} = {costo_efectivo}")
 
 
 # ── ACTUALIZAR BD_MP_SISTEMA (stock + costo) ─────────────────
@@ -619,7 +878,7 @@ def registrar_entrada_inventario(item_prov: dict, item_factura: dict, factura: d
     try:
         supabase.table("mov_inventario").insert(mov).execute()
         print(
-            f"    → mov_inventario ENTRADA: {cod_mp} +{round(cantidad_base, 2)} {unidad}"
+            f"    -> mov_inventario ENTRADA: {cod_mp} +{round(cantidad_base, 2)} {unidad}"
         )
         return True
     except Exception as e:
@@ -668,7 +927,7 @@ def registrar_factura_procesada(
     """
     if dry_run:
         estado = "COMPLETA" if items_warn == 0 else "PARCIAL"
-        print(f"  [DRY RUN] facturas_procesadas → {estado} (matcheados={items_matcheados}, sin_match={items_warn})")
+        print(f"  [DRY RUN] facturas_procesadas -> {estado} (matcheados={items_matcheados}, sin_match={items_warn})")
         return
 
     estado = "COMPLETA" if items_warn == 0 else "PARCIAL"
@@ -688,7 +947,7 @@ def registrar_factura_procesada(
             registro,
             on_conflict="num_factura,ruc_proveedor"
         ).execute()
-        print(f"  → facturas_procesadas: {estado} (matcheados={items_matcheados}, sin_match={items_warn})")
+        print(f"  -> facturas_procesadas: {estado} (matcheados={items_matcheados}, sin_match={items_warn})")
     except Exception as e:
         print(f"  ERROR registrando facturas_procesadas: {e}")
 
@@ -897,7 +1156,7 @@ def registrar_item_pendiente_factura(
 
     ws.append_row(row_vals, value_input_option=ValueInputOption.user_entered)
     _items_pendientes_cache_keys.add(clave)
-    print(f"    → {BD_ITEMS_PENDIENTES_SHEET}: registrado pendiente {item['cod_item_xml']}")
+    print(f"    -> {BD_ITEMS_PENDIENTES_SHEET}: registrado pendiente {item['cod_item_xml']}")
     return True
 
 
@@ -1008,6 +1267,198 @@ def _lineas_whatsapp_items_sin_match(factura: dict, descripciones_sin_match: lis
     return lineas
 
 
+def _batch_update_precios_items_prov_cells(
+    ws: gspread.Worksheet,
+    col_precio_ref: int,
+    col_precio_xml: int,
+    col_fecha: int,
+    by_row: dict[int, tuple[float, float, str]],
+) -> int:
+    """
+    Escribe precio_ref / precio_unitario_xml / fecha_precio_ref agrupando filas
+    en pocas llamadas a la API (límite de escrituras por minuto en Sheets).
+    """
+    if not by_row:
+        return 0
+    rows_sorted = list(by_row.items())
+    # Cada fila = 3 rangos; ~30 filas por POST para quedar bajo cuotas típicas.
+    rows_per_http = 30
+    n_ok = 0
+    for start in range(0, len(rows_sorted), rows_per_http):
+        chunk = rows_sorted[start : start + rows_per_http]
+        data: list[dict] = []
+        for row_1based, (c, u, f) in chunk:
+            data.extend(
+                [
+                    {
+                        "range": rowcol_to_a1(row_1based, col_precio_ref),
+                        "values": [[c]],
+                    },
+                    {
+                        "range": rowcol_to_a1(row_1based, col_precio_xml),
+                        "values": [[u]],
+                    },
+                    {
+                        "range": rowcol_to_a1(row_1based, col_fecha),
+                        "values": [[f]],
+                    },
+                ]
+            )
+        for attempt in range(4):
+            try:
+                ws.batch_update(
+                    data,
+                    value_input_option=ValueInputOption.user_entered,
+                )
+                break
+            except Exception as e:
+                msg = str(e)
+                if ("429" in msg or "Quota" in msg) and attempt < 3:
+                    wait = 65 * (attempt + 1)
+                    print(f"  WARN Sheets 429 en lote escritura; esperando {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+        n_ok += len(chunk)
+        time.sleep(1.2)
+    return n_ok
+
+
+def sincronizar_precios_items_prov_desde_todos_xml_drive(*, dry_run: bool = False) -> dict:
+    """
+    Para ítems ya mapeados en BD_ITEMS_PROV: recorre **todos** los XML de la carpeta
+    de facturas (incluidos los de facturas ya COMPLETA en Supabase), ordenados por
+    fecha de emisión y número.
+
+    Actualiza solo precio_ref, precio_unitario_xml y fecha_precio_ref en Sheets.
+    No inserta mov_inventario, no modifica BD_MP_SISTEMA ni facturas_procesadas.
+
+    Tras dar de alta filas en BD_ITEMS_PROV que antes no matcheaban, la **última**
+    factura histórica por fecha define los precios en catálogo.
+
+    Sin hist_precios. En modo escritura, los cambios se envían a Sheets en **lotes**
+    (pocas peticiones) para evitar error 429 por exceso de escrituras por minuto.
+    """
+    global _items_prov_cache
+    print("=" * 50)
+    print(
+        "SYNC PRECIOS BD_ITEMS_PROV desde todos los XML en Drive "
+        f"({'DRY RUN' if dry_run else 'escribiendo hoja'})"
+    )
+    print("=" * 50)
+
+    xmls = listar_xmls_pendientes()
+    if not xmls:
+        print("AVISO: cero XML en carpeta (GOOGLE_DRIVE_FACTURAS_FOLDER_ID).")
+        return {
+            "xmls_en_carpeta": 0,
+            "xmls_parseados": 0,
+            "facturas": 0,
+            "lineas_match": 0,
+            "lineas_sin_match": 0,
+        }
+
+    filas: list[tuple[str, str, dict]] = []
+    for archivo in xmls:
+        try:
+            texto = descargar_xml(archivo["id"])
+        except Exception as e:
+            print(f"  WARN descarga {archivo.get('name')}: {e}")
+            continue
+        factura = parsear_xml_sri(texto)
+        if not factura:
+            print(f"  WARN parseo {archivo.get('name')}")
+            continue
+        factura["_archivo_drive"] = archivo
+        fecha = (factura.get("fecha_factura") or "").strip()
+        num = (factura.get("num_factura") or "").strip()
+        filas.append((fecha, num, factura))
+
+    # Sin fecha al final para no pisar datos buenos con orden ambiguo
+    filas.sort(key=lambda t: (t[0] or "9999-99-99", t[1]))
+
+    _items_prov_cache = None
+    cargar_bd_items_prov()
+
+    layout = _bd_items_prov_price_layout
+    if not dry_run and layout is None:
+        print("  ERROR: no se pudo cargar layout de precios en BD_ITEMS_PROV (revisar columnas).")
+        return {
+            "xmls_en_carpeta": len(xmls),
+            "xmls_parseados": len(filas),
+            "facturas": len(filas),
+            "lineas_match": 0,
+            "lineas_sin_match": 0,
+            "filas_escritas": 0,
+        }
+
+    lineas_match = 0
+    lineas_sin_match = 0
+    by_row: dict[int, tuple[float, float, str]] = {}
+
+    for fecha, num, factura in filas:
+        print(f"\n--- {num} | {fecha} | items={len(factura.get('items') or [])}")
+        for item in factura.get("items") or []:
+            item_prov = buscar_item_prov(
+                factura["ruc"],
+                item["cod_item_xml"],
+                item["descripcion_proveedor"],
+                factura.get("razon_social", ""),
+            )
+            if not item_prov:
+                lineas_sin_match += 1
+                continue
+            lineas_match += 1
+            cod = (item_prov.get("cod_item_prov") or "").strip()
+            if dry_run:
+                print(
+                    f"  [DRY] {cod} <- costo_efectivo={item['costo_efectivo']} "
+                    f"xml_u={item['precio_unitario_xml']}"
+                )
+                continue
+
+            row_1based = _fila_precio_bd_items_prov_1based(item_prov, layout)
+            if row_1based is None:
+                print(
+                    f"  WARN sin fila en hoja para item (cod_item_prov={cod!r}) "
+                    "(revisar duplicados o cabecera BD_ITEMS_PROV)"
+                )
+                continue
+
+            by_row[row_1based] = (
+                item["costo_efectivo"],
+                item["precio_unitario_xml"],
+                factura["fecha_factura"],
+            )
+
+    filas_escritas = 0
+    if not dry_run and by_row and layout is not None:
+        filas_escritas = _batch_update_precios_items_prov_cells(
+            layout["ws"],
+            layout["col_precio_ref"],
+            layout["col_precio_xml"],
+            layout["col_fecha"],
+            by_row,
+        )
+        print(f"\n  Escritura lote: {filas_escritas} filas (ultima factura por item gana).")
+
+    _items_prov_cache = None
+    _invalidar_cache_layout_precio_items_prov()
+    print("\n" + "=" * 50)
+    print(
+        f"Listo. XMLs parseados={len(filas)} | lineas con match={lineas_match} | "
+        f"sin match (omitidas)={lineas_sin_match}"
+    )
+    return {
+        "xmls_en_carpeta": len(xmls),
+        "xmls_parseados": len(filas),
+        "facturas": len(filas),
+        "lineas_match": lineas_match,
+        "lineas_sin_match": lineas_sin_match,
+        "filas_escritas": filas_escritas if not dry_run else 0,
+    }
+
+
 # ── FLUJO PRINCIPAL ───────────────────────────────────────────
 def procesar_facturas(dry_run: bool = False, reprocesar: bool = False) -> dict:
     if reprocesar and not dry_run:
@@ -1110,8 +1561,36 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False) -> dict:
         f"Resumen: XMLs procesados={xmls_parseados} | saltados (COMPLETA)={xmls_saltados} | "
         f"items matcheados={total_matcheados} | WARN sin match={total_warn}"
     )
+    print(
+        f"\n>>> FACTURAS DRIVE: en_carpeta={len(xmls)} | "
+        f"aplicados_esta_corrida={xmls_parseados} | omitidos_ya_COMPLETA={xmls_saltados}"
+    )
+    if len(xmls) > 0 and xmls_parseados == 0:
+        if xmls_saltados >= len(xmls):
+            print(
+                "    AVISO: Todos los XML estaban ya como COMPLETA en facturas_procesadas; "
+                "no se insertan movimientos otra vez. Si falta una entrada, revisar esa tabla "
+                "o usar procesar_facturas_drive.py --reprocesar (riesgo de duplicar)."
+            )
+        elif xmls_saltados > 0:
+            print(
+                f"    AVISO: Ninguna factura aplicada: {xmls_saltados} omitidas (COMPLETA); "
+                f"{len(xmls) - xmls_saltados} archivo(s) no procesados (revisar errores de parseo arriba)."
+            )
+        else:
+            print(
+                "    AVISO: Hay XML en carpeta pero ninguno entro al flujo (revisar errores "
+                "de parseo arriba o conexion a Supabase)."
+            )
+    elif len(xmls) == 0:
+        print(
+            "    AVISO: Cero XML listados (carpeta vacia, GOOGLE_DRIVE_FACTURAS_FOLDER_ID, "
+            "o permisos de la cuenta de servicio)."
+        )
 
     resumen = {
+        "xmls_en_carpeta": len(xmls),
+        "xmls_omitidos_completa": xmls_saltados,
         "total_procesadas": xmls_parseados,
         "completas": completas,
         "parciales": parciales,
@@ -1235,8 +1714,11 @@ def procesar_factura_dict(
         ):
             print(
                 "    INFO: esta línea ya tiene ENTRADA en mov_inventario — "
-                "no se duplica precio/mov/stock (útil al cerrar facturas PARCIAL)"
+                "no se duplica mov/stock; se actualizan igual precios en BD_ITEMS_PROV desde el XML."
             )
+            if not dry_run:
+                procesar_variacion_precio(item_prov, factura, item)
+                time.sleep(1)
             continue
 
         ok_conv, motivo_conv = conversion_compra_definida(item_prov)
@@ -1312,6 +1794,15 @@ if __name__ == "__main__":
             f"({'DRY RUN' if dry else 'escribiendo hoja'})..."
         )
         backfill_items_pendientes_desde_drive(dry_run=dry)
+        sys.exit(0)
+
+    if "--solo-precios-desde-xml" in sys.argv:
+        dry = "--dry-run" in sys.argv
+        print(
+            "Modo --solo-precios-desde-xml: solo BD_ITEMS_PROV (3 columnas de precio); "
+            "sin mov_inventario / BD_MP_SISTEMA / facturas_procesadas.\n"
+        )
+        sincronizar_precios_items_prov_desde_todos_xml_drive(dry_run=dry)
         sys.exit(0)
 
     DRY_RUN = "--dry-run" in sys.argv
