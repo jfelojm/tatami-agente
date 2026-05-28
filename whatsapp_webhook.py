@@ -58,6 +58,10 @@ _bd_mp_cache: list[dict] | None = None
 _bd_mp_cache_at: float = 0.0
 BD_MP_CACHE_TTL_SEC = 60
 
+_bd_prov_cache: list[dict] | None = None
+_bd_prov_cache_at: float = 0.0
+BD_PROV_CACHE_TTL_SEC = 120
+
 _sheet_workbook = None
 
 from conteo_routes import router as conteo_router
@@ -493,6 +497,324 @@ def _es_mov_compra_factura(r: dict) -> bool:
     return t in ("ENTRADA", "ENTRADA_COMPRA") and (o == "FACTURA" or o == "")
 
 
+def _solo_digitos_ruc(s: str) -> str:
+    return "".join(c for c in (s or "") if c.isdigit())
+
+
+def leer_bd_prov(*, force_refresh: bool = False) -> list[dict]:
+    """Filas de BD_PROV con cod_proveedor, razon_social, ruc."""
+    global _bd_prov_cache, _bd_prov_cache_at
+    now = time.monotonic()
+    if (
+        not force_refresh
+        and _bd_prov_cache is not None
+        and (now - _bd_prov_cache_at) < BD_PROV_CACHE_TTL_SEC
+    ):
+        return _bd_prov_cache
+
+    sh = conectar_sheets()
+    vals = sh.worksheet("BD_PROV").get_all_values()
+    if not vals:
+        _bd_prov_cache = []
+        _bd_prov_cache_at = now
+        return []
+
+    headers = [str(h or "").strip().lower() for h in vals[0]]
+    idx = {h: i for i, h in enumerate(headers) if h}
+    icod = idx.get("cod_proveedor", 0)
+    irazon = idx.get("razon_social", 1)
+    iruc = idx.get("ruc", idx.get("ruc_proveedor", 2))
+
+    out: list[dict] = []
+    for row in vals[1:]:
+        if not any(str(c or "").strip() for c in row):
+            continue
+        cod = str(row[icod] if icod < len(row) else "").strip()
+        razon = str(row[irazon] if irazon < len(row) else "").strip()
+        ruc = _solo_digitos_ruc(str(row[iruc] if iruc < len(row) else ""))
+        if not ruc and not razon:
+            continue
+        out.append(
+            {
+                "cod_proveedor": cod,
+                "razon_social": razon,
+                "ruc_proveedor": ruc,
+            }
+        )
+
+    _bd_prov_cache = out
+    _bd_prov_cache_at = now
+    return out
+
+
+def _coincide_nombre_proveedor(razon: str, filtro: str) -> bool:
+    return _coincide_nombre_mp(razon, filtro)
+
+
+def resolver_proveedor(
+    *,
+    nombre_proveedor: str = "",
+    ruc_proveedor: str = "",
+) -> dict:
+    """
+    Resuelve nombre o RUC a un proveedor en BD_PROV.
+    Devuelve ok, ruc_proveedor, razon_social, candidatos[].
+    """
+    ruc_in = _solo_digitos_ruc(ruc_proveedor)
+    nom_in = (nombre_proveedor or "").strip()
+    provs = leer_bd_prov()
+
+    if ruc_in:
+        for p in provs:
+            if p.get("ruc_proveedor") == ruc_in:
+                return {
+                    "ok": True,
+                    "ruc_proveedor": ruc_in,
+                    "razon_social": p.get("razon_social", ""),
+                    "cod_proveedor": p.get("cod_proveedor", ""),
+                }
+        return {
+            "ok": False,
+            "error": f"No hay proveedor con RUC {ruc_in} en BD_PROV.",
+            "candidatos": [],
+        }
+
+    if not nom_in:
+        return {"ok": False, "error": "Indica nombre_proveedor o ruc_proveedor.", "candidatos": []}
+
+    hits = [
+        p
+        for p in provs
+        if _coincide_nombre_proveedor(p.get("razon_social", ""), nom_in)
+    ]
+    if len(hits) == 1:
+        p = hits[0]
+        return {
+            "ok": True,
+            "ruc_proveedor": p.get("ruc_proveedor", ""),
+            "razon_social": p.get("razon_social", ""),
+            "cod_proveedor": p.get("cod_proveedor", ""),
+        }
+    if len(hits) > 1:
+        return {
+            "ok": False,
+            "error": "Varios proveedores coinciden; pide aclarar o usa el RUC.",
+            "candidatos": [
+                {
+                    "razon_social": p.get("razon_social", ""),
+                    "ruc_proveedor": p.get("ruc_proveedor", ""),
+                }
+                for p in hits[:8]
+            ],
+        }
+    return {
+        "ok": False,
+        "error": f"No encontré proveedor con nombre parecido a '{nom_in}' en BD_PROV.",
+        "candidatos": [],
+    }
+
+
+def _mapa_unidad_mp() -> dict[str, str]:
+    return {
+        str(r.get("cod_mp_sistema", "")).strip(): str(r.get("unidad_base", "")).strip().upper()
+        for r in leer_bd_mp_sistema()
+        if str(r.get("cod_mp_sistema", "")).strip()
+    }
+
+
+def _desc_xml_desde_obs(obs: str) -> str:
+    obs = (obs or "").strip()
+    if not obs:
+        return ""
+    return obs.split("|")[0].strip()
+
+
+def _formatear_cantidad_compra(cantidad: float, unidad_base: str) -> dict:
+    """cantidad_mov en inventario suele estar en unidad_base (GR, ML, UNI)."""
+    u = (unidad_base or "GR").upper()
+    cantidad = _to_float(cantidad, 0.0)
+    out = {"cantidad_mov": round(cantidad, 4), "unidad_base": u}
+    if u == "GR" and cantidad >= 1:
+        out["cantidad_kg"] = round(cantidad / 1000.0, 4)
+        out["cantidad_legible"] = f"{out['cantidad_kg']:.2f} kg ({cantidad:.0f} g)"
+    elif u == "ML" and cantidad >= 1:
+        out["cantidad_litros"] = round(cantidad / 1000.0, 4)
+        out["cantidad_legible"] = f"{out['cantidad_litros']:.2f} L ({cantidad:.0f} ml)"
+    else:
+        out["cantidad_legible"] = f"{cantidad:.2f} {u}"
+    return out
+
+
+def _lineas_compra_factura(sb, num_factura: str) -> list[dict]:
+    res = (
+        sb.table("mov_inventario")
+        .select(
+            "fecha,cod_mp_sistema,nombre_mp,cantidad_mov,costo_unitario,costo_total,observaciones,tipo_mov,origen_documento"
+        )
+        .eq("num_documento", num_factura.strip())
+        .execute()
+    )
+    unidades = _mapa_unidad_mp()
+    lineas = []
+    for r in res.data or []:
+        if not _es_mov_compra_factura(r):
+            continue
+        cod = (r.get("cod_mp_sistema") or "").strip()
+        cant = _to_float(r.get("cantidad_mov"), 0.0)
+        ct = _to_float(r.get("costo_total"), 0.0)
+        cu = _to_float(r.get("costo_unitario"), 0.0)
+        ub = unidades.get(cod, "GR")
+        fmt = _formatear_cantidad_compra(cant, ub)
+        desc_xml = _desc_xml_desde_obs(r.get("observaciones") or "")
+        precio_kg = None
+        if ub == "GR" and cant > 0 and ct > 0:
+            precio_kg = round((ct / cant) * 1000.0, 4)
+        lineas.append(
+            {
+                "cod_mp_sistema": cod,
+                "nombre_mp": (r.get("nombre_mp") or cod).strip(),
+                "descripcion_xml": desc_xml,
+                **fmt,
+                "costo_unitario": round(cu, 6),
+                "costo_total_usd": round(ct, 2),
+                "precio_usd_por_kg": precio_kg,
+                "fecha_mov": (str(r.get("fecha") or "")[:10]),
+            }
+        )
+    return lineas
+
+
+def _texto_whatsapp_compra_factura(
+    *,
+    num_factura: str,
+    razon_social: str,
+    ruc_proveedor: str,
+    fecha_factura: str,
+    lineas: list[dict],
+) -> str:
+    total = round(sum(_to_float(x.get("costo_total_usd"), 0) for x in lineas), 2)
+    prov = razon_social or ruc_proveedor or "?"
+    lines = [
+        f"Factura {num_factura} ({fecha_factura or '?'})",
+        f"Proveedor: {prov}" + (f" RUC {ruc_proveedor}" if ruc_proveedor else ""),
+        "Lineas ingresadas a inventario:",
+    ]
+    for i, ln in enumerate(lineas, 1):
+        nom = ln.get("nombre_mp") or "?"
+        leg = ln.get("cantidad_legible") or "?"
+        usd = ln.get("costo_total_usd", 0)
+        desc = ln.get("descripcion_xml") or ""
+        lines.append(f"{i}. {nom} ({ln.get('cod_mp_sistema','')}) — {leg} — {usd:.2f} USD")
+        if desc and desc.upper() != nom.upper():
+            lines.append(f"   XML: {desc[:120]}")
+    lines.append(f"Total factura: {total:.2f} USD")
+    return "\n".join(lines)
+
+
+def tool_compras_factura_detalle(args):
+    """
+    Lineas exactas de una factura de compra en mov_inventario.
+    num_factura O (nombre_proveedor/ruc + ultima=true por fecha de factura).
+    """
+    args = args or {}
+    num = str(args.get("num_factura") or "").strip()
+    ultima = bool(args.get("ultima"))
+    nom = str(args.get("nombre_proveedor") or "").strip()
+    ruc = str(args.get("ruc_proveedor") or "").strip()
+
+    sb = conectar_supabase()
+
+    if not num and ultima:
+        res_prov = resolver_proveedor(nombre_proveedor=nom, ruc_proveedor=ruc)
+        if not res_prov.get("ok"):
+            return {"ok": False, **res_prov}
+        ruc_f = res_prov["ruc_proveedor"]
+        fp = (
+            sb.table("facturas_procesadas")
+            .select("num_factura,ruc_proveedor,fecha_factura,estado")
+            .eq("ruc_proveedor", ruc_f)
+            .order("fecha_factura", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not fp.data:
+            return {
+                "ok": False,
+                "error": f"Sin facturas procesadas para RUC {ruc_f}.",
+            }
+        row = fp.data[0]
+        num = (row.get("num_factura") or "").strip()
+        meta_fp = row
+    elif not num:
+        return {
+            "ok": False,
+            "error": "Indica num_factura o ultima=true con nombre_proveedor/ruc_proveedor.",
+        }
+    else:
+        meta_fp = None
+
+    lineas = _lineas_compra_factura(sb, num)
+    if not lineas:
+        return {
+            "ok": False,
+            "error": f"No hay entradas de inventario para la factura {num}.",
+            "num_factura": num,
+        }
+
+    ruc_doc = ruc
+    fecha_fac = ""
+    if meta_fp:
+        ruc_doc = meta_fp.get("ruc_proveedor") or ruc_doc
+        fecha_fac = (meta_fp.get("fecha_factura") or "")[:10]
+    else:
+        try:
+            fp2 = (
+                sb.table("facturas_procesadas")
+                .select("ruc_proveedor,fecha_factura")
+                .eq("num_factura", num)
+                .limit(1)
+                .execute()
+            )
+            if fp2.data:
+                ruc_doc = fp2.data[0].get("ruc_proveedor") or ruc_doc
+                fecha_fac = (fp2.data[0].get("fecha_factura") or "")[:10]
+        except Exception:
+            pass
+
+    razon = ""
+    if ruc_doc:
+        for p in leer_bd_prov():
+            if p.get("ruc_proveedor") == _solo_digitos_ruc(ruc_doc):
+                razon = p.get("razon_social", "")
+                break
+    if not razon and nom:
+        rp = resolver_proveedor(nombre_proveedor=nom, ruc_proveedor=ruc_doc)
+        if rp.get("ok"):
+            razon = rp.get("razon_social", "")
+
+    if not fecha_fac:
+        fecha_fac = lineas[0].get("fecha_mov") or ""
+
+    texto = _texto_whatsapp_compra_factura(
+        num_factura=num,
+        razon_social=razon,
+        ruc_proveedor=_solo_digitos_ruc(ruc_doc),
+        fecha_factura=fecha_fac,
+        lineas=lineas,
+    )
+    return {
+        "ok": True,
+        "num_factura": num,
+        "ruc_proveedor": _solo_digitos_ruc(ruc_doc),
+        "razon_social": razon,
+        "fecha_factura": fecha_fac,
+        "lineas": lineas,
+        "total_usd": round(sum(x["costo_total_usd"] for x in lineas), 2),
+        "texto_whatsapp": texto,
+        "nota": "Usa texto_whatsapp tal cual. Nombres = nombre_mp del sistema; descripcion_xml es del XML del proveedor.",
+    }
+
+
 def tool_compras_facturas_rango(args):
     """
     Compras desde facturas ya registradas en inventario: mov_inventario
@@ -504,6 +826,21 @@ def tool_compras_facturas_rango(args):
     hasta = str(args.get("fecha_hasta") or "").strip()
     top_facturas = min(max(int(args.get("top_facturas", 40) or 40), 5), 100)
     top_productos = min(max(int(args.get("top_productos", 35) or 35), 5), 100)
+    filtro_ruc = _solo_digitos_ruc(str(args.get("ruc_proveedor") or ""))
+    filtro_nom = str(args.get("nombre_proveedor") or "").strip()
+
+    if filtro_nom and not filtro_ruc:
+        rp = resolver_proveedor(nombre_proveedor=filtro_nom)
+        if not rp.get("ok"):
+            return {"ok": False, **rp}
+        filtro_ruc = rp["ruc_proveedor"]
+        filtro_razon = rp.get("razon_social", "")
+    else:
+        filtro_razon = ""
+        if filtro_ruc:
+            rp = resolver_proveedor(ruc_proveedor=filtro_ruc)
+            if rp.get("ok"):
+                filtro_razon = rp.get("razon_social", "")
 
     if not desde or not hasta:
         return {
@@ -613,17 +950,54 @@ def tool_compras_facturas_rango(args):
         except Exception:
             pass
 
+    ruc_nombre = {
+        _solo_digitos_ruc(p.get("ruc_proveedor", "")): p.get("razon_social", "")
+        for p in leer_bd_prov()
+        if p.get("ruc_proveedor")
+    }
+
     for d in by_doc.values():
         n = d["num_factura"]
-        d["ruc_proveedor"] = ruc_map.get(n, "") if n != "(sin_num_documento)" else ""
+        ruc = ruc_map.get(n, "") if n != "(sin_num_documento)" else ""
+        d["ruc_proveedor"] = ruc
+        d["razon_social"] = ruc_nombre.get(_solo_digitos_ruc(ruc), "")
+
+    doc_vals = list(by_doc.values())
+    if filtro_ruc:
+        doc_vals = [
+            d
+            for d in doc_vals
+            if _solo_digitos_ruc(d.get("ruc_proveedor", "")) == filtro_ruc
+        ]
+        rows = [
+            r
+            for r in rows
+            if _solo_digitos_ruc(ruc_map.get((r.get("num_documento") or "").strip(), ""))
+            == filtro_ruc
+        ]
+        by_mp = defaultdict(
+            lambda: {"nombre_mp": "", "cantidad": 0.0, "costo_total": 0.0}
+        )
+        total = 0.0
+        for r in rows:
+            ct = _to_float(r.get("costo_total"), 0.0)
+            total += ct
+            cod = (r.get("cod_mp_sistema") or "").strip()
+            if cod:
+                mp = by_mp[cod]
+                nom = (r.get("nombre_mp") or "").strip()
+                if nom:
+                    mp["nombre_mp"] = nom
+                mp["cantidad"] += _to_float(r.get("cantidad_mov"), 0.0)
+                mp["costo_total"] += ct
 
     por_prov: dict[str, float] = defaultdict(float)
-    for d in by_doc.values():
+    for d in doc_vals:
         ruc = (d.get("ruc_proveedor") or "").strip()
         clave = ruc if ruc else f"sin_ruc:{d['num_factura']}"
         por_prov[clave] += d["total_usd"]
 
-    top_f = sorted(by_doc.values(), key=lambda x: x["total_usd"], reverse=True)[:top_facturas]
+    top_f = sorted(doc_vals, key=lambda x: x["total_usd"], reverse=True)[:top_facturas]
     for x in top_f:
         x["total_usd"] = round(x["total_usd"], 2)
 
@@ -640,22 +1014,36 @@ def tool_compras_facturas_rango(args):
     prod_list.sort(key=lambda x: x["costo_total_usd"], reverse=True)
     prod_list = prod_list[:top_productos]
 
-    prov_out = [
-        {"proveedor_clave": k, "total_usd": round(v, 2)}
-        for k, v in sorted(por_prov.items(), key=lambda kv: -kv[1])[:30]
-    ]
+    prov_out = []
+    for k, v in sorted(por_prov.items(), key=lambda kv: -kv[1])[:30]:
+        ruc_k = _solo_digitos_ruc(k) if k.isdigit() or len(_solo_digitos_ruc(k)) >= 10 else ""
+        prov_out.append(
+            {
+                "proveedor_clave": k,
+                "ruc_proveedor": ruc_k or (k if k.isdigit() else ""),
+                "razon_social": ruc_nombre.get(ruc_k, "") if ruc_k else "",
+                "total_usd": round(v, 2),
+            }
+        )
+
+    resumen = {
+        "fecha_desde": desde,
+        "fecha_hasta": hasta,
+        "total_compras_usd": round(total, 2),
+        "n_lineas_movimiento": len(rows),
+        "n_facturas_distintas": len(doc_vals),
+        "n_productos_mp_distintos": len(by_mp),
+        "nota": "Montos = suma costo_total por linea en mov_inventario. Cada proveedor incluye razon_social desde BD_PROV cuando hay RUC. Para lineas de UNA factura usa compras_factura_detalle.",
+    }
+    if filtro_ruc:
+        resumen["filtro_proveedor"] = {
+            "ruc_proveedor": filtro_ruc,
+            "razon_social": filtro_razon or ruc_nombre.get(filtro_ruc, ""),
+        }
 
     return {
         "ok": True,
-        "resumen": {
-            "fecha_desde": desde,
-            "fecha_hasta": hasta,
-            "total_compras_usd": round(total, 2),
-            "n_lineas_movimiento": len(rows),
-            "n_facturas_distintas": len(by_doc),
-            "n_productos_mp_distintos": len(by_mp),
-            "nota": "Montos = suma costo_total por linea en mov_inventario. RUC desde facturas_procesadas por num_factura; si falta, aparece sin_ruc:numero.",
-        },
+        "resumen": resumen,
         "por_proveedor": prov_out,
         "top_facturas": top_f,
         "top_productos": prod_list,
@@ -1907,7 +2295,8 @@ TOOLS = [
     {"name": "inventario_por_bodega", "description": "Resumen de valor (USD) y stock total por bodega desde BD_MP_SISTEMA.", "input_schema": {"type": "object", "properties": {"incluir_sin_costo": {"type": "boolean"}}, "required": []}},
     {"name": "facturas_parciales", "description": "Facturas con estado PARCIAL en Supabase (facturas_procesadas).", "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
     {"name": "items_pendientes_factura", "description": "Ítems pendientes (BD_ITEMS_PENDIENTES) filtrando por num_factura o ruc_proveedor.", "input_schema": {"type": "object", "properties": {"num_factura": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
-    {"name": "compras_facturas_rango", "description": "Valor y detalle de COMPRAS por facturas ya aplicadas a inventario (mov_inventario: entradas por factura) entre fecha_desde y fecha_hasta (YYYY-MM-DD inclusive). Devuelve total USD, cantidad de lineas y facturas, top facturas y top productos (MP), y totales por proveedor (RUC). Usar cuando pregunten compras a proveedores en un periodo, ej. desde 1 de mayo hasta hoy.", "input_schema": {"type": "object", "properties": {"fecha_desde": {"type": "string"}, "fecha_hasta": {"type": "string"}, "top_facturas": {"type": "integer"}, "top_productos": {"type": "integer"}}, "required": ["fecha_desde", "fecha_hasta"]}},
+    {"name": "compras_facturas_rango", "description": "Compras por facturas aplicadas a inventario (mov_inventario ENTRADA) entre fecha_desde y fecha_hasta (YYYY-MM-DD). Devuelve totales, top facturas, top productos (nombre_mp del sistema) y por_proveedor con razon_social desde BD_PROV. Si preguntan por un proveedor por nombre (ej. Maramar), pasa nombre_proveedor; o ruc_proveedor. NO inventes nombres de producto.", "input_schema": {"type": "object", "properties": {"fecha_desde": {"type": "string"}, "fecha_hasta": {"type": "string"}, "nombre_proveedor": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "top_facturas": {"type": "integer"}, "top_productos": {"type": "integer"}}, "required": ["fecha_desde", "fecha_hasta"]}},
+    {"name": "compras_factura_detalle", "description": "Lineas EXACTAS ingresadas al inventario de UNA factura de compra (mov_inventario). Devuelve texto_whatsapp: copialo tal cual. Para ultima factura de un proveedor: ultima=true con nombre_proveedor (ej. Maramar) o ruc_proveedor. Para una factura concreta: num_factura. NUNCA inventes productos ni cantidades.", "input_schema": {"type": "object", "properties": {"num_factura": {"type": "string"}, "nombre_proveedor": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "ultima": {"type": "boolean"}}, "required": []}},
     {"name": "mp_incompletas", "description": "MPs con datos incompletos en BD_MP_SISTEMA (sin_costo, sin_par, sin_bodega).", "input_schema": {"type": "object", "properties": {"tipo": {"type": "string", "enum": ["sin_costo","sin_par","sin_bodega"]}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
     {"name": "resumen_operativo_hoy", "description": "Resumen compacto: ventas hoy + bajo par + negativos + facturas parciales.", "input_schema": {"type": "object", "properties": {"top": {"type": "integer"}}, "required": []}},
     {"name": "pedidos_hoy", "description": "Pedidos que corresponde hacer hoy segun ventana de cada proveedor.", "input_schema": {"type": "object", "properties": {}, "required": []}},
@@ -1938,6 +2327,7 @@ TOOL_FNS = {
     "facturas_parciales": tool_facturas_parciales,
     "items_pendientes_factura": tool_items_pendientes_factura,
     "compras_facturas_rango": tool_compras_facturas_rango,
+    "compras_factura_detalle": tool_compras_factura_detalle,
     "mp_incompletas": tool_mp_incompletas,
     "resumen_operativo_hoy": tool_resumen_operativo_hoy,
     "pedidos_hoy":      lambda a: tool_pedidos_hoy(),
@@ -1973,7 +2363,9 @@ Si te piden productos bajo par level, usa la tool stock_critico y devuelve el li
 Si te piden valorizacion de inventario, usa inventario_valorizado (y si preguntan por bodegas usa inventario_por_bodega).
 Si piden el valorizado de un producto o materia prima por nombre (ej. camarones, aceite), llama inventario_valorizado con nombre_mp o buscar igual al texto que dio el usuario; no listes solo el top global sin filtrar por nombre.
 Si te piden facturas pendientes/parciales, usa facturas_parciales e items_pendientes_factura.
-Si preguntan compras a proveedores, valor de compras, productos comprados o cantidades en un rango de fechas (facturas ya registradas en inventario), usa compras_facturas_rango con fecha_desde y fecha_hasta en formato YYYY-MM-DD (usa el contexto temporal para 'hoy' y calcula el primero del mes si dicen 'desde mayo').
+Si preguntan compras a proveedores, valor de compras o productos comprados en un periodo, usa compras_facturas_rango con fecha_desde y fecha_hasta (YYYY-MM-DD). Si nombran el proveedor (ej. Maramar), pasa nombre_proveedor en la misma llamada; no pidas el RUC si el nombre esta en BD_PROV. Los productos en top_productos son nombre_mp del sistema (CAMARON, SALMON, etc.): no los renombres ni inventes (langostinos, camaron pelado, etc.).
+Si piden detalle de UNA factura, lineas ingresadas, cantidades o valores de la ultima factura de un proveedor, usa compras_factura_detalle (ultima=true + nombre_proveedor, o num_factura) y responde copiando literalmente texto_whatsapp.
+La ultima factura de un proveedor es la de mayor fecha_factura en facturas_procesadas, no la de mayor fecha_proceso.
 Si el listado es largo y el usuario pidio TODO el detalle (ej. todos los platos vendidos con cantidades y montos), enumera el listado COMPLETO que devuelve la tool sin acortar a top 10. Si no cabe en un mensaje, continua en mensajes siguientes numerados.
 Para resumenes cortos puede bastar un parrafo; para pedidos explicitos de detalle completo, no resumas.
 Si preguntan cuanto se consumio de un ingrediente o materia prima en un periodo segun las recetas de los platos vendidos (no el stock en bodega), usa la tool consumo_ingrediente_recetas. No digas que el sistema no puede cruzar ventas con recetas: esa tool existe.
