@@ -85,9 +85,11 @@ def reconciliar(fecha: str, tol_abs: float) -> tuple[bool, dict]:
     sub_hist = aud["sum_subtotal_neto"] if columna_estado else aud["sum_subtotal"]
     total_hist = aud["sum_total_neto"] if columna_estado else aud["sum_total"]
     desc_hist = aud["sum_desc_neto"] if columna_estado else aud["sum_desc"]
+    hist_neto = sub_hist - desc_hist
 
-    diff_sub = abs(sub_hist - grid_sin["total"])
-    internal_check = abs(total_hist - (sub_hist - desc_hist))
+    # grid_sin["total"] = ventas netas (brutas − descuento documento en col 16)
+    diff_sub = abs(hist_neto - grid_sin["total"])
+    internal_check = abs(total_hist - hist_neto)
 
     n_grid = _count_grid_rows(fecha)
     n_hist_docs = _count_distinct_docs_hist(fecha)
@@ -97,7 +99,10 @@ def reconciliar(fecha: str, tol_abs: float) -> tuple[bool, dict]:
         "fecha": fecha,
         "tol_abs": tol_abs,
         "grid_subtotal_sin_iva": grid_sin["total"],
+        "grid_ventas_brutas": grid_sin.get("total_bruto", grid_sin["total"]),
+        "grid_descuentos": grid_sin.get("total_descuentos", 0.0),
         "grid_total_con_iva": grid_iva["total"],
+        "hist_ventas_netas": hist_neto,
         "grid_docs_activos": grid_sin["docs"],
         "grid_docs_anulados": grid_sin["docs_anulados"],
         "grid_filas_cabecera": n_grid,
@@ -125,7 +130,7 @@ def reconciliar(fecha: str, tol_abs: float) -> tuple[bool, dict]:
 
     if diff_sub > tol_abs:
         failures.append(
-            f"subtotal grid ({grid_sin['total']:.2f}) vs hist ({sub_hist:.2f}) "
+            f"ventas netas grid ({grid_sin['total']:.2f}) vs hist neto ({hist_neto:.2f}) "
             f"diff={diff_sub:.2f} > tol {tol_abs:.2f}"
         )
 
@@ -178,12 +183,16 @@ def main() -> None:
 
     ok, rep = reconciliar(fecha, tol_abs)
 
-    print(f"\n  Grid subtotal (sin IVA, docs no anulados): {rep['grid_subtotal_sin_iva']:.2f}")
-    print(f"  Grid total (con IVA, mismos docs):        {rep['grid_total_con_iva']:.2f}")
-    print(f"  hist subtotal (neto si hay estado_doc):   {rep['hist_subtotal']:.2f}")
     print(
-        f"  hist total líneas / descuentos:           {rep['hist_total_lineas']:.2f} / {rep['hist_descuentos']:.2f}"
+        f"\n  Grid ventas brutas (sin IVA):             {rep.get('grid_ventas_brutas', rep['grid_subtotal_sin_iva']):.2f}"
     )
+    print(f"  Grid descuentos (documento):              {rep.get('grid_descuentos', 0):.2f}")
+    print(f"  Grid ventas netas (oficial):               {rep['grid_subtotal_sin_iva']:.2f}")
+    print(f"  Grid total (con IVA, mismos docs):        {rep['grid_total_con_iva']:.2f}")
+    print(f"  hist subtotal (bruto líneas):             {rep['hist_subtotal']:.2f}")
+    print(f"  hist descuentos (línea):                  {rep['hist_descuentos']:.2f}")
+    print(f"  hist ventas netas (subtotal − desc):      {rep.get('hist_ventas_netas', 0):.2f}")
+    print(f"  hist total (campo total línea):          {rep['hist_total_lineas']:.2f}")
     print(f"  Lineas en tabla hist_ventas:              {rep['hist_lineas_tabla']}")
     print(f"  Docs grid (cabeceras):                   {rep['grid_filas_cabecera']}")
     print(f"  Docs distinct hist (num_documento):       {rep['hist_docs_distinct']}")

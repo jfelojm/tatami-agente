@@ -186,6 +186,27 @@ def _parse_descuento_valor(raw: str) -> float:
     return _safe_float(s)
 
 
+def _estado_documento_desde_texto_grid(raw: str) -> str:
+    """
+    Interpreta la celda de estado del grid (típicamente col 9 en comprasloadVentas.php).
+    - ANULADO: no cuenta en netos / no descarga inventario.
+    - NO_AUTORIZADO: en Smart Menu suele ser nota de venta (efectivo, sin factura electrónica);
+      **sí** cuenta en netos, cuadre y descargo de inventario (hubo cobro y salida de producto).
+    """
+    u = (raw or "").strip().upper()
+    if "ANULADO" in u:
+        return "ANULADO"
+    # "NO AUTORIZADO", "NO AUTORIZADA", sin tilde, etc.
+    if "NO AUTORIZ" in u:
+        return "NO_AUTORIZADO"
+    return "ACTIVO"
+
+
+def estado_documento_excluye_neto_operativo(estado: str | None) -> bool:
+    """True solo para ANULADO: no suma en netos ni descarga inventario."""
+    return (estado or "ACTIVO").strip().upper() == "ANULADO"
+
+
 def _venta_header_from_row(row: list[str]) -> dict:
     # Indices observados en comprasloadVentas.php (DHTMLX grid)
     id_documento = (row[0] if len(row) > 0 else "").strip()
@@ -194,15 +215,12 @@ def _venta_header_from_row(row: list[str]) -> dict:
     fecha_hora = (row[3] if len(row) > 3 else "").strip()
     total_doc = (row[7] if len(row) > 7 else "").strip()
     info_pago = (row[30] if len(row) > 30 else "").strip()
-    # Col 9: vacío o "0" = venta activa; "ANULADO" = documento anulado (mismo endpoint los trae).
-    raw_estado_venta = (row[9] if len(row) > 9 else "").strip().upper()
+    # Col 9: vacío o "0" = venta activa; "ANULADO" / "NO AUTORIZADO" según Smart Menu.
+    raw_estado_venta = (row[9] if len(row) > 9 else "").strip()
     detalle_anulacion = (row[11] if len(row) > 11 else "").strip()
     if not detalle_anulacion and len(row) > 24:
         detalle_anulacion = (row[24] or "").strip()
-    if "ANULADO" in raw_estado_venta:
-        estado_documento = "ANULADO"
-    else:
-        estado_documento = "ACTIVO"
+    estado_documento = _estado_documento_desde_texto_grid(raw_estado_venta)
 
     fecha_part = fecha_hora[:10] if len(fecha_hora) >= 10 else ""
     hora_part = fecha_hora[11:16] if len(fecha_hora) >= 16 else None
@@ -288,8 +306,8 @@ def construir_lineas_hist_ventas(header: dict, detalles: list[dict]) -> list[dic
 # ── DESCARGA VENTAS DESDE SMART MENU (DHTMLX XML) ─────────────
 def descargar_ventas_grid(fecha: str) -> list[list[str]]:
     """
-    Grid comprasloadVentas.php: incluye ventas activas y anuladas en la misma respuesta.
-    Columna 9 = 'ANULADO' si el documento fue anulado (no hace falta otro endpoint).
+    Grid comprasloadVentas.php: incluye ventas activas, anuladas y notas (NO AUTORIZADO en UI) en la misma respuesta.
+    Columna 9: ANULADO, NO AUTORIZADO, etc. (ver _estado_documento_desde_texto_grid).
     """
     fecha_inicial, fecha_final = _smartmenu_dt_range(fecha)
     url = f"{SMART_MENU_URL}/comprasloadVentas.php"
@@ -351,8 +369,11 @@ def descargar_ventas_grid(fecha: str) -> list[list[str]]:
 # ── DESCARGA VENTAS DESDE SMART MENU ─────────────────────────
 def descargar_ventas(fecha: str, filtro: str = "0") -> list:
     """
-    fecha: string formato YYYY-MM-DD
-    Retorna lista de líneas de venta parseadas
+    Endpoint legacy (documentosEmitidos JSON). No usa el pipeline ni pipeline_diario.
+
+    fecha: YYYY-MM-DD. Retorna líneas sin matching ni estado_documento.
+    cod_venta incluye timestamp — no es determinístico; re-ejecutar crea filas nuevas.
+    Flujo de producción: descargar_ventas_grid + construir_lineas_hist_ventas.
     """
     fecha_param = quote(fecha, safe="")
     filtro_param = quote(str(filtro), safe="")
@@ -454,27 +475,38 @@ def _propina(doc: dict) -> float:
 
 
 # ── GUARDA EN SUPABASE ────────────────────────────────────────
-def guardar_ventas(lineas: list) -> dict:
-    if not lineas:
-        return {"insertadas": 0, "duplicadas": 0, "errores": 0}
+def _es_error_duplicado(exc: Exception) -> bool:
+    msg = str(exc)
+    return "duplicate" in msg.lower() or "23505" in msg
 
-    insertadas = 0
-    duplicadas = 0
-    errores = 0
 
+def _guardar_ventas_fila_a_fila(lineas: list) -> dict:
+    insertadas = duplicadas = errores = 0
     for linea in lineas:
         try:
             supabase.table("hist_ventas").insert(linea).execute()
             insertadas += 1
         except Exception as e:
-            msg = str(e)
-            if "duplicate" in msg.lower() or "23505" in msg:
+            if _es_error_duplicado(e):
                 duplicadas += 1
             else:
                 errores += 1
-                print(f"  ERROR insertando {linea['cod_venta']}: {msg}")
-
+                print(f"  ERROR insertando {linea.get('cod_venta', '?')}: {e}")
     return {"insertadas": insertadas, "duplicadas": duplicadas, "errores": errores}
+
+
+def guardar_ventas(lineas: list) -> dict:
+    if not lineas:
+        return {"insertadas": 0, "duplicadas": 0, "errores": 0}
+
+    try:
+        supabase.table("hist_ventas").insert(lineas).execute()
+        return {"insertadas": len(lineas), "duplicadas": 0, "errores": 0}
+    except Exception as e:
+        if _es_error_duplicado(e):
+            return _guardar_ventas_fila_a_fila(lineas)
+        print(f"  ERROR insert batch ({len(lineas)} lineas): {e}")
+        return {"insertadas": 0, "duplicadas": 0, "errores": len(lineas)}
 
 
 _hist_ventas_tiene_estado_documento: bool | None = None
@@ -496,7 +528,7 @@ def _hist_ventas_columna_estado_disponible() -> bool:
 def auditar_hist_ventas_dia(fecha: str) -> dict:
     """
     Lee hist_ventas en Supabase para la fecha y devuelve totales (cuadre post-carga).
-    Si existe estado_documento: también netos excluyendo líneas ANULADO.
+    Si existe estado_documento: netos excluyen solo ANULADO (NO_AUTORIZADO cuenta como venta operativa).
     """
     fecha = (fecha or "").strip().split()[0]
     con_estado = _hist_ventas_columna_estado_disponible()
@@ -527,13 +559,15 @@ def auditar_hist_ventas_dia(fecha: str) -> dict:
         )
         chunk = r.data or []
         for row in chunk:
-            es_anul = False
+            es_excl_neto = False
             if con_estado:
-                es_anul = (row.get("estado_documento") or "").strip().upper() == "ANULADO"
+                es_excl_neto = estado_documento_excluye_neto_operativo(
+                    row.get("estado_documento")
+                )
             out["sum_subtotal"] += float(row.get("subtotal") or 0)
             out["sum_desc"] += float(row.get("descuento_valor") or 0)
             out["sum_total"] += float(row.get("total") or 0)
-            if not es_anul:
+            if not es_excl_neto:
                 out["sum_subtotal_neto"] += float(row.get("subtotal") or 0)
                 out["sum_desc_neto"] += float(row.get("descuento_valor") or 0)
                 out["sum_total_neto"] += float(row.get("total") or 0)
@@ -587,6 +621,19 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
     rows = descargar_ventas_grid(fecha)
     n_grid_total = len(rows)
     print(f"  -> {n_grid_total} filas encontradas (grid XML)")
+    try:
+        from ventas_smartmenu_total import calcular_total_smartmenu
+
+        tg = calcular_total_smartmenu(fecha, sin_iva=True)
+        if (tg.get("total_descuentos") or 0) > 0:
+            print(
+                f"  Grid oficial: brutas ${tg['total_bruto']:.2f} - desc. ${tg['total_descuentos']:.2f} "
+                f"= netas ${tg['total']:.2f} ({tg['docs']} tickets)"
+            )
+        else:
+            print(f"  Grid oficial netas: ${tg['total']:.2f} ({tg['docs']} tickets)")
+    except Exception as e:
+        print(f"  WARN: no se pudo calcular total grid: {e}")
 
     if not rows:
         print("\n  Sin datos para procesar.")
@@ -599,9 +646,17 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
 
     print("\n[2] Descargando detalle por venta y guardando en Supabase...")
     insertadas = duplicadas = errores = 0
+    headers_parsed = [_venta_header_from_row(row) for row in rows]
+    docs_anulados = 0
+    docs_no_aut = 0
 
-    for idx, row in enumerate(rows, start=1):
-        header = _venta_header_from_row(row)
+    for idx, (row, header) in enumerate(zip(rows, headers_parsed), start=1):
+        estado = header.get("estado_documento")
+        if estado == "ANULADO":
+            docs_anulados += 1
+        elif estado == "NO_AUTORIZADO":
+            docs_no_aut += 1
+
         id_doc = header.get("id_documento") or ""
         if not id_doc:
             print(f"  WARN fila sin idDocumento (idx={idx})")
@@ -619,16 +674,15 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
             f"  doc {idx}/{len(rows)} idDocumento={id_doc} items={len(lineas)} "
             f"(ins={res['insertadas']} dup={res['duplicadas']} err={res['errores']})"
         )
-
-    docs_anulados = sum(
-        1
-        for row in rows
-        if _venta_header_from_row(row).get("estado_documento") == "ANULADO"
-    )
     print("\nResumen:")
     print(f"  Documentos:  {len(rows)}")
     if docs_anulados:
-        print(f"  Anulados (grid): {docs_anulados} (se cargan en hist_ventas con estado_documento=ANULADO)")
+        print(f"  Anulados (grid): {docs_anulados} (hist_ventas estado_documento=ANULADO)")
+    if docs_no_aut:
+        print(
+            f"  Notas / sin factura (grid): {docs_no_aut} "
+            "(estado_documento=NO_AUTORIZADO; cuentan en neto y descargo de inventario)"
+        )
     print(f"  Insertadas:  {insertadas}")
     print(f"  Duplicadas:  {duplicadas}")
     print(f"  Errores:     {errores}")
@@ -643,7 +697,7 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
         print(
             f"  (Neto operativo) Subtotal: {audit['sum_subtotal_neto']:.2f} | "
             f"Total: {audit['sum_total_neto']:.2f} | "
-            f"Lineas anuladas: {audit['lineas_anuladas']}"
+            f"Lineas anuladas (excl. neto): {audit['lineas_anuladas']}"
         )
     elif not audit.get("columna_estado_ok"):
         print(
@@ -679,56 +733,9 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
 
 
 def _main_un_dia():
-    fecha = _normalize_fecha_input(
-        input("Fecha a procesar (YYYY-MM-DD) [Enter = hoy]: ").strip()
-    )
-
-    print(f"\n{'=' * 50}")
-    print(f"MODULO VENTAS — {fecha}")
-    print(f"{'=' * 50}")
-
-    print("\n[1] Descargando cabeceras de ventas (Smart Menu)...")
-    rows = descargar_ventas_grid(fecha)
-    print(f"  -> {len(rows)} filas encontradas (grid XML)")
-
-    if not rows:
-        print("\n  Sin datos para procesar.")
-        print(f"\n{'=' * 50}")
-        return
-
-    _max_docs_env = os.getenv("SMART_MENU_MAX_DOCS")
-    max_docs = int(_max_docs_env) if _max_docs_env else 999999
-    rows = rows[:max_docs]
-
-    print("\n[2] Descargando detalle por venta y guardando en Supabase...")
-    insertadas = duplicadas = errores = 0
-
-    for idx, row in enumerate(rows, start=1):
-        header = _venta_header_from_row(row)
-        id_doc = header.get("id_documento") or ""
-        if not id_doc:
-            print(f"  WARN fila sin idDocumento (idx={idx})")
-            continue
-
-        detalles = descargar_detalle_factura(id_doc)
-        lineas = construir_lineas_hist_ventas(header, detalles)
-
-        res = guardar_ventas(lineas)
-        insertadas += res["insertadas"]
-        duplicadas += res["duplicadas"]
-        errores += res["errores"]
-
-        print(
-            f"  doc {idx}/{len(rows)} idDocumento={id_doc} items={len(lineas)} "
-            f"(ins={res['insertadas']} dup={res['duplicadas']} err={res['errores']})"
-        )
-
-    print("\nResumen:")
-    print(f"  Insertadas:  {insertadas}")
-    print(f"  Duplicadas:  {duplicadas}")
-    print(f"  Errores:     {errores}")
-
-    print(f"\n{'=' * 50}")
+    raw = input("Fecha a procesar (YYYY-MM-DD) [Enter = hoy]: ").strip()
+    fecha = raw or date.today().strftime("%Y-%m-%d")
+    procesar_un_dia(fecha)
 
 
 def _main_carga_historica(

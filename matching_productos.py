@@ -20,14 +20,23 @@ def _get_sheet():
     return gc.open_by_key(os.getenv("SPREADSHEET_ID"))
 
 
-# ── CARGA BD_PRODUCTOS DESDE FILA 3 ──────────────────────────
+def _fila_encabezados_bd_productos(values: list[list[str]]) -> int:
+    """Detecta la fila de headers (cod_smart_menu). Soporta layout antiguo y actual."""
+    for i, row in enumerate(values[:8]):
+        if any((c or "").strip().lower() == "cod_smart_menu" for c in row):
+            return i
+    # Legacy: fila 3 en Sheets (index 2)
+    return 2 if len(values) > 2 else 0
+
+
+# ── CARGA BD_PRODUCTOS ───────────────────────────────────────
 def cargar_bd_productos() -> list[dict]:
     sh = _get_sheet()
     ws = sh.worksheet("BD_PRODUCTOS")
     values = ws.get_all_values()
-    # Fila 3 (index 2) = headers reales
-    headers = values[2]
-    rows = values[3:]
+    hi = _fila_encabezados_bd_productos(values)
+    headers = values[hi]
+    rows = values[hi + 1 :]
     result = []
     for row in rows:
         if not any(c.strip() for c in row):

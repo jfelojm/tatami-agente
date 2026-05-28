@@ -71,11 +71,16 @@ def seccion_ventas(sb, fecha_ini, fecha_fin):
     if not rows:
         return "Sin datos de ventas para el periodo.", 0.0, 0
 
-    # Total oficial: Smart Menu grid (SUBTOTAL sin IVA por documento), sumado día a día.
+    # Total oficial: Smart Menu ventas netas (brutas − descuento documento), día a día.
     total_ventas = 0.0
+    total_brutas = 0.0
+    total_desc = 0.0
     d = fecha_ini
     while d <= fecha_fin:
-        total_ventas += calcular_total_smartmenu(d.isoformat(), sin_iva=True).get("total", 0.0)
+        tg = calcular_total_smartmenu(d.isoformat(), sin_iva=True)
+        total_ventas += tg.get("total", 0.0)
+        total_brutas += tg.get("total_bruto", tg.get("total", 0.0))
+        total_desc += tg.get("total_descuentos", 0.0)
         d += timedelta(days=1)
     total_tickets = len(
         set(r.get("num_documento") for r in rows if (r.get("num_documento") or "").strip())
@@ -89,10 +94,15 @@ def seccion_ventas(sb, fecha_ini, fecha_fin):
     top5 = sorted(conteo.items(), key=lambda x: x[1], reverse=True)[:5]
 
     lineas = [
-        f"  Total ventas     : ${total_ventas:,.2f}",
-        f"  Tickets emitidos : {total_tickets}",
-        "  Top 5 vendidos:",
+        f"  Total ventas (netas): ${total_ventas:,.2f}",
+        f"  Tickets emitidos    : {total_tickets}",
     ]
+    if total_desc > 0.001:
+        lineas.insert(
+            1,
+            f"  (Brutas ${total_brutas:,.2f} − descuentos ${total_desc:,.2f})",
+        )
+    lineas.append("  Top 5 vendidos:")
     for nombre, cant in top5:
         lineas.append(f"    - {nombre}: {int(cant)} unidades")
 
