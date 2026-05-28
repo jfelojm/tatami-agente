@@ -24,6 +24,14 @@ valorizado_*.csv
 auditoria_valorizado*.csv
 auditar_facturas_vs_catalogo*.csv
 chequeo_mp*.csv
+auditar_*.csv
+*_auditar_*.csv
+*_diag_*.py
+_diag_*.py
+_fix_*.py
+_peek_*.py
+_revision_*.py
+_consulta_*.py
 
 credentials/
 *.json
