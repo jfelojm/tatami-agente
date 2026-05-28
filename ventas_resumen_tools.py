@@ -157,7 +157,7 @@ def formatear_resumen_ventas_whatsapp(
     fecha_ini: str,
     fecha_fin: str,
     incluir_productos: bool = True,
-    max_items: int = 50,
+    max_items: int | None = 50,
 ) -> str:
     """Texto listo para WhatsApp (sin markdown)."""
     lines: list[str] = []
@@ -184,13 +184,15 @@ def formatear_resumen_ventas_whatsapp(
         lines.append(f"Ranking {subt}:")
 
         ranking = resumen.get("ranking") or []
-        for i, item in enumerate(ranking[:max_items], 1):
+        items = ranking if (max_items is None) else ranking[:max_items]
+        for i, item in enumerate(items, 1):
             lines.append(
                 f"{i}. {item['plato']} - {item['cantidad']} unidades - {item['total_usd']:.2f} USD"
             )
-        rest = len(ranking) - max_items
-        if rest > 0:
-            lines.append(f"... y {rest} productos mas (pide top N o otro corte si lo necesitas).")
+        if max_items is not None:
+            rest = len(ranking) - max_items
+            if rest > 0:
+                lines.append(f"... y {rest} productos mas (pide top N o otro corte si lo necesitas).")
 
         desglose = resumen.get("desglose_variedades") or {}
         if desglose.get("BAO"):

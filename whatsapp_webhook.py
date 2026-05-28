@@ -1366,6 +1366,8 @@ def tool_ventas_por_plato(args):
     if incluir_productos is None:
         incluir_productos = True
     incluir_productos = bool(incluir_productos)
+    sin_truncar = args.get("sin_truncar")
+    sin_truncar = bool(sin_truncar) if sin_truncar is not None else False
 
     resumen = calcular_resumen_ventas(rows, orden=orden, limite=lim)
     total_oficial, tickets = _total_desde_hist_ventas_docs(fecha_ini, fecha_fin)
@@ -1379,6 +1381,7 @@ def tool_ventas_por_plato(args):
         fecha_ini=fecha_ini,
         fecha_fin=fecha_fin,
         incluir_productos=incluir_productos,
+        max_items=None if sin_truncar else 50,
     )
     return {
         "periodo": label,
@@ -1873,7 +1876,7 @@ TOOLS = [
     {"name": "plato_top_semana", "description": "Top 10 platos mas vendidos esta semana por cantidad.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "buscar_bodega", "description": "En que bodega se encuentra un ingrediente o insumo.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "trasladar_mp", "description": "Trasladar un insumo de una bodega a otra. Siempre pedir confirmacion antes de ejecutar.", "input_schema": {"type": "object", "properties": {"cod_mp_sistema": {"type": "string"}, "bodega_origen": {"type": "string"}, "bodega_destino": {"type": "string"}, "cantidad": {"type": "number"}, "confirmado": {"type": "boolean"}}, "required": ["cod_mp_sistema","bodega_origen","bodega_destino","cantidad","confirmado"]}},
-    {"name": "ventas_por_plato", "description": "Ventas al cliente (hist_ventas): total del periodo (siempre) + ranking SOLO productos en BD_PRODUCTOS (carta) si incluir_productos=true. Nunca inventes platos que no esten en ranking. Periodo hoy/semana/mes. orden: usd (default) o cantidad. Devuelve texto_whatsapp: copialo tal cual al usuario. Incluye desglose_variedades para BAO y similares cuando se pide detalle.", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}, "orden": {"type": "string", "enum": ["usd", "cantidad"]}, "limite": {"type": "integer"}, "incluir_productos": {"type": "boolean", "description": "Si false: responde solo total del periodo y pregunta si quiere detalle de productos."}}, "required": ["periodo"]}},
+    {"name": "ventas_por_plato", "description": "Ventas al cliente (hist_ventas): total del periodo (siempre) + ranking SOLO productos en BD_PRODUCTOS (carta) si incluir_productos=true. Nunca inventes platos que no esten en ranking. Periodo hoy/semana/mes. orden: usd (default) o cantidad. Devuelve texto_whatsapp: copialo tal cual al usuario. Si sin_truncar=true, devuelve TODOS los productos (se enviará en varios mensajes).", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}, "orden": {"type": "string", "enum": ["usd", "cantidad"]}, "limite": {"type": "integer"}, "incluir_productos": {"type": "boolean", "description": "Si false: responde solo total del periodo y pregunta si quiere detalle de productos."}, "sin_truncar": {"type": "boolean", "description": "Si true: incluye todos los productos (sin '... y N más')."}}, "required": ["periodo"]}},
     {"name": "rotacion_baja", "description": "Productos con nula o baja rotacion en los ultimos N dias.", "input_schema": {"type": "object", "properties": {"dias": {"type": "integer"}, "umbral_unidades": {"type": "number"}}, "required": []}},
     {"name": "stock_ingrediente", "description": "Cuanto tengo en inventario de un ingrediente especifico.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "consumo_ingrediente_recetas", "description": "Consumo teorico de una materia prima segun ventas (hist_ventas estado_match PROCESADO) y gramajes en BD_RECETAS_DETALLE; misma logica que el descargo de inventario; NO es stock en bodega. Devuelve total_consumo_teorico y por_plato (lista completa por nombre_producto de venta). No inventes filas ni subtotales: la suma de consumo_mp en por_plato debe coincidir con total_consumo_teorico. nombre_mp obligatorio. Periodo: semana (default lunes a hoy), mes, hoy; o fecha_ini y fecha_fin ISO.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}, "periodo": {"type": "string", "enum": ["semana", "mes", "hoy"]}, "fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}}, "required": ["nombre_mp"]}},
@@ -2007,6 +2010,52 @@ def _asegurar_texto_whatsapp(texto: str | None, *, max_len: int = 3800) -> str:
     return s
 
 
+def _partir_mensajes_whatsapp(texto: str, *, max_len: int = 3800) -> list[str]:
+    """
+    Divide un texto largo en varios mensajes <= max_len, intentando cortar por líneas.
+    Nunca devuelve lista vacía.
+    """
+    s = (texto or "").strip()
+    if not s:
+        return [_asegurar_texto_whatsapp("")]
+    if len(s) <= max_len:
+        return [s]
+
+    out: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for line in s.splitlines():
+        # Mantener saltos de línea en el cálculo (join agrega \n)
+        add = (line + "\n") if line is not None else "\n"
+        add_len = len(add)
+        if cur and (cur_len + add_len) > max_len:
+            chunk = "".join(cur).rstrip()
+            if chunk:
+                out.append(chunk)
+            cur = []
+            cur_len = 0
+
+        if add_len > max_len:
+            # Línea sola excede max: cortar en bruto
+            raw = add
+            while raw:
+                piece = raw[:max_len]
+                out.append(piece.rstrip())
+                raw = raw[max_len:]
+            continue
+
+        cur.append(add)
+        cur_len += add_len
+
+    tail = "".join(cur).rstrip()
+    if tail:
+        out.append(tail)
+    return out or [_asegurar_texto_whatsapp("")]
+
+
+_SPLIT_MARK = "\n\n---TATAMI_SPLIT---\n\n"
+
+
 def _system_completo() -> str:
     return SYSTEM + "\n\n" + _contexto_fechas_ecuador()
 
@@ -2068,11 +2117,15 @@ def llamar_agente(mensaje, telefono):
                 "content": json.dumps(result, ensure_ascii=False)
             })
         if texto_ventas_directo and len(tool_calls) == 1:
-            out = _asegurar_texto_whatsapp(texto_ventas_directo)
+            partes = _partir_mensajes_whatsapp(texto_ventas_directo, max_len=3800)
+            out = _asegurar_texto_whatsapp(partes[0])
             historiales[telefono].append({"role": "assistant", "content": out})
             if len(historiales[telefono]) > 20:
                 historiales[telefono] = historiales[telefono][-20:]
-            return out
+            if len(partes) == 1:
+                return out
+            # Dejar que el handler de WhatsApp envíe en varios mensajes.
+            return _SPLIT_MARK.join(partes)
         messages.append({"role": "user", "content": tool_results})
 
 
@@ -2406,10 +2459,21 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     "Error al contactar el modelo. "
                     f"Detalle técnico: {e!s}. Intenta en unos minutos."
                 )
-            out = _asegurar_texto_whatsapp(respuesta)
-            ok_send = await enviar_mensaje_meta(wa_id, out)
-            if not ok_send:
-                print(f"[Meta] enviar_mensaje_meta fallo para wa_id={wa_id!r}")
+            if isinstance(respuesta, str) and _SPLIT_MARK in respuesta:
+                partes = [p.strip() for p in respuesta.split(_SPLIT_MARK) if p.strip()]
+                if not partes:
+                    partes = [_asegurar_texto_whatsapp("")]
+                for i, p in enumerate(partes, 1):
+                    out = _asegurar_texto_whatsapp(p)
+                    ok_send = await enviar_mensaje_meta(wa_id, out)
+                    if not ok_send:
+                        print(f"[Meta] enviar_mensaje_meta fallo (parte {i}/{len(partes)}) wa_id={wa_id!r}")
+                        break
+            else:
+                out = _asegurar_texto_whatsapp(respuesta)
+                ok_send = await enviar_mensaje_meta(wa_id, out)
+                if not ok_send:
+                    print(f"[Meta] enviar_mensaje_meta fallo para wa_id={wa_id!r}")
             return
 
         if mtype in ("image", "document"):
