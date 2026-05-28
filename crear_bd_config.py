@@ -42,7 +42,7 @@ def main():
         [
             "chat_habilitar_tipos",
             "ventas_dia,ventas_semana,stock_critico,bodega_producto,traslado_bodegas,ventas_por_plato,rotacion_productos,inventario_ingrediente",
-            "WhatsApp/agente: tipos de consulta activos (coma). Vacío = todos. Ver CHAT_TIPOS en agente_chat.py",
+            "WhatsApp/agente: tipos de consulta activos (coma). Vacío = todos. Ver tools en whatsapp_webhook.py",
             "csv",
         ],
         [
