@@ -17,6 +17,11 @@ load_dotenv()  # ← debe estar antes de create_client
 
 from supabase import create_client
 
+from factura_confirmacion_parse import (
+    lineas_aplicables_factura_dict,
+    parse_confirmacion_factura,
+    resolver_lineas_duda,
+)
 from sesiones_factura import cerrar_sesion, crear_sesion_confirmacion, leer_sesion
 
 
@@ -156,6 +161,8 @@ def _formatear_resumen_confirmacion(factura_dict: dict) -> str:
             except Exception:
                 return 0.0
 
+    lineas_aplicables_factura_dict(factura_dict)
+
     proveedor = factura_dict.get("nombre_proveedor") or "?"
     ruc = factura_dict.get("ruc_proveedor") or "?"
     num = factura_dict.get("num_factura") or "?"
@@ -180,12 +187,13 @@ def _formatear_resumen_confirmacion(factura_dict: dict) -> str:
         cant = item.get("cantidad")
         price = item.get("precio_total") or item.get("precio_total_sin_impuesto")
         conf = item.get("confianza", "ALTA")
+        n = item.get("linea")
 
-        if cant and price:
+        if cant and price and n:
             flag = " ⚠️" if conf in ("BAJA", "MEDIA") else ""
-            lineas.append(f"• {desc}{flag} — {cant} × ${_to_f(price):.2f}")
-            items_con_datos.append(desc)
-        else:
+            lineas.append(f"{n}. {desc}{flag} — {cant} × ${_to_f(price):.2f}")
+            items_con_datos.append(n)
+        elif not (cant and price):
             items_sin_datos.append(desc)
 
     if items_sin_datos:
@@ -195,7 +203,7 @@ def _formatear_resumen_confirmacion(factura_dict: dict) -> str:
         "──────────────────",
         f"Total: ${_to_f(total):.2f}",
         "",
-        f"Se registrarán *{len(items_con_datos)} ítem(s)* en inventario.",
+        f"Con *SI* se aplican en inventario las líneas *sin marcar duda* ({len(items_con_datos)} ítem(s)).",
     ]
 
     if items_sin_datos:
@@ -205,13 +213,22 @@ def _formatear_resumen_confirmacion(factura_dict: dict) -> str:
 
     lineas += [
         "",
-        "¿Confirmas? Responde *SI* para aplicar o *NO* para cancelar.",
+        "¿Confirmas?",
+        "• *SI* — aplicar todo lo que haga match",
+        "• *SI DUDA 3,5* — esas líneas van a pendientes (sin stock), el resto normal",
+        "• *SI 1,2,4* o *SI SOLO 1,2* — solo esas a inventario; el resto a pendientes",
+        "• *NO* — cancelar",
     ]
 
     return "\n".join(lineas)
 
 
-async def _aplicar_factura_vision(factura_dict: dict, from_number: str) -> str:
+async def _aplicar_factura_vision(
+    factura_dict: dict,
+    from_number: str,
+    *,
+    lineas_duda: set[int] | None = None,
+) -> str:
     from procesar_facturas_drive import (
         procesar_factura_dict,
         registrar_factura_procesada,
@@ -221,6 +238,8 @@ async def _aplicar_factura_vision(factura_dict: dict, from_number: str) -> str:
     ruc = factura_dict["ruc_proveedor"]
     num = factura_dict["num_factura"]
     fecha = factura_dict["fecha_emision"]
+
+    lineas_aplicables_factura_dict(factura_dict)
 
     # Construir el dict en el formato que espera procesar_factura_dict
     # (misma estructura que retorna parsear_xml_sri)
@@ -242,6 +261,7 @@ async def _aplicar_factura_vision(factura_dict: dict, from_number: str) -> str:
                 "precio_unitario_xml": item.get("precio_unitario", 0),
                 "descuento": 0,
                 "precio_total_sin_impuesto": item.get("precio_total", 0),
+                "linea": item.get("linea"),
                 # costo_efectivo = precio_total / cantidad (igual que XML)
                 "costo_efectivo": (
                     item["precio_total"] / item["cantidad"]
@@ -259,7 +279,12 @@ async def _aplicar_factura_vision(factura_dict: dict, from_number: str) -> str:
     ya_completa_en_db = factura_ya_procesada(num, ruc)
 
     # Siempre: mov duplicado se omite solo; precios se vuelven a escribir por línea matcheada.
-    resultado = procesar_factura_dict(factura, dry_run=False, origen="VISION")
+    resultado = procesar_factura_dict(
+        factura,
+        dry_run=False,
+        origen="VISION",
+        lineas_duda=lineas_duda or set(),
+    )
 
     items_warn = len(resultado.get("sin_match") or []) + len(resultado.get("warn") or [])
     registrar_factura_procesada(
@@ -281,11 +306,26 @@ async def _aplicar_factura_vision(factura_dict: dict, from_number: str) -> str:
         lineas = [f"✅ Factura {num} registrada — {resultado['estado']}"]
         lineas.append(f"{resultado['matcheados']} ítem(s) aplicados en inventario.")
 
-    if resultado.get("sin_match"):
+    n_duda = int(resultado.get("lineas_duda") or 0)
+    if n_duda:
         lineas.append(
-            f"⚠️ {len(resultado['sin_match'])} ítem(s) sin match:\n"
-            + "\n".join(f"  - {d}" for d in resultado["sin_match"])
-            + "\nMoisés será notificado."
+            f"📋 {n_duda} línea(s) marcadas *DUDA* → BD_ITEMS_PENDIENTES (sin stock)."
+        )
+
+    if resultado.get("sin_match"):
+        def _fmt_sin_match(x) -> str:
+            if isinstance(x, dict):
+                ln = x.get("linea")
+                desc = x.get("descripcion", "?")
+                est = x.get("estado", "")
+                pref = f"L{ln} " if ln else ""
+                return f"  - {pref}{desc}" + (f" ({est})" if est else "")
+            return f"  - {x}"
+
+        lineas.append(
+            f"⚠️ {len(resultado['sin_match'])} ítem(s) pendientes / sin match:\n"
+            + "\n".join(_fmt_sin_match(d) for d in resultado["sin_match"])
+            + "\nRevisar hoja BD_ITEMS_PENDIENTES."
         )
     if resultado.get("warn"):
         lineas.append(f"ℹ️ {len(resultado['warn'])} advertencia(s) — ver logs.")
@@ -525,29 +565,50 @@ async def handle_mensaje_media(message: dict, from_number: str) -> str:
 
 async def handle_confirmacion(texto: str, from_number: str) -> str:
     """
-    Maneja confirmaciones SI/NO/CANCELAR cuando hay sesión activa.
-    Por ahora solo cierra sesión; luego puede ejecutar un pipeline de registro.
+    Maneja confirmaciones SI / NO / SI DUDA n,m / SI SOLO n,m cuando hay sesión activa.
     """
-    t = (texto or "").strip().upper()
     ses = leer_sesion(from_number)
     if not ses:
         return "No tengo ninguna operación pendiente para confirmar."
 
-    if t in ("NO", "CANCELAR"):
+    parsed = parse_confirmacion_factura(texto)
+    if parsed["action"] == "cancel":
         cerrar_sesion(from_number)
         return "Listo. Cancelado."
 
-    if t in ("SI", "SÍ"):
-        payload = ses.payload or {}
-        factura_dict = payload.get("factura_dict")
-        if not isinstance(factura_dict, dict):
-            cerrar_sesion(from_number)
-            return "No encontré la factura estructurada en la sesión. Reenvía el PDF por favor."
-        try:
-            resp = await _aplicar_factura_vision(factura_dict, from_number)
-        finally:
-            cerrar_sesion(from_number)
-        return resp
+    if parsed["action"] != "apply":
+        return (
+            "Respuesta inválida.\n"
+            "Usa: *SI* | *SI DUDA 3,5* | *SI SOLO 1,2* | *NO*"
+        )
 
-    return "Respuesta inválida. Usa SI / NO / CANCELAR."
+    payload = ses.payload or {}
+    factura_dict = payload.get("factura_dict")
+    if not isinstance(factura_dict, dict):
+        cerrar_sesion(from_number)
+        return "No encontré la factura estructurada en la sesión. Reenvía el archivo por favor."
+
+    _, todas_lineas = lineas_aplicables_factura_dict(factura_dict)
+
+    if parsed.get("lineas_solo") is not None and not parsed.get("lineas_solo"):
+        return "Falta indicar líneas. Ejemplo: *SI SOLO 1,2,3*"
+
+    if (parsed.get("lineas_duda") or set()) and not todas_lineas:
+        cerrar_sesion(from_number)
+        return "No hay líneas con cantidad/precio para marcar como duda."
+
+    lineas_duda = resolver_lineas_duda(
+        parsed.get("lineas_duda") or set(),
+        parsed.get("lineas_solo"),
+        todas_lineas,
+    )
+    try:
+        resp = await _aplicar_factura_vision(
+            factura_dict,
+            from_number,
+            lineas_duda=lineas_duda,
+        )
+    finally:
+        cerrar_sesion(from_number)
+    return resp
 
