@@ -9,15 +9,16 @@ Documento de referencia para alinear el código y la operación (actualizado tra
 | Hoja | Rol | Quién escribe (automático) | Quién edita (humano) |
 |------|-----|----------------------------|------------------------|
 | **BD_MP_SISTEMA** | Maestro operativo de materia prima: stock, costo ref, PAR, consumo | Agente: `procesar_facturas_drive`, `descargo_inventario`, `recalcular_stock_sheets`, `calcular_par_levels`, `sync_stock_sheets_desde_mov`; lectura: chat, reportes, pedidos | Operación (ajustes puntuales si se permite) |
-| **BD_ITEMS_PROV** | Catálogo ítem proveedor → MP: precios ref, unidad compra, factor | Agente: columnas `precio_ref`, `precio_unitario_xml`, `fecha_precio_ref` al procesar facturas | Compras / admin (altas, mapeos `cod_item_prov`) |
+| **BD_ITEMS_PROV** | Catálogo ítem proveedor → MP. `precio_ref` = USD por **unidad_base** (÷ factor); `precio_unitario_xml` = precio en factura (caja/pack) | Agente: `precio_ref`, `precio_unitario_xml`, `fecha_precio_ref` al procesar facturas | Compras / admin (altas, mapeos) |
 | **BD_PROV** | Proveedores (RUC, códigos) | Lectura para lookups | Admin |
 | **BD_RECETAS_DETALLE** | Receta × variedad → ingredientes (MP, gramajes, merma) | Lectura para descargo y PAR | Producción / carta |
+| **BD_SUBRECETAS** / **BD_SUBRECETAS_DETALLE** | Semielaborados: cabecera + detalle (MP o subreceta hijo) | Lectura; producción (pendiente WA) | Producción (Jacky) |
 | **BD_PRODUCTOS** | Productos Smart Menu ↔ recetas | Lectura (`matching_productos`) | Admin |
 | **BD_CONFIG** | Claves de configuración (`umbral_alerta_precio`, `par_level_dias_cobertura`, etc.) | `crear_bd_config.py` / manual | Admin |
 | **MOV_INVENTARIO** (hoja) | **Legacy / manual**: captura movimientos en Sheets para subir a Supabase | `asignar_cod_mov.py` escribe `cod_mov` y sincroniza a BD | Operación (solo si usan flujo hoja, no el principal) |
 | **FACTURAS_CONSOLIDADO_ITEMS** / hojas de consolidación | Ayuda matching facturas | `sugerir_matching_facturas`, `consolidar_facturas_xml_local` | Revisión compras |
 | **Reportes / otras** | Consultas | Varios scripts | — |
-| **Plantilla CONTEO** (por ciclo) | Captura del conteo físico en Google Sheets; vinculada a `conteo_ciclo.spreadsheet_id` / `sheet_name` (p. ej. pestaña `CONTEO`) | Apps Script “Iniciar” / “Enviar” (cuando existan) + backend | Bodega responsable (cocina, barra, consignación, bodega Israel, etc.) |
+| **Plantilla CONTEO** (por ciclo) | Captura del conteo físico en Google Sheets; vinculada a `conteo_ciclo.spreadsheet_id` / `sheet_name` (p. ej. pestaña `CONTEO`) | Apps Script “Iniciar” / “Enviar” (cuando existan) + backend | Bodega responsable (cocina, barra, consignación, bodega externa, etc.) |
 
 ---
 
@@ -46,12 +47,16 @@ BD_PROV (RUC, cod_proveedor)
     └── BD_ITEMS_PROV (cod_item_prov, cod_mp_sistema, precio_ref, …)
               └── match ← XML factura (procesar_facturas_drive)
 
-BD_MP_SISTEMA (cod_mp_sistema, stock_actual, costo_unitario_ref, par_level, consumo_diario_calculado)
-    ↑ escritura stock/costo: movimientos + recálculo
-    ↑ PAR/consumo: hist_ventas + BD_RECETAS_DETALLE + BD_CONFIG
+BD_MP_SISTEMA (cod_mp_sistema × cod_bodega, stock_actual, costo_unitario_ref; par_level global por MP)
+    ↑ stock/costo por bodega: movimientos + recalcular_stock_sheets
+    ↑ PAR/consumo global por cod_mp: hist_ventas + BD_RECETAS_DETALLE + BD_CONFIG
 
-hist_ventas ──descargo──► mov_inventario (SALIDA_VENTA) ──► (opcional) recalcular_stock_sheets
-XML factura ──► mov_inventario (ENTRADA) + BD_ITEMS_PROV precios + hist_precios (si variación)
+BD_ITEMS_PROV.cod_bodega_destino ──► ENTRADA factura (default por ítem; override con confirmación)
+BD_RECETAS_DETALLE.cod_bodega ──► SALIDA_VENTA solo BOD-001 / BOD-002
+
+hist_ventas ──descargo──► mov_inventario (SALIDA_VENTA desde cocina/barra); alerta stock &lt; 0 suspendida (`TATAMI_ALERT_STOCK_NEGATIVO=1` para reactivar)
+XML factura ──► mov_inventario (ENTRADA a bodega del ítem) + BD_ITEMS_PROV precios
+Traslado WA ──► TRASLADO_SALIDA / TRASLADO_ENTRADA + recalcular_stock_sheets
 
 BD_RECETAS_DETALLE + hist_ventas ──► calcular_par_levels ──► BD_MP_SISTEMA (consumo_diario, par_level)
 ```
@@ -128,7 +133,7 @@ Frecuencia PAR/consumo: al menos **diaria** si las ventas se cargan cada día; s
 
 ## 9. Inventario físico cíclico (conteo)
 
-**Objetivo:** conteo por **bodega** (cocina, barra, consignación, bodega Israel, etc.) con captura en **Google Sheets**, snapshot de stock/costo al **iniciar** conteo, **registro de cada envío** con validación estricta (ninguna fila vacía en columnas obligatorias; **0** es válido), comparación y **aprobación** (Moisés), y **contabilización solo vía** `mov_inventario` seguida de **`recalcular_stock_sheets --produccion`**.
+**Objetivo:** conteo por **bodega** (BOD-001 cocina, BOD-002 barra, BOD-003 consignación, BOD-005 externa; BOD-004 limpieza inactiva) con captura en **Google Sheets**, snapshot de stock/costo al **iniciar** conteo, **registro de cada envío** con validación estricta (ninguna fila vacía en columnas obligatorias; **0** es válido), comparación y **aprobación** (Moisés), y **contabilización solo vía** `mov_inventario` seguida de **`recalcular_stock_sheets --produccion`**.
 
 | Tabla | Idea clave |
 |-------|------------|
@@ -226,14 +231,15 @@ Omitir ingestión Smart Menu si no hay red local / sesión:
 python pipeline_diario.py --skip-ventas
 ```
 
-Orden interno: **ventas** (opcional) → **descargo_inventario** → **procesar_facturas_drive** → **recalcular_stock_sheets --produccion** → **calcular_par_levels**. Programar este comando en el Programador de tareas de Windows (o cron) con la frecuencia acordada.
+Orden interno: **ventas** (opcional) → **reconciliar_ventas_dia.py** → **descargo_inventario** → **procesar_facturas_drive** → **recalcular_stock_sheets --produccion** → **calcular_par_levels**. Programar este comando en el Programador de tareas de Windows (o cron) con la frecuencia acordada.
 
-### Ventas Smart Menu a mediodía (12:00)
+La reconciliación compara el grid de Smart Menu contra `hist_ventas`; si no cuadra dentro de `RECONCILIAR_TOL_ABS` el pipeline termina con error.
 
-El local opera hasta pasada la medianoche (ej. sábado ~1:00); cargar ventas a las **12:00 del día siguiente** permite ver en **hist_ventas** el cierre del ciclo nocturno como **ventas del día calendario** que Smart Menu reporta para esa fecha.
+**Fecha de ventas (sin `--fecha`):** el **día calendario anterior completo** en `America/Guayaquil` (p. ej. tarea el miércoles a las 12:00 carga el martes 00:00–23:59). Para forzar un día: `python pipeline_diario.py --fecha 2026-05-11`.
 
-- Script dedicado: **`ejecutar_ventas_mediodia.ps1`** (usa la fecha **local** de Windows y `ventas_smartmenu.py --fecha`).
-- **Desactivar o borrar** la tarea programada anterior si estaba a las **23:00** (11 PM).
+### Ventas solo (sin pipeline completo) a mediodía (12:00)
+
+**`ejecutar_ventas_mediodia.ps1`** usa la misma regla (**ayer** en Ecuador) y `ventas_smartmenu.py --fecha`. Si ya programaste **`ejecutar_pipeline_diario.ps1`** a las 12:00, no hace falta una segunda tarea de solo ventas (evita duplicar trabajo).
 
 **Crear tarea diaria a las 12:00** (PowerShell como administrador, ajustar la ruta si tu carpeta difiere):
 
@@ -245,6 +251,105 @@ schtasks /Create /TN "TatamiVentasMediodia" /TR "powershell.exe $accion" /SC DAI
 Comprobar: `schtasks /Query /TN "TatamiVentasMediodia"`.
 
 El **pipeline completo** (`pipeline_diario.py`) puede seguir en otro horario (ej. después del mediodía o noche) o ejecutarse manualmente; si quieres que **todo** el pipeline corra a las 12:00, programa esa tarea con `pipeline_diario.py` en lugar del script de solo ventas.
+
+---
+
+## 11. Subrecetas: producción, bodega y traslados (diseño)
+
+Las subrecetas **no** se descargan en ventas Smart Menu (solo `cod_receta` del plato). El inventario real se mueve en **producción** (MPs) y, si hay traslados entre áreas, en **stock del semi** por bodega.
+
+### Tres roles de bodega
+
+| Rol | Dónde se define | Uso |
+|-----|-----------------|-----|
+| **Producción** | `BD_SUBRECETAS.cod_bodega_produccion` (propuesta) | Bodega donde Jacky registra el lote (`cantidad_real` vs `rendimiento_estandar`). Ahí **entra** el semi terminado. **Operación habitual: `BOD-005` (externa).** |
+| **MP del detalle** | `BD_SUBRECETAS_DETALLE.cod_bodega` | Bodega de cada insumo al producir (regla de tres). Puede diferir por línea (ej. cebolla cocina, limón barra). |
+| **Uso en plato** | `BD_RECETAS_DETALLE.cod_bodega` en líneas `cod_subreceta` | Bodega desde la que se **consume** el semi al vender (ej. barra 30 g mermelada). |
+
+La **matriz de traslados** (`bodegas_config.traslado_permitido`) es la misma que para MPs: cocina↔barra↔externa; consignación↔barra. No hace falta otra matriz; sí distinguir **qué** se traslada (MP vs semi).
+
+### Flujos en `mov_inventario`
+
+```
+Producción (Jacky, WA o formulario)
+  → SALIDA MPs:  cantidad_detalle × (cantidad_real / rendimiento_estandar)
+                 por cada línea de BD_SUBRECETAS_DETALLE (cod_bodega de la línea)
+  → ENTRADA semi: cantidad_real en cod_bodega_produccion
+
+Traslado semi (misma validación trasladar_mp)
+  → TRASLADO_SALIDA / TRASLADO_ENTRADA del semi entre bodegas
+
+Venta (descargo diario)
+  → Línea MP en BD_RECETAS_DETALLE: SALIDA_VENTA de MP (como hoy)
+  → Línea SUB: SALIDA del semi en cod_bodega del plato (no MPs otra vez)
+```
+
+**PAR / consumo:** sigue siendo **global por `cod_mp`**; para planeación se puede **explotar** SUB→MP sin escribir movimientos (solo cálculo).
+
+### Stock del semi terminado
+
+Sin filas de stock, un traslado “de mermelada a barra” no tiene efecto en inventario. Opciones:
+
+1. **Recomendada:** pseudo-MP por subreceta (`cod_mp_sistema` = `SUB-` + `cod_subreceta`, o el mismo `cod_subreceta` si el maestro lo permite) con filas en **BD_MP_SISTEMA** por `(cod, cod_bodega)`. Reutiliza `recalcular_stock_sheets`, `trasladar_mp` y conteo cíclico.
+2. Tabla aparte `stock_subreceta` + tipos de movimiento nuevos (más trabajo, mismo concepto).
+
+### Cabecera `BD_SUBRECETAS` (propuesta)
+
+Además de las columnas actuales, agregar:
+
+- **`cod_bodega_produccion`** — default **`BOD-005`** (bodega externa / casa Jacky). Override puntual a `BOD-001` o `BOD-002` si el lote se hace en restaurante. No usar `BOD-003` (consignación virtual) para producir.
+
+**Flujo típico:** producir en **005** → traslado semi **005 → 001** (cocina) y/o **005 → 002** (barra) según matriz existente → ventas consumen semi desde la bodega del plato en `BD_RECETAS_DETALLE`.
+
+### Supabase (fase producción)
+
+Tabla **`produccion_subreceta`**: `id`, `cod_subreceta`, `cod_bodega_produccion`, `cantidad_producida`, `rendimiento_estandar_usado`, `factor`, `fecha`, `registrado_por`, `observaciones`; enlaces a `cod_mov` de MPs y del semi.
+
+### Qué no cambia
+
+- `BODEGAS_DESCARGO_VENTA` (solo 001/002) aplica a **MPs** en recetas de plato, no redefine producción.
+- Compras / facturas: solo MPs, sin cambio.
+- Traslados MP: tool `trasladar_mp` actual; traslado semi = misma matriz, otro `cod_mp_sistema` (pseudo-MP) o tool `trasladar_subreceta` que delegue en la misma lógica.
+
+### Riesgo a evitar
+
+Descargar MPs **en producción** y otra vez **en venta** por la misma subreceta. Regla: MPs solo en producción; ventas con línea SUB solo bajan **semi** en la bodega del plato.
+
+### Maestro Sheets (estado actual)
+
+**`BD_SUBRECETAS`:** `nombre_subreceta | cod_subreceta | rendimiento_estandar | unidad | activa | notas` (50 subrecetas).
+
+**`BD_SUBRECETAS_DETALLE`:**  
+`nombre_subreceta | cod_subreceta_padre | nombre_subreceta_hijo | cod_subreceta_hijo | nombre_mp | cod_mp_sistema | cantidad | unidad_base | cod_bodega | merma_pct`
+
+- Por fila: **`cod_subreceta_hijo`** (semi hijo) **o** **`cod_mp_sistema`** (MP), no ambos.
+- **Anidadas (4):** `021→022`, `023→004`, `036→037`, `016→017` (mayonesa ponzu usa salsa ponzu subreceta, no MP 095).
+- Auditoría: `python auditar_subrecetas.py`
+- Código: `subrecetas_detalle.py` (`cargar_bd_subrecetas`, `orden_produccion`, escalado por factor de lote).
+
+### Costo teórico de subrecetas
+
+| Columna en `BD_SUBRECETAS` | Significado |
+|----------------------------|-------------|
+| `costo_lote_estandar` | Suma del detalle al **rendimiento estándar** (USD ref.) |
+| `costo_unitario_estandar` | `costo_lote / rendimiento_estandar` (USD por gr, ml o uni) |
+| `costo_calc_at` | Última ejecución de `calcular_costo_subrecetas.py` |
+
+**Cálculo:** por línea de `BD_SUBRECETAS_DETALLE` del lote estándar:
+
+- **MP:** `cantidad × costo_unitario_ref` (`BD_MP_SISTEMA`, bodega de la línea; fallback 001/002/005).
+- **Subreceta hijo:** `cantidad × costo_unitario_estandar` del hijo (orden hijo → padre).
+- **merma_pct** en MP: factor `(1 + merma_pct)`.
+
+Compras siguen en MPs vía facturas; no hay precio fijo en la hoja de subreceta.
+
+**`costo_unitario_ref` en `BD_MP_SISTEMA`:** por `(cod_mp, cod_bodega)`, promedio **ponderado** de todas las ENTRADAs con costo en la ventana (`COSTO_REF_DIAS_VENTANA`, default 90 días). Varias líneas `BD_ITEMS_PROV` (proveedor/marca distinta) alimentan el mismo MP vía sus facturas. Sin compras en ventana: mediana robusta de `precio_ref` (ya en USD/unidad_base) vía `costo_mp_canonico.precio_ref_a_unidad_base` — **no** volver a dividir por factor salvo celdas legacy de bulto. Subrecetas y recetas usan solo este ref del maestro MP.
+
+**Reglas anti-errores (pack 12+1, gaseosas, MPs duplicados):** ver [`REGLAS_COSTOS_MP.md`](REGLAS_COSTOS_MP.md).
+
+Tras cambio de precios de compra: `sync_costos_mp_desde_items_prov.py --produccion` (o `recalcular_stock_sheets --produccion`) y luego `python calcular_costo_subrecetas.py --produccion` + `calcular_costo_recetas.py`.
+
+**Plato:** costo por gramo/uni de semi = `costo_unitario_estandar`; en `BD_RECETAS_DETALLE` línea SUB: `cantidad × costo_unitario_estandar`.
 
 ---
 
