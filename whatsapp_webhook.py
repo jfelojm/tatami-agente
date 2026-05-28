@@ -1557,6 +1557,11 @@ def tool_costo_plato(args):
     cod = (args.get("cod_receta") or "").strip()
     nombre = (args.get("nombre_plato") or args.get("nombre_receta") or "").strip()
     variedad = (args.get("variedad_smart_menu") or args.get("variedad") or "").strip()
+    incluir_ingredientes = args.get("incluir_ingredientes")
+    # Default: SOLO costo (evita spam). Si quieren ingredientes, lo piden explícitamente.
+    if incluir_ingredientes is None:
+        incluir_ingredientes = False
+    incluir_ingredientes = bool(incluir_ingredientes)
 
     if not cod and not nombre:
         return {"error": "Indica cod_receta o nombre_plato (nombre en BD_RECETAS_DETALLE)."}
@@ -1597,6 +1602,38 @@ def tool_costo_plato(args):
         key=lambda x: x.get("costo_linea", 0),
         reverse=True,
     )
+    costo = float(res.get("costo_plato_estandar") or 0.0)
+    nombre_out = (res.get("nombre_receta") or "").strip() or "(sin nombre)"
+    var_out = (res.get("variedad_smart_menu") or "").strip()
+    titulo = nombre_out + (f" ({var_out})" if var_out else "")
+
+    if not incluir_ingredientes:
+        texto = (
+            f"El costo de preparar un {titulo} es de {costo:.2f} USD "
+            f"(costo teórico estándar).\n\n"
+            "¿Quieres ver el desglose de ingredientes? (responde: 'ingredientes' o 'detalle')"
+        )
+    else:
+        top_n = int(args.get("top") or 0) if str(args.get("top") or "").strip() else 0
+        top_n = top_n if top_n > 0 else 25
+        lines = [
+            f"El costo de preparar un {titulo} es de {costo:.2f} USD (costo teórico estándar).",
+            "",
+            "Desglose de ingredientes principales:",
+        ]
+        for d in detalle[:top_n]:
+            nom_i = (d.get("nombre") or "").strip()
+            cant = d.get("cantidad")
+            ub = (d.get("unidad_base") or "").strip()
+            cl = float(d.get("costo_linea") or 0.0)
+            if nom_i:
+                lines.append(f"- {nom_i} {cant}{ub} - {cl:.2f} USD")
+        if len(detalle) > top_n:
+            lines.append(f"... y {len(detalle) - top_n} ingrediente(s) más (pide 'todos' si lo necesitas).")
+        lines.append("")
+        lines.append(f"Total: {costo:.2f} USD por plato")
+        texto = "\n".join(lines)
+
     return {
         "encontrado": True,
         "cod_receta": res.get("cod_receta"),
@@ -1608,6 +1645,7 @@ def tool_costo_plato(args):
         "lineas_sin_costo": res.get("lineas_sin_costo"),
         "notas": res.get("notas_costo"),
         "desglose": detalle,
+        "texto_whatsapp": texto,
         "nota": "Costo por 1 unidad vendida; subrecetas recalculadas desde MPs. Recalcular: calcular_costo_recetas.py --produccion",
     }
 
@@ -1880,7 +1918,7 @@ TOOLS = [
     {"name": "rotacion_baja", "description": "Productos con nula o baja rotacion en los ultimos N dias.", "input_schema": {"type": "object", "properties": {"dias": {"type": "integer"}, "umbral_unidades": {"type": "number"}}, "required": []}},
     {"name": "stock_ingrediente", "description": "Cuanto tengo en inventario de un ingrediente especifico.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "consumo_ingrediente_recetas", "description": "Consumo teorico de una materia prima segun ventas (hist_ventas estado_match PROCESADO) y gramajes en BD_RECETAS_DETALLE; misma logica que el descargo de inventario; NO es stock en bodega. Devuelve total_consumo_teorico y por_plato (lista completa por nombre_producto de venta). No inventes filas ni subtotales: la suma de consumo_mp en por_plato debe coincidir con total_consumo_teorico. nombre_mp obligatorio. Periodo: semana (default lunes a hoy), mes, hoy; o fecha_ini y fecha_fin ISO.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}, "periodo": {"type": "string", "enum": ["semana", "mes", "hoy"]}, "fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}}, "required": ["nombre_mp"]}},
-    {"name": "costo_plato", "description": "Costo teorico en USD de preparar 1 plato vendido (food cost estandar): suma MPs y subrecetas en BD_RECETAS_DETALLE. Usar cuando pregunten cuanto cuesta hacer un plato, margen de un producto, costo de hamburguesa/bao/etc. Pasa cod_receta (ej. 17) y opcional variedad_smart_menu, o nombre_plato (substring en nombre_receta). Devuelve costo_plato_estandar_usd y desglose por linea (MP/SUB, cantidad, unidad_base, costo_unitario, costo_linea).", "input_schema": {"type": "object", "properties": {"cod_receta": {"type": "string"}, "nombre_plato": {"type": "string"}, "nombre_receta": {"type": "string"}, "variedad_smart_menu": {"type": "string"}, "variedad": {"type": "string"}}, "required": []}},
+    {"name": "costo_plato", "description": "Costo teorico en USD de preparar 1 plato vendido (food cost estandar): suma MPs y subrecetas en BD_RECETAS_DETALLE. Por defecto devuelve texto_whatsapp con desglose; si incluir_ingredientes=false responde solo el total y pregunta si quieres ingredientes.", "input_schema": {"type": "object", "properties": {"cod_receta": {"type": "string"}, "nombre_plato": {"type": "string"}, "nombre_receta": {"type": "string"}, "variedad_smart_menu": {"type": "string"}, "variedad": {"type": "string"}, "incluir_ingredientes": {"type": "boolean"}, "top": {"type": "integer", "description": "Cuantos ingredientes principales listar cuando incluir_ingredientes=true (default 25)."}}, "required": []}},
     {"name": "receta_ingredientes", "description": "Ingredientes y costos de un plato vendido (cantidades por 1 unidad + USD por linea y total). Misma logica que costo_plato; usar cuando pidan receta, ingredientes, gramajes o desglose de un plato (ej. TARTA VASCA, BAO). cod_receta o nombre_plato; opcional variedad.", "input_schema": {"type": "object", "properties": {"cod_receta": {"type": "string"}, "nombre_plato": {"type": "string"}, "nombre_receta": {"type": "string"}, "variedad_smart_menu": {"type": "string"}, "variedad": {"type": "string"}}, "required": []}},
     {"name": "costo_subreceta", "description": "Costo teorico del lote estandar de una subreceta (BD_SUBRECETAS_DETALLE): MPs y subrecetas hijas con cantidades, unidad_base, costo_unitario y costo_linea; total lote y costo por unidad de rendimiento. Usar para salsas, masas, rellenos, etc. Pasa cod_subreceta (ej. 010) o nombre_subreceta (substring).", "input_schema": {"type": "object", "properties": {"cod_subreceta": {"type": "string"}, "nombre_subreceta": {"type": "string"}}, "required": []}},
     {"name": "auditar_costos_recetas", "description": "Auditoria de costos de platos inflados y lineas MP sospechosas en recetas (precio/kg mal como USD/gr, garnish caro en bebidas, sin costo). Usar cuando pidan revisar costos de carta, platos raros caros, o validar recetas vs costos. Devuelve top platos_inflados y lineas_mp_sospechosas con flags.", "input_schema": {"type": "object", "properties": {"umbral_plato": {"type": "number"}, "umbral_linea": {"type": "number"}, "top_platos": {"type": "integer"}, "top_lineas": {"type": "integer"}}, "required": []}},
@@ -1940,7 +1978,9 @@ Si el listado es largo y el usuario pidio TODO el detalle (ej. todos los platos 
 Para resumenes cortos puede bastar un parrafo; para pedidos explicitos de detalle completo, no resumas.
 Si preguntan cuanto se consumio de un ingrediente o materia prima en un periodo segun las recetas de los platos vendidos (no el stock en bodega), usa la tool consumo_ingrediente_recetas. No digas que el sistema no puede cruzar ventas con recetas: esa tool existe.
 Con consumo_ingrediente_recetas: enumera TODAS las filas de por_plato que devuelve la tool (nombres vienen de hist_ventas). El total de consumo en gramos debe ser exactamente total_consumo_teorico; no sumes de cabeza cifras inventadas ni mezcles con otros periodos. Si un nombre de plato no corresponde al menu real, dilo: los datos vienen de ventas y recetas enlazadas; puede haber producto mal nombrado, receta incorrecta o matching viejo.
-Si preguntan cuanto cuesta hacer/preparar un plato (food cost, costo de receta, margen teorico del plato), usa costo_plato con cod_receta o nombre_plato; muestra el desglose que devuelve la tool.
+Si preguntan cuanto cuesta hacer/preparar un plato (food cost, costo de receta, margen teorico del plato):
+- Si piden SOLO el costo ("costo de lomo kuro", "cuanto cuesta hacer X"): llama costo_plato con incluir_ingredientes=false y responde con el texto_whatsapp (solo total + pregunta si quiere ingredientes).
+- Si piden ingredientes/detalle/desglose: llama costo_plato con incluir_ingredientes=true (opcional top) y responde con el texto_whatsapp.
 Si piden ingredientes, gramajes, cantidades o desglose con costos de un plato (receta de venta), usa receta_ingredientes (o costo_plato; mismo resultado).
 Si preguntan costo, ingredientes o cantidades de una subreceta o semi (salsa, masa, relleno), usa costo_subreceta con cod_subreceta o nombre_subreceta; enumera todas las lineas del desglose (MP y SUB hijo) con cantidad, unidad y USD.
 Si piden revisar platos con costos muy altos, bebidas caras en costo, o MPs mal valorados en recetas, usa auditar_costos_recetas.
