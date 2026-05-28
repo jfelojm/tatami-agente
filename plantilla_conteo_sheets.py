@@ -125,6 +125,76 @@ def _lineas_a_filas(lineas: list[dict]) -> list[list]:
     return out
 
 
+def generar_plantilla_desde_ciclo(
+    ciclo_id: str,
+    nombre_hoja: str | None = None,
+    *,
+    sobreescribir: bool = False,
+) -> dict:
+    """
+    Crea pestaña de conteo en SPREADSHEET_ID y rellena filas desde conteo_linea.
+    Retorna resumen para WhatsApp / API.
+    """
+    ciclo_id = (ciclo_id or "").strip()
+    if not ciclo_id:
+        raise ValueError("ciclo_id requerido")
+
+    sb = _sb()
+    if not sb:
+        raise RuntimeError("Falta SUPABASE_URL / SUPABASE_KEY")
+
+    r = sb.table("conteo_ciclo").select("sheet_name,spreadsheet_id").eq("id", ciclo_id).limit(1).execute()
+    ciclo = (r.data or [None])[0]
+    if not ciclo:
+        raise ValueError(f"No existe ciclo {ciclo_id}")
+
+    nombre = (nombre_hoja or ciclo.get("sheet_name") or "CONTEO").strip() or "CONTEO"
+    lineas_db = _paginar_lineas_ciclo(sb, ciclo_id)
+    if not lineas_db:
+        raise ValueError(
+            f"Sin filas en conteo_linea para {ciclo_id}. Ejecute snapshot antes de la plantilla."
+        )
+
+    if not os.getenv("GOOGLE_CREDENTIALS_PATH") or not os.getenv("SPREADSHEET_ID"):
+        raise RuntimeError("GOOGLE_CREDENTIALS_PATH y SPREADSHEET_ID requeridos")
+
+    sh = _open_spreadsheet()
+    try:
+        existing = sh.worksheet(nombre)
+        if sobreescribir:
+            sh.del_worksheet(existing)
+        else:
+            raise ValueError(
+                f"Ya existe la pestaña '{nombre}'. Use sobreescribir=True o otro nombre."
+            )
+    except gspread.exceptions.WorksheetNotFound:
+        pass
+
+    nrows = max(500, len(lineas_db) + DATA_START + 50)
+    ws = sh.add_worksheet(title=nombre, rows=nrows, cols=10)
+    meta = _armar_meta_block(ciclo_id)
+    ws.update(f"A1:H{META_ROWS}", meta, value_input_option="USER_ENTERED")
+    filas = _lineas_a_filas(lineas_db)
+    end = DATA_START + len(filas) - 1
+    ws.update(f"A{DATA_START}:H{end}", filas, value_input_option="USER_ENTERED")
+    try:
+        ws.freeze(rows=META_ROWS)
+    except Exception:
+        pass
+
+    sid = os.getenv("SPREADSHEET_ID", "")
+    url = f"https://docs.google.com/spreadsheets/d/{sid}/edit#gid={ws.id}"
+    return {
+        "ciclo_id": ciclo_id,
+        "nombre_hoja": nombre,
+        "spreadsheet_id": sid,
+        "url_hoja": url,
+        "filas_datos": len(lineas_db),
+        "fila_inicio_datos": DATA_START,
+        "columna_conteo": "G",
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Plantilla Google Sheets para conteo físico")
     p.add_argument(
