@@ -10,6 +10,18 @@ from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
 
 from config_sheets import cfg
+from costo_mp_canonico import norm_mp
+from descargo_subreceta import calcular_consumo_sub, norm_cod_sub
+from recetas_detalle import es_linea_mp, es_linea_subreceta, norm_cod_receta
+from subrecetas_detalle import (
+    agrupar_detalle_por_padre,
+    cargar_bd_subrecetas,
+    cargar_bd_subrecetas_detalle,
+    es_linea_mp_detalle,
+    es_linea_subreceta_hijo,
+    orden_produccion,
+)
+from ventas_smartmenu import estado_documento_excluye_neto_operativo
 
 load_dotenv(override=True)
 
@@ -49,21 +61,96 @@ def _daterange(start: str, end: str) -> list[str]:
 
 
 def _cargar_recetas_detalle() -> list[dict]:
+    """Misma lógica que descargo_inventario.cargar_recetas: cabecera por fila con cod_receta."""
     sh = _get_sheet()
     ws = sh.worksheet("BD_RECETAS_DETALLE")
     values = ws.get_all_values()
-    headers = values[2]
-    rows = values[4:]
+    header_idx = None
+    for i, row in enumerate(values):
+        if any((c or "").strip() == "cod_receta" for c in row):
+            header_idx = i
+            break
+    if header_idx is None:
+        print("  ERROR: BD_RECETAS_DETALLE sin cabecera cod_receta")
+        return []
+    headers = [(c or "").strip() for c in values[header_idx]]
+    if "cod_receta" not in headers:
+        print("  ERROR: BD_RECETAS_DETALLE sin columna cod_receta")
+        return []
     out: list[dict] = []
-    for row in rows:
-        if not any(c.strip() for c in row):
+    for j in range(header_idx + 1, len(values)):
+        row = values[j]
+        if not row or not any((c or "").strip() for c in row):
+            continue
+        if str(row[0]).strip().startswith("["):
             continue
         r = {
-            headers[i].strip(): row[i].strip()
-            for i in range(min(len(headers), len(row)))
-            if headers[i].strip()
+            headers[k]: (row[k] if k < len(row) else "").strip()
+            for k in range(min(len(headers), len(row)))
+            if headers[k]
         }
+        cod_mp = (r.get("cod_mp_sistema") or "").strip()
+        cod_sub = (r.get("cod_subreceta") or "").strip()
+        if not cod_mp and not cod_sub:
+            continue
+        if cod_mp.startswith("#"):
+            continue
         out.append(r)
+    return out
+
+
+def _cargar_mp_por_unidad_subreceta() -> dict[str, dict[str, float]]:
+    """
+    cod_sub (normalizado) -> cod_mp -> cantidad MP por 1 unidad de salida de la subreceta.
+    Expande MPs directas y subrecetas hijas (anidadas), en orden topológico.
+    """
+    cab = cargar_bd_subrecetas()
+    por_padre = agrupar_detalle_por_padre(cargar_bd_subrecetas_detalle())
+    cab_all = {c: cab[c] for c in por_padre if c in cab}
+
+    rend_por_sub: dict[str, float] = {}
+    for cod, info in cab.items():
+        nk = norm_cod_sub(cod)
+        if nk:
+            rend_por_sub[nk] = _safe_float(info.get("rendimiento_estandar"))
+
+    try:
+        orden = orden_produccion(cab_all, por_padre)
+    except ValueError as e:
+        print(f"  WARN orden subrecetas: {e}")
+        orden = []
+    restantes = sorted(set(por_padre) - set(orden))
+    orden = orden + restantes
+
+    out: dict[str, dict[str, float]] = {}
+    for cod_sub in orden:
+        nk = norm_cod_sub(cod_sub)
+        if not nk:
+            continue
+        rend = rend_por_sub.get(nk, 0.0)
+        if rend <= 0:
+            continue
+        mp_map: dict[str, float] = defaultdict(float)
+        for ln in por_padre.get(cod_sub, []):
+            cant = _safe_float(ln.get("cantidad"))
+            if cant <= 0:
+                continue
+            if es_linea_mp_detalle(ln):
+                mp = norm_mp(ln.get("cod_mp_sistema") or "")
+                if not mp:
+                    continue
+                merma = _safe_float(ln.get("merma_pct"))
+                mp_map[mp] += (cant / rend) * (1.0 + merma)
+            elif es_linea_subreceta_hijo(ln):
+                hijo = norm_cod_sub(ln.get("cod_subreceta_hijo") or "")
+                hijo_map = out.get(hijo, {})
+                if not hijo_map:
+                    continue
+                factor = cant / rend
+                for mp, per_unit in hijo_map.items():
+                    mp_map[mp] += factor * per_unit
+        if mp_map:
+            out[nk] = dict(mp_map)
     return out
 
 
@@ -96,9 +183,14 @@ def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
 
     print(f"  {len(todas_ventas)} ventas cargadas")
 
+    mp_sub_unit = _cargar_mp_por_unidad_subreceta()
+    print(f"  {len(mp_sub_unit)} subrecetas con MPs expandidas")
+
+    # Key = (cod_receta normalizado, variedad normalizada) para empatar con hist_ventas,
+    # que suele venir con ceros a la izquierda (ej. "007") mientras BD_RECETAS_DETALLE usa "7".
     lookup_recetas: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for ing in recetas:
-        cod_r = ing.get("cod_receta", "").strip()
+        cod_r = norm_cod_receta(ing.get("cod_receta", ""))
         var = ing.get("variedad_smart_menu", "").strip().upper()
         lookup_recetas[(cod_r, var)].append(ing)
 
@@ -106,9 +198,9 @@ def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
     fechas_activas: set[str] = set()
 
     for venta in todas_ventas:
-        if (venta.get("estado_documento") or "ACTIVO").strip().upper() == "ANULADO":
+        if estado_documento_excluye_neto_operativo(venta.get("estado_documento")):
             continue
-        cod_r = (venta.get("cod_receta") or "").strip()
+        cod_r = norm_cod_receta(venta.get("cod_receta") or "")
         variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
         cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
         fecha = (venta.get("fecha") or "").strip()
@@ -125,15 +217,26 @@ def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
         )
 
         for ing in ingredientes:
-            cod_mp = ing.get("cod_mp_sistema", "").strip()
-            if not cod_mp or cod_mp.startswith("#"):
-                continue
-            gramaje = _safe_float(ing.get("cantidad", 0))
-            pct_aplicacion = _safe_float(ing.get("pct_aplicacion", 1) or 1) or 1.0
-            merma_pct = _safe_float(ing.get("merma_pct", 0) or 0)
-            consumo_total[cod_mp] += (
-                cantidad * gramaje * pct_aplicacion * (1 + merma_pct)
-            )
+            if es_linea_mp(ing):
+                cod_mp = norm_mp(ing.get("cod_mp_sistema", ""))
+                if not cod_mp or cod_mp.startswith("#"):
+                    continue
+                gramaje = _safe_float(ing.get("cantidad", 0))
+                pct_aplicacion = _safe_float(ing.get("pct_aplicacion", 1) or 1) or 1.0
+                merma_pct = _safe_float(ing.get("merma_pct", 0) or 0)
+                consumo_total[cod_mp] += (
+                    cantidad * gramaje * pct_aplicacion * (1 + merma_pct)
+                )
+            elif es_linea_subreceta(ing):
+                sub = norm_cod_sub(ing.get("cod_subreceta") or "")
+                mp_map = mp_sub_unit.get(sub, {})
+                if not mp_map:
+                    continue
+                units_sub = calcular_consumo_sub(ing, cantidad)
+                if units_sub <= 0:
+                    continue
+                for mp, per_unit in mp_map.items():
+                    consumo_total[mp] += units_sub * per_unit
 
     dias_activos = len(fechas_activas)
     print(f"  {dias_activos} dias activos | {len(consumo_total)} MPs con consumo")
@@ -147,9 +250,9 @@ def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
     print("  DEBUG desglose papa(120) por receta:")
     consumo_por_receta: dict[str, float] = defaultdict(float)
     for venta in todas_ventas:
-        if (venta.get("estado_documento") or "ACTIVO").strip().upper() == "ANULADO":
+        if estado_documento_excluye_neto_operativo(venta.get("estado_documento")):
             continue
-        cod_r = (venta.get("cod_receta") or "").strip()
+        cod_r = norm_cod_receta(venta.get("cod_receta") or "")
         variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
         cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
         if not cod_r or cantidad <= 0:
@@ -161,7 +264,7 @@ def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
             or []
         )
         for ing in ingredientes:
-            if (ing.get("cod_mp_sistema", "") or "").strip() == "120":
+            if norm_mp(ing.get("cod_mp_sistema", "")) == "120":
                 gramaje = _safe_float(ing.get("cantidad", 0))
                 if gramaje:
                     consumo_por_receta[cod_r] += cantidad * gramaje
@@ -226,27 +329,37 @@ def calcular_par_levels(dry_run: bool = False):
     data_rows = values[header_row_idx + 1 :]
     updates = []
 
-    print("[3] Calculando par levels...")
+    # PAR y consumo son globales por cod_mp (no por bodega)
+    par_por_mp: dict[str, float] = {}
+    consumo_por_mp: dict[str, float] = {}
+    for cod, cd in consumo_diario.items():
+        consumo_por_mp[cod] = cd
+        par_por_mp[cod] = round(cd * dias_cobertura, 4) if cd > 0 else 0.0
+
+    print("[3] Calculando par levels (global por cod_mp)...")
     for i, row in enumerate(data_rows):
         if not any(c.strip() for c in row):
             continue
-        cod = row[col_cod - 1].strip() if len(row) >= col_cod else ""
+        cod = norm_mp(row[col_cod - 1].strip() if len(row) >= col_cod else "")
         if not cod:
             continue
-        cd = float(consumo_diario.get(cod, 0.0))
-        par_level = round(cd * dias_cobertura, 4) if cd > 0 else 0.0
+        cd = float(consumo_por_mp.get(cod, 0.0))
+        par_level = float(par_por_mp.get(cod, 0.0))
         row_1based = header_row_idx + i + 2
 
-        if cd > 0:
-            print(f"  {cod}: consumo_diario={round(cd,6)} par={par_level}")
-
-        # Escribir siempre consumo y PAR (incl. 0) para no dejar valores viejos en Sheets
         if not dry_run:
             updates.append(
                 {"range": rowcol_to_a1(row_1based, col_par), "values": [[par_level]]}
             )
             updates.append(
                 {"range": rowcol_to_a1(row_1based, col_consumo), "values": [[cd]]}
+            )
+
+    for cod in sorted(consumo_por_mp.keys()):
+        if consumo_por_mp[cod] > 0:
+            print(
+                f"  {cod}: consumo_diario={round(consumo_por_mp[cod], 6)} "
+                f"par={par_por_mp[cod]} (todas las filas MP×bodega)"
             )
 
     print(f"[4] {'DRY RUN - no escribe' if dry_run else 'Escribiendo'}: {len(updates)} updates")
