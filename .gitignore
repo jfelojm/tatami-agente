@@ -32,6 +32,10 @@ _fix_*.py
 _peek_*.py
 _revision_*.py
 _consulta_*.py
+_*.py
+
+# Apps Script deprecados (usar tatami_maestro_unificado.gs)
+scripts_apps_script/promover_pendientes_items_prov.gs
 
 # one-off scripts / diagnósticos (no versionar)
 diagnostico_*.py
