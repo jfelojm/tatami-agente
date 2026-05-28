@@ -25,7 +25,12 @@ from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 
-from codigo_factura_match import normalizar_cod_item_para_match
+from codigo_factura_match import (
+    cod_item_prov_para_catalogo,
+    cod_proveedores_strip_sufijo_desde_bd_prov,
+    normalizar_cod_item_para_match,
+    normalizar_cod_proveedor_para_match,
+)
 
 load_dotenv(override=True)
 
@@ -46,13 +51,6 @@ def _auth():
     return gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
 
 
-def _find_header_row(values: list[list[str]], marker: str) -> int | None:
-    for i, row in enumerate(values):
-        if any((c or "").strip() == marker for c in row):
-            return i
-    return None
-
-
 def _prov_headers_and_rows(values: list[list[str]]) -> tuple[list[str], list[list[str]]] | None:
     hi = _find_header_row(values, "cod_item_prov")
     if hi is None:
@@ -62,6 +60,45 @@ def _prov_headers_and_rows(values: list[list[str]]) -> tuple[list[str], list[lis
     data_start = hi + 2
     rows = values[data_start:]
     return headers, rows
+
+
+def _find_header_row(values: list[list[str]], marker: str) -> int | None:
+    for i, row in enumerate(values):
+        if any((c or "").strip() == marker for c in row):
+            return i
+    return None
+
+
+def _fila_tiene_datos_catalogo(
+    row: list[str],
+    ic_item: int,
+    ic_prov: int,
+    ic_mp: int,
+) -> bool:
+    if ic_item >= 0 and ic_item < len(row) and (row[ic_item] or "").strip():
+        return True
+    if ic_prov >= 0 and ic_prov < len(row) and (row[ic_prov] or "").strip():
+        return True
+    if ic_mp >= 0 and ic_mp < len(row) and (row[ic_mp] or "").strip():
+        return True
+    return False
+
+
+def _find_next_row_items_prov(
+    values: list[list[str]], hi: int, headers: list[str]
+) -> int:
+    """Fila 1-based donde insertar (después del último registro con datos)."""
+    ic_item = headers.index("cod_item_prov") if "cod_item_prov" in headers else -1
+    ic_prov = headers.index("cod_proveedor") if "cod_proveedor" in headers else -1
+    ic_mp = headers.index("cod_mp_sistema") if "cod_mp_sistema" in headers else -1
+    last_data_idx = hi
+    for i in range(hi + 1, len(values)):
+        row = values[i]
+        if not row or (row and str(row[0]).strip().startswith("[")):
+            continue
+        if _fila_tiene_datos_catalogo(row, ic_item, ic_prov, ic_mp):
+            last_data_idx = i
+    return last_data_idx + 2
 
 
 def _cargar_items_prov_dicts(values: list[list[str]]) -> tuple[list[str], list[dict]]:
@@ -92,7 +129,7 @@ def _ya_existe(
 ) -> bool:
     want = normalizar_cod_item_para_match(cod_item_xml, razon_social, ruc)
     for it in items:
-        if (it.get("cod_proveedor") or "").strip() != cod_prov.strip():
+        if normalizar_cod_proveedor_para_match(it.get("cod_proveedor") or "") != normalizar_cod_proveedor_para_match(cod_prov):
             continue
         got = normalizar_cod_item_para_match(
             it.get("cod_item_prov") or "", razon_social, ruc
@@ -163,14 +200,27 @@ def _armar_fila_prov(
     headers_prov: list[str],
     pend: dict[str, str],
     mp: dict[str, str],
+    *,
+    cod_proveedores_strip: frozenset[str] | None = None,
 ) -> list[str]:
     """Construye lista en el orden de columnas de BD_ITEMS_PROV."""
     cod_mp = (pend.get("cod_mp_asignado") or "").strip()
     ub = (mp.get("unidad_base") or "").strip()
+    razon = (pend.get("razon_social") or "").strip()
+    ruc = (pend.get("ruc_proveedor") or "").strip()
+    cod_prov = (pend.get("cod_proveedor") or "").strip()
+    cod_xml = (pend.get("cod_item_xml") or "").strip()
+    cod_catalogo = cod_item_prov_para_catalogo(
+        cod_xml,
+        razon_social=razon,
+        ruc=ruc,
+        cod_proveedor=cod_prov,
+        cod_proveedores_strip=cod_proveedores_strip,
+    )
 
     valores: dict[str, str] = {
-        "cod_item_prov": (pend.get("cod_item_xml") or "").strip(),
-        "cod_proveedor": (pend.get("cod_proveedor") or "").strip(),
+        "cod_item_prov": cod_catalogo,
+        "cod_proveedor": cod_prov,
         "cod_mp_sistema": cod_mp,
         "descripcion_proveedor": (pend.get("descripcion_xml") or "").strip(),
         "activo": "SI",
@@ -217,14 +267,23 @@ def run(*, dry_run: bool) -> int:
         return 2
 
     vals_prov = ws_prov.get_all_values()
+    hi_prov = _find_header_row(vals_prov, "cod_item_prov")
     headers_prov, items_prov_list = _cargar_items_prov_dicts(vals_prov)
-    if not headers_prov:
+    if not headers_prov or hi_prov is None:
         print("ERROR: no se encontró cabecera cod_item_prov en BD_ITEMS_PROV")
         return 2
 
     mp_lookup = _cargar_mp_lookup(ws_mp.get_all_values())
     if not mp_lookup:
         print("WARN: BD_MP_SISTEMA vacío o sin cod_mp_sistema; no se podrá rellenar nombre/unidad.")
+
+    try:
+        vals_bd_prov = sh.worksheet("BD_PROV").get_all_values()
+        cod_proveedores_strip = cod_proveedores_strip_sufijo_desde_bd_prov(vals_bd_prov)
+    except Exception:
+        cod_proveedores_strip = frozenset()
+    if cod_proveedores_strip:
+        print(f"  Proveedores con código sin sufijo -N (COLEMUN, etc.): {len(cod_proveedores_strip)}")
 
     insertadas = 0
     omitidas = 0
@@ -247,6 +306,14 @@ def run(*, dry_run: bool) -> int:
         if _ya_existe(items_prov_list, cod_prov, cod_xml, razon, ruc):
             print(f"  SKIP fila {sheet_row}: ya existe en BD_ITEMS_PROV ({cod_prov} / {cod_xml})")
             omitidas += 1
+            if not dry_run:
+                col_estado = idx_estado + 1
+                rng = rowcol_to_a1(sheet_row, col_estado)
+                ws_p.update(
+                    range_name=rng,
+                    values=[["REGISTRADO"]],
+                    value_input_option=ValueInputOption.user_entered,
+                )
             continue
 
         mp = mp_lookup.get(cod_mp)
@@ -255,25 +322,43 @@ def run(*, dry_run: bool) -> int:
             errores += 1
             continue
 
-        nueva = _armar_fila_prov(headers_prov, pend, mp)
+        nueva = _armar_fila_prov(
+            headers_prov, pend, mp, cod_proveedores_strip=cod_proveedores_strip
+        )
+        cod_cat = nueva[headers_prov.index("cod_item_prov")] if "cod_item_prov" in headers_prov else ""
 
         if dry_run:
-            print(f"  [DRY RUN] fila {sheet_row}: insertaría {cod_prov} | {cod_xml} -> {cod_mp}")
+            extra = f" (catálogo {cod_cat})" if cod_cat and cod_cat != cod_xml else ""
+            print(f"  [DRY RUN] fila {sheet_row}: insertaría {cod_prov} | {cod_xml}{extra} -> {cod_mp}")
             insertadas += 1
             continue
 
-        ws_prov.append_row(nueva, value_input_option=ValueInputOption.user_entered)
-
+        filas_nuevas.append(nueva)
         items_prov_list.append(
             {headers_prov[j]: nueva[j] for j in range(len(headers_prov))}
         )
 
         col_estado = idx_estado + 1
         rng = rowcol_to_a1(sheet_row, col_estado)
-        ws_p.update(rng, [["REGISTRADO"]], value_input_option=ValueInputOption.user_entered)
+        ws_p.update(
+            range_name=rng,
+            values=[["REGISTRADO"]],
+            value_input_option=ValueInputOption.user_entered,
+        )
 
-        print(f"  OK fila {sheet_row}: alta BD_ITEMS_PROV | {cod_prov} | {cod_xml} -> {cod_mp}")
+        extra = f" cod_item_prov={cod_cat}" if cod_cat and cod_cat != cod_xml else ""
+        print(f"  OK fila {sheet_row}: alta BD_ITEMS_PROV | {cod_prov} | {cod_xml}{extra} -> {cod_mp}")
         insertadas += 1
+
+    if not dry_run and filas_nuevas:
+        start_row = _find_next_row_items_prov(vals_prov, hi_prov, headers_prov)
+        end_row = start_row + len(filas_nuevas) - 1
+        ws_prov.update(
+            range_name=f"A{start_row}",
+            values=filas_nuevas,
+            value_input_option=ValueInputOption.user_entered,
+        )
+        print(f"  → BD_ITEMS_PROV: escritas filas {start_row}-{end_row}")
 
     print(
         f"\nListo: insertadas={insertadas} omitidas_duplicado={omitidas} "

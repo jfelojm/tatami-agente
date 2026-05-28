@@ -29,6 +29,12 @@ def aplica_strip_sufijo_orden_factura(razon_social: str = "", ruc: str = "") -> 
     return _ruc_normalizado(ruc) in _STRIP_ORDEN_RUCS
 
 
+def normalizar_cod_proveedor_para_match(cod: str) -> str:
+    """Normaliza cod_proveedor para comparar filas de BD_ITEMS_PROV / pendientes."""
+    s = (cod or "").strip().lstrip("'")
+    return re.sub(r"\s+", "", s)
+
+
 def normalizar_cod_item_para_match(
     cod: str,
     razon_social: str = "",
@@ -56,6 +62,26 @@ def normalizar_cod_item_para_match(
         s = re.sub(r"-\d+$", "", s)
     s = s.lstrip("0")
     return s
+
+
+def cod_item_prov_para_catalogo(
+    cod_xml: str,
+    *,
+    razon_social: str = "",
+    ruc: str = "",
+    cod_proveedor: str = "",
+    cod_proveedores_strip: frozenset[str] | None = None,
+) -> str:
+    """
+    Código a guardar en BD_ITEMS_PROV (sin sufijo -N de orden en factura COLEMUN).
+    """
+    return normalizar_cod_item_para_match(
+        cod_xml,
+        razon_social,
+        ruc,
+        cod_proveedor=cod_proveedor,
+        cod_proveedores_strip=cod_proveedores_strip,
+    )
 
 
 def cod_proveedores_strip_sufijo_desde_bd_prov(values: list[list[str]]) -> frozenset[str]:

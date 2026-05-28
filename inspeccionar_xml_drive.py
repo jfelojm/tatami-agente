@@ -20,17 +20,13 @@ folder_id = os.getenv("GOOGLE_DRIVE_FACTURAS_FOLDER_ID")
 if not folder_id:
     raise SystemExit("Falta GOOGLE_DRIVE_FACTURAS_FOLDER_ID en .env")
 
-# Drive suele usar text/xml o application/xml
-q = (
-    f"'{folder_id}' in parents and trashed=false "
-    "and (mimeType='text/xml' or mimeType='application/xml')"
-)
-results = service.files().list(q=q, fields="files(id,name)").execute()
+from procesar_facturas_drive import listar_xmls_pendientes
 
-xmls = results.get("files", [])
+xmls = listar_xmls_pendientes()
 print(f"XMLs encontrados: {len(xmls)}")
 for i, f in enumerate(xmls):
-    print(f"  [{i}] {f['name']} | {f['id']}")
+    mime = (f.get("mimeType") or "").split("/")[-1].ljust(22)
+    print(f"  [{i}] {mime} | {f['name']} | {f['id']}")
 
 if xmls:
     primer_xml = xmls[0]

@@ -23,8 +23,8 @@ from supabase import create_client
 
 load_dotenv(override=True)
 
-TIPOS_SUMA = {"AJUSTE_POSITIVO", "ENTRADA"}
-TIPOS_RESTA = {"SALIDA_VENTA", "AJUSTE_NEGATIVO"}
+TIPOS_SUMA = {"AJUSTE_POSITIVO", "ENTRADA", "TRASLADO_ENTRADA"}
+TIPOS_RESTA = {"SALIDA_VENTA", "AJUSTE_NEGATIVO", "TRASLADO_SALIDA"}
 
 
 def paginar(tabla: str, select: str) -> list:
@@ -105,7 +105,7 @@ def main():
     else:
         lista = lista[: args.top]
 
-    print("\nMP más negativos (stock = suma(ENTRADA+AJUSTE+) − suma(SALIDA+AJUSTE−); arranca en 0):\n")
+    print("\nMP mas negativos (stock = suma(ENTRADA+AJUSTE+) - suma(SALIDA+AJUSTE-); arranca en 0):\n")
     print(
         f"{'cod_mp':<8} {'stock':>14} {'n_+':>7} {'sum_+':>14} {'n_-':>7} {'sum_-':>14} {'otros':>6}"
         "\n         (n_+/sum_+ = movimientos que SUMAN al stock; incluye ENTRADA y AJUSTE_POSITIVO)"
@@ -129,10 +129,10 @@ def main():
 
     print(
         "\nNotas:"
-        "\n  · Stock negativo fuerte suele ser: pocas ENTRADA vs muchas SALIDA_VENTA,"
+        "\n  - Stock negativo fuerte suele ser: pocas ENTRADA vs muchas SALIDA_VENTA,"
         "\n    o inventario inicial nunca cargado como ENTRADA/AJUSTE_POSITIVO."
-        "\n  · Revisar duplicados: limpiar_mov_duplicados.py (entradas factura)."
-        "\n  · Revisar recetas: gramajes/cantidades que inflan consumo."
+        "\n  - Revisar duplicados: limpiar_mov_duplicados.py (entradas factura)."
+        "\n  - Revisar recetas: gramajes/cantidades que inflan consumo."
     )
 
 
