@@ -1362,6 +1362,10 @@ def tool_ventas_por_plato(args):
     if orden not in ("usd", "cantidad"):
         orden = "usd"
     lim = _limite_ranking(args)
+    incluir_productos = args.get("incluir_productos")
+    if incluir_productos is None:
+        incluir_productos = True
+    incluir_productos = bool(incluir_productos)
 
     resumen = calcular_resumen_ventas(rows, orden=orden, limite=lim)
     total_oficial, tickets = _total_desde_hist_ventas_docs(fecha_ini, fecha_fin)
@@ -1374,6 +1378,7 @@ def tool_ventas_por_plato(args):
         periodo_label=label,
         fecha_ini=fecha_ini,
         fecha_fin=fecha_fin,
+        incluir_productos=incluir_productos,
     )
     return {
         "periodo": label,
@@ -1868,7 +1873,7 @@ TOOLS = [
     {"name": "plato_top_semana", "description": "Top 10 platos mas vendidos esta semana por cantidad.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "buscar_bodega", "description": "En que bodega se encuentra un ingrediente o insumo.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "trasladar_mp", "description": "Trasladar un insumo de una bodega a otra. Siempre pedir confirmacion antes de ejecutar.", "input_schema": {"type": "object", "properties": {"cod_mp_sistema": {"type": "string"}, "bodega_origen": {"type": "string"}, "bodega_destino": {"type": "string"}, "cantidad": {"type": "number"}, "confirmado": {"type": "boolean"}}, "required": ["cod_mp_sistema","bodega_origen","bodega_destino","cantidad","confirmado"]}},
-    {"name": "ventas_por_plato", "description": "Ventas al cliente (hist_ventas): total del periodo + ranking SOLO productos en BD_PRODUCTOS (carta). Nunca inventes platos que no esten en ranking. Periodo hoy/semana/mes. orden: usd (default) o cantidad. Devuelve texto_whatsapp: copialo tal cual al usuario. Incluye desglose_variedades para BAO y similares. PUBLICIDAD Y PROPAGANDA y otros en catalogo si aplican.", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}, "orden": {"type": "string", "enum": ["usd", "cantidad"]}, "limite": {"type": "integer"}}, "required": ["periodo"]}},
+    {"name": "ventas_por_plato", "description": "Ventas al cliente (hist_ventas): total del periodo (siempre) + ranking SOLO productos en BD_PRODUCTOS (carta) si incluir_productos=true. Nunca inventes platos que no esten en ranking. Periodo hoy/semana/mes. orden: usd (default) o cantidad. Devuelve texto_whatsapp: copialo tal cual al usuario. Incluye desglose_variedades para BAO y similares cuando se pide detalle.", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}, "orden": {"type": "string", "enum": ["usd", "cantidad"]}, "limite": {"type": "integer"}, "incluir_productos": {"type": "boolean", "description": "Si false: responde solo total del periodo y pregunta si quiere detalle de productos."}}, "required": ["periodo"]}},
     {"name": "rotacion_baja", "description": "Productos con nula o baja rotacion en los ultimos N dias.", "input_schema": {"type": "object", "properties": {"dias": {"type": "integer"}, "umbral_unidades": {"type": "number"}}, "required": []}},
     {"name": "stock_ingrediente", "description": "Cuanto tengo en inventario de un ingrediente especifico.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "consumo_ingrediente_recetas", "description": "Consumo teorico de una materia prima segun ventas (hist_ventas estado_match PROCESADO) y gramajes en BD_RECETAS_DETALLE; misma logica que el descargo de inventario; NO es stock en bodega. Devuelve total_consumo_teorico y por_plato (lista completa por nombre_producto de venta). No inventes filas ni subtotales: la suma de consumo_mp en por_plato debe coincidir con total_consumo_teorico. nombre_mp obligatorio. Periodo: semana (default lunes a hoy), mes, hoy; o fecha_ini y fecha_fin ISO.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}, "periodo": {"type": "string", "enum": ["semana", "mes", "hoy"]}, "fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}}, "required": ["nombre_mp"]}},
@@ -1917,7 +1922,8 @@ Respondes preguntas sobre ventas, inventario, bodegas y pedidos con datos reales
 Responde siempre en espanol, de forma clara y directa, como si hablaras con el socio del restaurante.
 Usa los datos exactos de las tools. Si no hay datos dilo claramente.
 Regla estricta VENTAS vs COMPRAS: si preguntan cuanto se vendio, ventas del mes/semana, productos mas vendidos al cliente, usa `ventas_por_plato` (periodo mes/semana/hoy). NO uses compras_facturas_rango salvo que pregunten explicitamente compras a proveedores o facturas de compra.
-Para resumen de ventas del periodo con `ventas_por_plato`: responde copiando literalmente el campo `texto_whatsapp` de la tool, sin reescribir ni agregar platos.
+Si el usuario pide SOLO la cifra (ej. "cuanto se vendio en mayo", "total de ventas de la semana"), primero responde SOLO el total y pregunta si quiere tambien el detalle de productos. Para eso, llama `ventas_por_plato` con incluir_productos=false.
+Si el usuario pide ranking/detalle (ej. "top 20", "detalle", "productos mas vendidos"), llama `ventas_por_plato` con incluir_productos=true (default) y responde copiando literalmente `texto_whatsapp`.
 NUNCA inventes productos (ej. TATAMI WINGS, EDAMAME) que no esten en `ranking` de la tool. Solo existen los platos en BD_PRODUCTOS que aparecen en el JSON.
 Si preguntan detalle de UN solo dia, usa `ventas_dia` y el array `platos` exacto de la tool.
 Si la lista es larga y no hay texto_whatsapp, continua en mensajes siguientes sin inventar filas.

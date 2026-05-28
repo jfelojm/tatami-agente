@@ -156,6 +156,7 @@ def formatear_resumen_ventas_whatsapp(
     periodo_label: str,
     fecha_ini: str,
     fecha_fin: str,
+    incluir_productos: bool = True,
     max_items: int = 50,
 ) -> str:
     """Texto listo para WhatsApp (sin markdown)."""
@@ -176,28 +177,32 @@ def formatear_resumen_ventas_whatsapp(
             f"({resumen.get('total_usd_excluido_fuera_catalogo', 0):.2f} USD) no aparecen en este listado."
         )
 
-    orden = resumen.get("orden", "usd")
-    subt = "por monto USD" if orden == "usd" else "por cantidad vendida"
-    lines.append("")
-    lines.append(f"Ranking {subt}:")
-
-    ranking = resumen.get("ranking") or []
-    for i, item in enumerate(ranking[:max_items], 1):
-        lines.append(
-            f"{i}. {item['plato']} - {item['cantidad']} unidades - {item['total_usd']:.2f} USD"
-        )
-    rest = len(ranking) - max_items
-    if rest > 0:
-        lines.append(f"... y {rest} productos mas (pide top N o otro corte si lo necesitas).")
-
-    desglose = resumen.get("desglose_variedades") or {}
-    if desglose.get("BAO"):
+    if incluir_productos:
+        orden = resumen.get("orden", "usd")
+        subt = "por monto USD" if orden == "usd" else "por cantidad vendida"
         lines.append("")
-        lines.append("BAO por variedad:")
-        for v in desglose["BAO"][:12]:
+        lines.append(f"Ranking {subt}:")
+
+        ranking = resumen.get("ranking") or []
+        for i, item in enumerate(ranking[:max_items], 1):
             lines.append(
-                f"  - {v['variedad']}: {v['cantidad']} u, {v['total_usd']:.2f} USD"
+                f"{i}. {item['plato']} - {item['cantidad']} unidades - {item['total_usd']:.2f} USD"
             )
+        rest = len(ranking) - max_items
+        if rest > 0:
+            lines.append(f"... y {rest} productos mas (pide top N o otro corte si lo necesitas).")
+
+        desglose = resumen.get("desglose_variedades") or {}
+        if desglose.get("BAO"):
+            lines.append("")
+            lines.append("BAO por variedad:")
+            for v in desglose["BAO"][:12]:
+                lines.append(
+                    f"  - {v['variedad']}: {v['cantidad']} u, {v['total_usd']:.2f} USD"
+                )
+    else:
+        lines.append("")
+        lines.append("¿Quieres tambien el detalle de productos? (ej: 'top 20' o 'detalle')")
 
     lines.append("")
     lines.append("Fuente: hist_ventas (Smart Menu), sin documentos anulados.")
