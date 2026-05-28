@@ -33,6 +33,20 @@ _peek_*.py
 _revision_*.py
 _consulta_*.py
 
+# one-off scripts / diagnósticos (no versionar)
+diagnostico_*.py
+corregir_*.py
+buscar_*.py
+consumo_ventas_*.py
+actualizar_costos_masivo.py
+eval_*.py
+exportar_*.py
+reparar_*.py
+rotacion_*.py
+verificar_*.py
+unificar_*.py
+calcular_costo_mp*.py
+
 credentials/
 *.json
 .env
