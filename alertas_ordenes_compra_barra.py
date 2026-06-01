@@ -52,12 +52,77 @@ def destinatarios_ordenes_compra_barra() -> list[tuple[str, str]]:
     return out
 
 
+def _nombre_legible_mp_anexo(f: dict) -> str | None:
+    """Nombre del maestro; descripción de proveedor solo si no hay nombre útil."""
+    cod = str(f.get("cod_mp_sistema", "")).strip()
+    cod_norm = cod.lstrip("0") or cod
+
+    nom = (f.get("nombre_mp") or "").strip()
+    if nom:
+        nom_norm = nom.lstrip("0") or nom
+        if nom_norm != cod_norm:
+            return nom[:44]
+
+    desc = (f.get("descripcion_proveedor") or "").strip()
+    if desc and not nom:
+        return desc[:44]
+    return None
+
+
+def _etiqueta_linea_mp_anexo(f: dict) -> str:
+    cod = str(f.get("cod_mp_sistema", "")).strip()
+    nombre = _nombre_legible_mp_anexo(f)
+    if nombre:
+        return f"• MP {cod} — {nombre}"
+    return f"• MP {cod}"
+
+
+def _formatear_bloque_stock_cero(filas: list[dict]) -> list[str]:
+    """Anexo: MPs con stock total en cero (barra / consignación). Lista completa."""
+    if not filas:
+        return []
+
+    bloques = [
+        "📋 ANEXO — MPs sin stock (total ≤ 0)",
+        "Stock total = suma en todas las bodegas (002 barra, 003 consignación, etc.).",
+        "Pedido propuesto solo si hay catálogo en BD_ITEMS_PROV (Barra → BOD-002).",
+        "",
+    ]
+    for f in filas:
+        ub = (f.get("unidad_base") or "").strip()
+        par = f.get("par_level", 0)
+        stk = f.get("stock_total", 0)
+        bloques.append(_etiqueta_linea_mp_anexo(f))
+        bloques.append(f"  Stock total: {stk} | PAR: {par} {ub}")
+        pedido = (f.get("pedido_propuesto") or "").strip()
+        if pedido:
+            bloques.append(f"  Pedido sugerido: {pedido}")
+        nota = (f.get("nota") or "").strip()
+        if nota:
+            bloques.append(f"  ({nota})")
+        motivo = (f.get("motivo_sin_pedido") or "").strip()
+        if motivo and not pedido:
+            bloques.append(f"  Sin pedido automático: {motivo}")
+        por = f.get("stock_por_bodega") or {}
+        if por:
+            desg = ", ".join(f"{b}:{v}" for b, v in sorted(por.items()))
+            bloques.append(f"  Desglose: {desg}")
+        bloques.append("")
+
+    sin_pedido = sum(1 for f in filas if not f.get("pedido_propuesto"))
+    bloques.append(
+        f"Resumen anexo: {len(filas)} MPs sin stock y PAR > 0 (o con pedido sugerido) | "
+        f"{sin_pedido} sin pedido automático (catálogo/ventana)."
+    )
+    return bloques
+
+
 def _formatear_bloque_revision(ordenes: list[dict], hoy: date) -> list[str]:
     from generar_ordenes_compra import proveedor_activo_hoy
 
     bloques = [
         "🛒 Órdenes compra BARRA (revisión)",
-        f"Fecha: {hoy.strftime('%d/%m/%Y')} | Bodega BOD-002",
+        f"Fecha: {hoy.strftime('%d/%m/%Y')} | Ingreso BOD-002 | Stock vs PAR: todas las bodegas",
         "Unidades: botellas / ml (estándar barra)",
         "⚠️ Solo revisión — validar antes de enviar al proveedor.",
         "",
@@ -139,20 +204,39 @@ def enviar_alertas_ordenes_compra_barra(
         print("  WA [OMITIDO] órdenes barra: sin destinatarios")
         return res
 
-    from generar_ordenes_compra import generar_ordenes
+    from generar_ordenes_compra import generar_ordenes, listar_mp_stock_cero_para_alertas
 
     ordenes = generar_ordenes(tipo="barra", sin_ventana=sin_ventana, hoy=hoy)
+    stock_cero = listar_mp_stock_cero_para_alertas(
+        tipo="barra", sin_ventana=sin_ventana, hoy=hoy, ordenes=ordenes
+    )
     res["ordenes"] = len(ordenes)
     res["proveedores"] = len(ordenes)
     res["lineas"] = sum(o.get("n_items", 0) for o in ordenes)
+    res["mp_stock_cero"] = len(stock_cero)
 
-    if not ordenes:
-        res["omitido"] = "sin ítems bajo PAR"
+    if not ordenes and not stock_cero:
+        res["omitido"] = "sin ítems bajo PAR ni MPs en cero en barra/consignación"
         return res
 
-    bloques = _formatear_bloque_revision(ordenes, hoy)
+    bloques: list[str] = []
     if origen:
-        bloques.insert(1, f"Origen: {origen}")
+        bloques.append(f"Origen: {origen}")
+    if ordenes:
+        bloques.extend(_formatear_bloque_revision(ordenes, hoy))
+    else:
+        bloques.extend(
+            [
+                "🛒 Órdenes compra BARRA (revisión)",
+                f"Fecha: {hoy.strftime('%d/%m/%Y')}",
+                "Sin líneas bajo PAR con catálogo y ventana hoy.",
+                "",
+            ]
+        )
+    if stock_cero:
+        bloques.append("")
+        bloques.extend(_formatear_bloque_stock_cero(stock_cero))
+
     mensajes = _partir_mensajes(bloques)
 
     from alertas_tatami import enviar_alerta, enviar_whatsapp_texto, log_envio_wa
@@ -168,7 +252,8 @@ def enviar_alertas_ordenes_compra_barra(
                 res["fallos"] += 1
 
     print(
-        f"  WA órdenes barra: {res['proveedores']} prov, {res['lineas']} líneas → "
+        f"  WA órdenes barra: {res['proveedores']} prov, {res['lineas']} líneas, "
+        f"{res.get('mp_stock_cero', 0)} MPs stock cero → "
         f"{len(destinos)} destinatario(s), {len(mensajes)} mensaje(s)"
     )
     return res

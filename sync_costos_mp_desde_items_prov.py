@@ -79,6 +79,38 @@ def main():
         print(f"  MP {cod} @ {bod}: {cu_old} -> {cu_ok}")
         updates.append({"range": rowcol_to_a1(i, icu + 1), "values": [[cu_ok]]})
 
+    # MP sin fila en catálogo: heredar costo de otra bodega (p. ej. BOD-002 → BOD-003).
+    from recalcular_stock_sheets import _build_costo_ref_por_mp_desde_hoja
+
+    hermano = _build_costo_ref_por_mp_desde_hoja(
+        vals[hi + 1 :],
+        col_cod=ic,
+        col_bod=ib,
+        col_costo=icu,
+    )
+    ya = {u["range"] for u in updates}
+    for i, row in enumerate(vals[hi + 1 :], start=hi + 2):
+        cod = norm_mp(row[ic] if ic < len(row) else "")
+        if not cod:
+            continue
+        if filt and cod not in filt:
+            continue
+        if prov.get(cod):
+            continue
+        cu_ok = hermano.get(cod)
+        if not cu_ok:
+            continue
+        cu_old = parse_numero_sheets(row[icu] if icu < len(row) else 0)
+        if abs(cu_old - cu_ok) <= 1e-6:
+            continue
+        rng = rowcol_to_a1(i, icu + 1)
+        if rng in ya:
+            continue
+        bod = row[ib] if ib < len(row) else ""
+        print(f"  MP {cod} @ {bod}: {cu_old} -> {cu_ok} (heredado otra bodega)")
+        updates.append({"range": rng, "values": [[cu_ok]]})
+        ya.add(rng)
+
     print(f"\nCeldas a actualizar: {len(updates)}")
     if args.produccion and updates:
         for j in range(0, len(updates), 50):

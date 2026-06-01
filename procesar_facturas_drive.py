@@ -1085,6 +1085,15 @@ def registrar_factura_procesada(
     meta = factura.get("_meta") or {}
     if factura.get("_pendiente_bodega"):
         meta["pendiente_bodega"] = factura["_pendiente_bodega"]
+    razon = (factura.get("razon_social") or "").strip()
+    if razon:
+        meta["razon_social"] = razon
+    total_xml = factura.get("total_sin_impuesto")
+    if total_xml is not None:
+        try:
+            meta["total_sin_impuesto_xml"] = round(float(total_xml), 2)
+        except (TypeError, ValueError):
+            pass
 
     registro = {
         "num_factura": factura["num_factura"],

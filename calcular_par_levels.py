@@ -291,6 +291,10 @@ def calcular_par_levels(dry_run: bool = False):
       - stock_actual
       - par_level
       - consumo_diario_calculado
+
+    Nota: par_level y consumo_diario_calculado se escriben en todas las filas del MP.
+    Para comparar stock vs PAR (órdenes de compra, alertas), usar inventario_stock_mp:
+    stock_total = suma de stock_actual en todas las bodegas activas del MP.
     """
     dias_cobertura = float(
         cfg("par_level_dias_cobertura", os.getenv("PAR_LEVEL_DIAS_COBERTURA", "7") or "7")

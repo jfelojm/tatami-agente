@@ -6,11 +6,54 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date, timedelta
+import calendar
 
 from matching_productos import cargar_bd_productos, construir_lookup
 from ventas_smartmenu import estado_documento_excluye_neto_operativo
 
+_MESES_ES = (
+    "",
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+)
+_DIAS_ES = (
+    "lunes",
+    "martes",
+    "miercoles",
+    "jueves",
+    "viernes",
+    "sabado",
+    "domingo",
+)
+_MES_NOMBRE_A_NUM: dict[str, int] = {}
+for _i, _m in enumerate(_MESES_ES):
+    if _m:
+        _MES_NOMBRE_A_NUM[_m] = _i
+        if len(_m) >= 3:
+            _MES_NOMBRE_A_NUM[_m[:3]] = _i
+
 _catalogo_lookup: dict | None = None
+
+
+def etiqueta_fecha_ecuador(fecha_iso: str) -> dict:
+    """Dia de la semana y etiqueta larga para una fecha YYYY-MM-DD (calendario local)."""
+    d = date.fromisoformat(fecha_iso[:10])
+    dia = _DIAS_ES[d.weekday()]
+    return {
+        "fecha": d.isoformat(),
+        "dia_semana": dia,
+        "etiqueta_fecha": f"{dia} {d.day} de {_MESES_ES[d.month]} de {d.year}",
+    }
 
 
 def get_catalogo_lookup() -> dict:
@@ -49,18 +92,79 @@ def nombre_producto_catalogo(row: dict, lookup: dict | None = None) -> str:
     return (row.get("nombre_producto") or "").strip()
 
 
-def _rango_periodo(periodo: str) -> tuple[str, str, str]:
-    hoy = date.today()
+def _rango_periodo(periodo: str, hoy: date | None = None) -> tuple[str, str, str]:
+    hoy = hoy or date.today()
     if periodo == "hoy":
         return hoy.isoformat(), hoy.isoformat(), "hoy"
     if periodo == "mes":
-        return hoy.replace(day=1).isoformat(), hoy.isoformat(), hoy.strftime("%B %Y")
+        return (
+            hoy.replace(day=1).isoformat(),
+            hoy.isoformat(),
+            f"{_MESES_ES[hoy.month]} {hoy.year}",
+        )
     lunes = hoy - timedelta(days=hoy.weekday())
     return (
         lunes.isoformat(),
         hoy.isoformat(),
         f"{lunes.strftime('%d/%m')} al {hoy.strftime('%d/%m/%Y')}",
     )
+
+
+def resolver_rango_fechas(args: dict | None, hoy: date | None = None) -> tuple[str, str, str]:
+    """
+    Resuelve (fecha_ini, fecha_fin, etiqueta) desde args de tools de ventas.
+    Prioridad: fecha_ini+fecha_fin > anio+mes/mes_nombre > periodo (hoy/semana/mes actual).
+    """
+    args = args or {}
+    hoy = hoy or date.today()
+
+    fi = (args.get("fecha_ini") or "").strip()
+    ff = (args.get("fecha_fin") or "").strip()
+    if fi and ff:
+        d_ini = date.fromisoformat(fi[:10])
+        d_fin = date.fromisoformat(ff[:10])
+        if d_ini > d_fin:
+            raise ValueError("fecha_ini no puede ser posterior a fecha_fin.")
+        if (
+            d_ini.day == 1
+            and d_ini.month == d_fin.month
+            and d_ini.year == d_fin.year
+            and d_fin.day == calendar.monthrange(d_ini.year, d_ini.month)[1]
+        ):
+            label = f"{_MESES_ES[d_ini.month]} {d_ini.year}"
+        else:
+            label = f"{d_ini.strftime('%d/%m/%Y')} al {d_fin.strftime('%d/%m/%Y')}"
+        return d_ini.isoformat(), d_fin.isoformat(), label
+
+    mes_raw = args.get("mes")
+    mes_nombre = (args.get("mes_nombre") or "").strip().lower()
+    mes_num: int | None = None
+    if mes_raw is not None and str(mes_raw).strip() != "":
+        mes_num = int(mes_raw)
+    elif mes_nombre:
+        mes_num = _MES_NOMBRE_A_NUM.get(mes_nombre)
+        if mes_num is None:
+            raise ValueError(f"Mes no reconocido: {mes_nombre!r}. Usa nombre en espanol (ej. mayo).")
+
+    if mes_num is not None:
+        if mes_num < 1 or mes_num > 12:
+            raise ValueError("mes debe estar entre 1 y 12.")
+        anio_raw = args.get("anio")
+        if anio_raw is not None and str(anio_raw).strip() != "":
+            anio = int(anio_raw)
+        else:
+            anio = hoy.year
+            if mes_num > hoy.month:
+                anio -= 1
+        ultimo = calendar.monthrange(anio, mes_num)[1]
+        d_ini = date(anio, mes_num, 1)
+        d_fin = date(anio, mes_num, ultimo)
+        return d_ini.isoformat(), d_fin.isoformat(), f"{_MESES_ES[mes_num]} {anio}"
+
+    periodo = (args.get("periodo") or "semana").strip().lower()
+    if periodo not in ("hoy", "semana", "mes"):
+        periodo = "semana"
+    return _rango_periodo(periodo, hoy=hoy)
 
 
 def calcular_resumen_ventas(
@@ -208,4 +312,79 @@ def formatear_resumen_ventas_whatsapp(
 
     lines.append("")
     lines.append("Fuente: hist_ventas (Smart Menu), sin documentos anulados.")
+    return "\n".join(lines)
+
+
+def formatear_ventas_dia_whatsapp(
+    *,
+    etiqueta_fecha: str,
+    total_ventas: float,
+    tickets: int,
+    fuente: str,
+    platos: list[dict] | None = None,
+    incluir_productos: bool = False,
+    total_productos_distintos: int = 0,
+) -> str:
+    """Texto listo para WhatsApp de ventas de un solo dia (sin markdown)."""
+    neto = (
+        "neto tras descuentos"
+        if (fuente or "").strip().lower().startswith("smart")
+        else "aproximado desde hist_ventas"
+    )
+    lines = [
+        f"El {etiqueta_fecha} se vendio un total de {float(total_ventas):.2f} USD ({neto}), en {int(tickets)} tickets."
+    ]
+    if incluir_productos and platos:
+        lines.append("")
+        lines.append("Productos mas vendidos ese dia:")
+        for i, p in enumerate(platos, 1):
+            cant = int(round(float(p.get("cantidad") or 0)))
+            usd = float(p.get("total_usd") or 0)
+            lines.append(f"{i}. {p.get('plato', '')} - {cant} unidades ({usd:.2f} USD)")
+        if total_productos_distintos > len(platos):
+            lines.append(
+                f"Se vendieron {total_productos_distintos} productos distintos en total ese dia."
+            )
+    else:
+        lines.append("")
+        lines.append("¿Quieres tambien el detalle de productos/platos vendidos ese dia?")
+    return "\n".join(lines)
+
+
+def formatear_ventas_por_dia_whatsapp(
+    *,
+    periodo_label: str,
+    fecha_ini: str,
+    fecha_fin: str,
+    dias: list[dict],
+    total_periodo: float,
+    tickets_periodo: int,
+    fuente: str,
+) -> str:
+    """Desglose diario de ventas para WhatsApp (sin markdown)."""
+    neto = (
+        "neto tras descuentos"
+        if (fuente or "").strip().lower().startswith("smart")
+        else "neto tras descuentos (hist_ventas)"
+    )
+    lines = [
+        f"Ventas por dia — {periodo_label} ({fecha_ini} al {fecha_fin}):",
+        f"Total del periodo: {float(total_periodo):.2f} USD ({int(tickets_periodo)} tickets, {neto})",
+        "",
+    ]
+    if not dias:
+        lines.append("Sin ventas registradas en el periodo.")
+    else:
+        for item in dias:
+            fd = date.fromisoformat(item["fecha"][:10])
+            lines.append(
+                f"{fd.day:02d}/{fd.month:02d} ({item.get('dia_semana', '')}): "
+                f"{float(item.get('total_ventas', 0)):.2f} USD — {int(item.get('tickets', 0))} tickets"
+            )
+    lines.append("")
+    lines.append(
+        "Fuente: Smart Menu (neto tras descuentos)"
+        if fuente == "Smart Menu"
+        else "Fuente: hist_ventas (neto, sin documentos anulados; alineado a Smart Menu tras reconciliacion diaria)."
+    )
     return "\n".join(lines)

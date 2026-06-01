@@ -1,5 +1,7 @@
 # whatsapp_webhook.py v4 — sin dependencia de consultas_chat_extendidas ni agente_chat
 import asyncio
+import hashlib
+import hmac
 import os
 import json
 import math
@@ -14,7 +16,7 @@ from google.oauth2.service_account import Credentials
 import anthropic
 import pytz
 import httpx
-from fastapi import BackgroundTasks, FastAPI, Form, Request
+from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from twilio.twiml.messaging_response import MessagingResponse
 
@@ -34,6 +36,66 @@ from kardex_inventario import get_kardex, formatear_kardex_wa, generar_xlsx
 
 load_dotenv()
 TZ = pytz.timezone("America/Guayaquil")
+
+def _norm_tel(telefono: str) -> str:
+    return (telefono or "").strip().lstrip("+")
+
+
+def _parse_allowlist(env_key: str) -> set[str]:
+    return {_norm_tel(n) for n in (os.getenv(env_key) or "").split(",") if n.strip()}
+
+
+ROLES = {
+    "SOCIO": _parse_allowlist("ALLOWLIST_SOCIO"),
+    "CONSULTA": _parse_allowlist("ALLOWLIST_CONSULTA"),
+    "OPERATIVO": _parse_allowlist("ALLOWLIST_OPERATIVO"),
+}
+
+TOOLS_ESCRITURA_SOCIO_OPERATIVO = {
+    "trasladar_mp",
+    "conteo_iniciar",
+}
+
+COMANDOS_OPERATIVO = {
+    "APROBAR TODO", "APROBAR", "RECHAZAR", "KARDEX", "CSV", "INICIAR CONTEO",
+}
+
+MSG_NO_AUTORIZADO = "No tienes acceso a este agente."
+
+
+def get_rol(telefono: str) -> str | None:
+    tel = _norm_tel(telefono)
+    for rol, numeros in ROLES.items():
+        if tel in numeros:
+            return rol
+    return None
+
+
+def autorizado_tool(telefono: str, tool_name: str) -> bool:
+    rol = get_rol(telefono)
+    if rol is None:
+        return False
+    if rol == "SOCIO":
+        return True
+    if rol == "CONSULTA":
+        return tool_name not in TOOLS_ESCRITURA_SOCIO_OPERATIVO
+    if rol == "OPERATIVO":
+        return True
+    return False
+
+
+def autorizado_comando(telefono: str, comando: str) -> bool:
+    rol = get_rol(telefono)
+    if rol is None:
+        return False
+    if rol == "SOCIO":
+        return True
+    if rol == "CONSULTA":
+        return False
+    if rol == "OPERATIVO":
+        return any(comando.upper().startswith(c) for c in COMANDOS_OPERATIVO)
+    return False
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -547,6 +609,35 @@ def leer_bd_prov(*, force_refresh: bool = False) -> list[dict]:
     return out
 
 
+def _mapa_ruc_razon_social(*, force_refresh: bool = False) -> dict[str, str]:
+    """RUC (solo digitos) -> razon social desde BD_PROV y BD_ITEMS_PENDIENTES."""
+    out: dict[str, str] = {}
+    for p in leer_bd_prov(force_refresh=force_refresh):
+        r = _solo_digitos_ruc(p.get("ruc_proveedor", ""))
+        rz = (p.get("razon_social") or "").strip()
+        if r and rz:
+            out[r] = rz
+
+    headers, rows = leer_hoja_con_headers(
+        "BD_ITEMS_PENDIENTES", "clave_unica", skip_after_header=1
+    )
+    if headers:
+        for row in rows:
+            r = _solo_digitos_ruc(row.get("ruc_proveedor", ""))
+            rz = (row.get("razon_social") or "").strip()
+            if r and rz and r not in out:
+                out[r] = rz
+    return out
+
+
+def _razon_desde_meta_factura(meta) -> str:
+    if not meta:
+        return ""
+    if isinstance(meta, dict):
+        return (meta.get("razon_social") or "").strip()
+    return ""
+
+
 def _coincide_nombre_proveedor(razon: str, filtro: str) -> bool:
     return _coincide_nombre_mp(razon, filtro)
 
@@ -711,6 +802,71 @@ def _texto_whatsapp_compra_factura(
     return "\n".join(lines)
 
 
+def _etiqueta_proveedor_compras(
+    ruc: str,
+    razon: str,
+    *,
+    facturas_ejemplo: list[str] | None = None,
+) -> str:
+    ruc = _solo_digitos_ruc(ruc)
+    if razon:
+        return f"{razon} ({ruc})" if ruc else razon
+    if not ruc:
+        return "(proveedor desconocido)"
+    hint = ""
+    if facturas_ejemplo:
+        hint = f"; factura ej. {facturas_ejemplo[0]}"
+    return f"RUC {ruc} (sin nombre en BD_PROV{hint})"
+
+
+def _texto_whatsapp_compras_rango(
+    *,
+    periodo_label: str,
+    fecha_desde: str,
+    fecha_hasta: str,
+    resumen: dict,
+    por_proveedor: list[dict],
+) -> str:
+    lines = [
+        f"Compras ingresadas a inventario — {periodo_label} ({fecha_desde} al {fecha_hasta}):",
+        "",
+        "Que incluye este total:",
+        "- Solo lineas ya registradas en inventario (mov_inventario ENTRADA por factura).",
+        "- Monto = costo_total de cada linea de MP ingresada, no el total del XML si hubo lineas sin match.",
+        "- No incluye servicios, gastos no inventariables ni lineas pendientes sin procesar.",
+        "",
+        f"Total ingresado a inventario: {float(resumen.get('total_compras_usd', 0)):.2f} USD",
+        f"{resumen.get('n_facturas_distintas', 0)} facturas / "
+        f"{resumen.get('n_lineas_movimiento', 0)} lineas / "
+        f"{resumen.get('n_productos_mp_distintos', 0)} MPs distintos",
+    ]
+    parc = int(resumen.get("n_facturas_parciales") or 0)
+    sin_match = int(resumen.get("items_sin_match_total") or 0)
+    if parc or sin_match:
+        lines.append(
+            f"Nota: {parc} factura(s) PARCIAL con {sin_match} linea(s) sin match "
+            "(esas lineas no suman aqui hasta ingresarse)."
+        )
+    sin_nom = resumen.get("proveedores_sin_nombre") or []
+    if sin_nom:
+        lines.append(
+            "Proveedores sin razon social en BD_PROV: "
+            + ", ".join(str(x) for x in sin_nom[:8])
+            + ("..." if len(sin_nom) > 8 else "")
+            + " (agregalos en BD_PROV o revisa la factura ejemplo)."
+        )
+    lines.append("")
+    lines.append("Gasto por proveedor (solo lo ingresado a inventario):")
+    for i, p in enumerate(por_proveedor, 1):
+        lines.append(
+            f"{i}. {_etiqueta_proveedor_compras(p.get('ruc_proveedor', ''), p.get('razon_social', ''), facturas_ejemplo=p.get('facturas_ejemplo'))}: "
+            f"{float(p.get('total_usd', 0)):.2f} USD"
+        )
+    lines.append("")
+    lines.append("Fuente: mov_inventario ENTRADA + facturas_procesadas (RUC).")
+    return "\n".join(lines)
+
+
 def tool_compras_factura_detalle(args):
     """
     Lineas exactas de una factura de compra en mov_inventario.
@@ -824,6 +980,14 @@ def tool_compras_facturas_rango(args):
     args = args or {}
     desde = str(args.get("fecha_desde") or "").strip()
     hasta = str(args.get("fecha_hasta") or "").strip()
+    if not desde or not hasta:
+        try:
+            from ventas_resumen_tools import resolver_rango_fechas
+
+            fi, ff, _ = resolver_rango_fechas(args)
+            desde, hasta = fi, ff
+        except ValueError:
+            pass
     top_facturas = min(max(int(args.get("top_facturas", 40) or 40), 5), 100)
     top_productos = min(max(int(args.get("top_productos", 35) or 35), 5), 100)
     filtro_ruc = _solo_digitos_ruc(str(args.get("ruc_proveedor") or ""))
@@ -882,20 +1046,26 @@ def tool_compras_facturas_rango(args):
         offset += 1000
 
     if not rows:
+        vacio = {
+            "fecha_desde": desde,
+            "fecha_hasta": hasta,
+            "total_compras_usd": 0.0,
+            "n_lineas_movimiento": 0,
+            "n_facturas_distintas": 0,
+            "n_productos_mp_distintos": 0,
+            "tipo_monto": "solo_lineas_ingresadas_inventario",
+            "nota": "Sin lineas ENTRADA por factura en mov_inventario en ese rango.",
+        }
         return {
             "ok": True,
-            "resumen": {
-                "fecha_desde": desde,
-                "fecha_hasta": hasta,
-                "total_compras_usd": 0.0,
-                "n_lineas_movimiento": 0,
-                "n_facturas_distintas": 0,
-                "n_productos_mp_distintos": 0,
-                "nota": "Sin lineas ENTRADA por factura en mov_inventario en ese rango.",
-            },
+            "resumen": vacio,
             "por_proveedor": [],
             "top_facturas": [],
             "top_productos": [],
+            "texto_whatsapp": (
+                f"Compras ingresadas a inventario ({desde} al {hasta}): "
+                "sin lineas ENTRADA por factura en mov_inventario en ese periodo."
+            ),
         }
 
     by_doc: dict[str, dict] = {}
@@ -934,33 +1104,49 @@ def tool_compras_facturas_rango(args):
 
     nums = sorted({n for n in by_doc if n != "(sin_num_documento)"})
     ruc_map: dict[str, str] = {}
+    ruc_razon_meta: dict[str, str] = {}
+    n_facturas_parciales = 0
+    items_sin_match_total = 0
     for i in range(0, len(nums), 80):
         part = nums[i : i + 80]
         try:
             res = (
                 sb.table("facturas_procesadas")
-                .select("num_factura,ruc_proveedor")
+                .select(
+                    "num_factura,ruc_proveedor,meta,estado,items_sin_match,fecha_factura"
+                )
                 .in_("num_factura", part)
                 .execute()
             )
             for x in res.data or []:
                 n = (x.get("num_factura") or "").strip()
-                if n:
-                    ruc_map[n] = (x.get("ruc_proveedor") or "").strip()
+                if not n:
+                    continue
+                ruc_map[n] = (x.get("ruc_proveedor") or "").strip()
+                ruc_k = _solo_digitos_ruc(x.get("ruc_proveedor", ""))
+                rz_meta = _razon_desde_meta_factura(x.get("meta"))
+                if ruc_k and rz_meta and ruc_k not in ruc_razon_meta:
+                    ruc_razon_meta[ruc_k] = rz_meta
+                if (x.get("estado") or "").strip().upper() == "PARCIAL":
+                    n_facturas_parciales += 1
+                items_sin_match_total += int(x.get("items_sin_match") or 0)
         except Exception:
             pass
 
-    ruc_nombre = {
-        _solo_digitos_ruc(p.get("ruc_proveedor", "")): p.get("razon_social", "")
-        for p in leer_bd_prov()
-        if p.get("ruc_proveedor")
-    }
+    ruc_nombre = _mapa_ruc_razon_social()
+    for rk, rz in ruc_razon_meta.items():
+        if rk and rz and rk not in ruc_nombre:
+            ruc_nombre[rk] = rz
 
+    facturas_por_ruc: dict[str, list[str]] = defaultdict(list)
     for d in by_doc.values():
         n = d["num_factura"]
         ruc = ruc_map.get(n, "") if n != "(sin_num_documento)" else ""
         d["ruc_proveedor"] = ruc
-        d["razon_social"] = ruc_nombre.get(_solo_digitos_ruc(ruc), "")
+        ruc_k = _solo_digitos_ruc(ruc)
+        d["razon_social"] = ruc_nombre.get(ruc_k, "")
+        if ruc_k and n != "(sin_num_documento)":
+            facturas_por_ruc[ruc_k].append(n)
 
     doc_vals = list(by_doc.values())
     if filtro_ruc:
@@ -1015,25 +1201,59 @@ def tool_compras_facturas_rango(args):
     prod_list = prod_list[:top_productos]
 
     prov_out = []
+    proveedores_sin_nombre: list[str] = []
     for k, v in sorted(por_prov.items(), key=lambda kv: -kv[1])[:30]:
         ruc_k = _solo_digitos_ruc(k) if k.isdigit() or len(_solo_digitos_ruc(k)) >= 10 else ""
+        razon = ruc_nombre.get(ruc_k, "") if ruc_k else ""
+        fac_ej = sorted(facturas_por_ruc.get(ruc_k, []))[:3] if ruc_k else []
+        if ruc_k and not razon:
+            proveedores_sin_nombre.append(ruc_k)
         prov_out.append(
             {
                 "proveedor_clave": k,
                 "ruc_proveedor": ruc_k or (k if k.isdigit() else ""),
-                "razon_social": ruc_nombre.get(ruc_k, "") if ruc_k else "",
+                "razon_social": razon,
+                "facturas_ejemplo": fac_ej,
                 "total_usd": round(v, 2),
             }
         )
 
+    periodo_label = desde
+    if desde != hasta:
+        try:
+            from ventas_resumen_tools import resolver_rango_fechas
+
+            _, _, periodo_label = resolver_rango_fechas(
+                {"fecha_ini": desde, "fecha_fin": hasta}
+            )
+        except ValueError:
+            periodo_label = f"{desde} al {hasta}"
+
     resumen = {
         "fecha_desde": desde,
         "fecha_hasta": hasta,
+        "periodo_label": periodo_label,
         "total_compras_usd": round(total, 2),
         "n_lineas_movimiento": len(rows),
         "n_facturas_distintas": len(doc_vals),
         "n_productos_mp_distintos": len(by_mp),
-        "nota": "Montos = suma costo_total por linea en mov_inventario. Cada proveedor incluye razon_social desde BD_PROV cuando hay RUC. Para lineas de UNA factura usa compras_factura_detalle.",
+        "n_facturas_parciales": n_facturas_parciales,
+        "items_sin_match_total": items_sin_match_total,
+        "proveedores_sin_nombre": proveedores_sin_nombre,
+        "tipo_monto": "solo_lineas_ingresadas_inventario",
+        "que_incluye": (
+            "Suma de costo_total en mov_inventario (ENTRADA por factura): materias primas "
+            "ya ingresadas al inventario."
+        ),
+        "que_no_incluye": (
+            "Total del XML de la factura si hubo lineas sin match, servicios no inventariables "
+            "o conceptos no procesados a mov_inventario."
+        ),
+        "nota": (
+            "Montos = costo_total por linea en mov_inventario ENTRADA. "
+            "Razon social desde BD_PROV, BD_ITEMS_PENDIENTES o meta de factura. "
+            "Para lineas de UNA factura usa compras_factura_detalle."
+        ),
     }
     if filtro_ruc:
         resumen["filtro_proveedor"] = {
@@ -1041,12 +1261,20 @@ def tool_compras_facturas_rango(args):
             "razon_social": filtro_razon or ruc_nombre.get(filtro_ruc, ""),
         }
 
+    texto = _texto_whatsapp_compras_rango(
+        periodo_label=periodo_label,
+        fecha_desde=desde,
+        fecha_hasta=hasta,
+        resumen=resumen,
+        por_proveedor=prov_out,
+    )
     return {
         "ok": True,
         "resumen": resumen,
         "por_proveedor": prov_out,
         "top_facturas": top_f,
         "top_productos": prod_list,
+        "texto_whatsapp": texto,
     }
 
 
@@ -1178,6 +1406,33 @@ def _total_desde_hist_ventas_docs(fecha_desde: str, fecha_hasta: str) -> tuple[f
     return round(total, 2), len(docs)
 
 
+def _totales_por_dia_hist(fecha_desde: str, fecha_hasta: str) -> dict[str, tuple[float, int]]:
+    """Totales netos y tickets por fecha desde hist_ventas (una sola consulta)."""
+    sb = conectar_supabase()
+    rows = supabase_query_all(
+        sb,
+        "hist_ventas",
+        "fecha,num_documento,subtotal,descuento_valor,estado_documento",
+        [("gte", "fecha", fecha_desde), ("lte", "fecha", fecha_hasta)],
+    )
+    rows = _hist_ventas_sin_anulados(rows)
+    por_fecha: dict[str, dict] = defaultdict(lambda: {"total": 0.0, "docs": set()})
+    for r in rows:
+        f = (r.get("fecha") or "")[:10]
+        if not f:
+            continue
+        por_fecha[f]["total"] += _to_float(r.get("subtotal"), 0.0) - _to_float(
+            r.get("descuento_valor"), 0.0
+        )
+        doc = (r.get("num_documento") or "").strip()
+        if doc:
+            por_fecha[f]["docs"].add(doc)
+    return {
+        f: (round(v["total"], 2), len(v["docs"]))
+        for f, v in por_fecha.items()
+    }
+
+
 # ── TOOL 1 — ventas hoy ─────────────────────────────────────
 def tool_ventas_hoy():
     hoy = date.today().isoformat()
@@ -1275,23 +1530,22 @@ def tool_stock_critico(args=None):
     except Exception:
         top = 0
 
+    from inventario_stock_mp import mps_bajo_par
+
     rows = leer_bd_mp_sistema()
     criticos = []
-    for r in rows:
-        try:
-            stock = _to_float(r.get("stock_actual", "0") or "0")
-            par = _to_float(r.get("par_level", "0") or "0")
-        except: continue
-        if par > 0 and stock < par:
-            cod = str(r.get("cod_mp_sistema","")).strip()
-            criticos.append({
-                "cod_mp_sistema": cod,
-                "nombre": str(r.get("nombre_mp","")).strip(),
-                "stock_actual": round(stock,1),
-                "par_level": round(par,1),
-                "unidad": str(r.get("unidad_base","")).strip(),
-                "deficit_pct": round((1-stock/par)*100,1)
-            })
+    for cod, info in mps_bajo_par(rows).items():
+        par = float(info["par_level"])
+        stock = float(info["stock_total"])
+        criticos.append({
+            "cod_mp_sistema": cod,
+            "nombre": info["nombre_mp"],
+            "stock_actual": round(stock, 1),
+            "stock_por_bodega": info["por_bodega"],
+            "par_level": round(par, 1),
+            "unidad": info["unidad_base"],
+            "deficit_pct": round((1 - stock / par) * 100, 1) if par > 0 else 0.0,
+        })
     criticos.sort(key=lambda x: x["deficit_pct"], reverse=True)
     total = len(criticos)
     if top and top > 0:
@@ -1507,16 +1761,16 @@ def tool_pedidos_hoy():
     if not proveedores:
         dia = ["lunes","martes","miercoles","jueves","viernes","sabado","domingo"][hoy.weekday()]
         return {"pedidos": [], "mensaje": f"Hoy es {dia}, no hay proveedores con ventana de pedido hoy."}
+    from inventario_stock_mp import mps_bajo_par
+
     rows_mp = leer_bd_mp_sistema()
     mps_bajo = {}
-    for r in rows_mp:
-        cod = str(r.get("cod_mp_sistema","")).strip()
-        try:
-            stock = _to_float(r.get("stock_actual", "0") or "0")
-            par = _to_float(r.get("par_level", "0") or "0")
-        except: continue
-        if par > 0 and stock < par:
-            mps_bajo[cod] = {"nombre_mp": str(r.get("nombre_mp",cod)).strip(), "stock": stock, "par": par}
+    for cod, info in mps_bajo_par(rows_mp).items():
+        mps_bajo[cod] = {
+            "nombre_mp": info["nombre_mp"],
+            "stock": info["stock_total"],
+            "par": info["par_level"],
+        }
     ws_items = sheet.worksheet("BD_ITEMS_PROV")
     all_items = ws_items.get_all_values()
     headers_items = None
@@ -1631,6 +1885,7 @@ def tool_trasladar_mp(args):
     unidad_base = "UNI"
     nombre_mp = ""
     stock_origen = None
+    costo_ref_origen = 0.0
     for r in rows:
         if str(r.get("cod_mp_sistema", "")).strip() != cod_mp:
             continue
@@ -1641,11 +1896,41 @@ def tool_trasladar_mp(args):
                 stock_origen = float(r.get("stock_actual") or 0)
             except (TypeError, ValueError):
                 stock_origen = 0.0
+            try:
+                costo_ref_origen = float(r.get("costo_unitario_ref") or 0)
+            except (TypeError, ValueError):
+                costo_ref_origen = 0.0
             break
 
     if stock_origen is None:
         return {
             "error": f"No hay fila en maestro para MP {cod_mp} en {nombre_bodega(bodega_origen)}."
+        }
+
+    if cantidad > stock_origen:
+        return {
+            "error": (
+                f"Stock insuficiente en {nombre_bodega(bodega_origen)}: "
+                f"disponible {round(stock_origen, 4)} {unidad_base}, "
+                f"solicitado {cantidad}."
+            )
+        }
+
+    fila_destino = next(
+        (
+            r
+            for r in rows
+            if str(r.get("cod_mp_sistema", "")).strip() == cod_mp
+            and normalizar_cod_bodega(r.get("cod_bodega", "")) == bodega_destino
+        ),
+        None,
+    )
+    if fila_destino is None:
+        return {
+            "error": (
+                f"No existe fila para {cod_mp} en {nombre_bodega(bodega_destino)}. "
+                "Debe crearse primero en BD_MP_SISTEMA."
+            )
         }
 
     if not confirmado:
@@ -1661,58 +1946,31 @@ def tool_trasladar_mp(args):
             ),
         }
 
+    from inventario_traslado import registrar_traslado_mp
+
     sb = conectar_supabase()
-    now = datetime.now(TZ)
-    cod_base = f"TRA-{now.strftime('%Y%m%d%H%M%S')}"
-    obs = f"Traslado WA {bodega_origen} → {bodega_destino}"
-
-    sb.table("mov_inventario").insert({
-        "cod_mov": cod_base + "-SAL",
-        "fecha": now.isoformat(),
-        "tipo_mov": "TRASLADO_SALIDA",
-        "cod_mp_sistema": cod_mp,
-        "nombre_mp": nombre_mp,
-        "cod_bodega_origen": bodega_origen,
-        "cod_bodega_destino": None,
-        "cantidad_mov": cantidad,
-        "unidad_base": unidad_base,
-        "origen_documento": "TRASLADO",
-        "num_documento": cod_base,
-        "registrado_por": "AGENTE_WHATSAPP",
-        "observaciones": obs,
-    }).execute()
-
-    sb.table("mov_inventario").insert({
-        "cod_mov": cod_base + "-ENT",
-        "fecha": now.isoformat(),
-        "tipo_mov": "TRASLADO_ENTRADA",
-        "cod_mp_sistema": cod_mp,
-        "nombre_mp": nombre_mp,
-        "cod_bodega_origen": None,
-        "cod_bodega_destino": bodega_destino,
-        "cantidad_mov": cantidad,
-        "unidad_base": unidad_base,
-        "origen_documento": "TRASLADO",
-        "num_documento": cod_base,
-        "registrado_por": "AGENTE_WHATSAPP",
-        "observaciones": obs,
-    }).execute()
-
-    try:
-        from recalcular_stock_sheets import recalcular_produccion
-
-        recalcular_produccion(cod_mp_filtro=cod_mp)
-    except Exception as e:
-        print(f"  WARN: recalcular tras traslado: {e}")
+    res = registrar_traslado_mp(
+        sb,
+        cod_mp=cod_mp,
+        bodega_origen=bodega_origen,
+        bodega_destino=bodega_destino,
+        cantidad=cantidad,
+        nombre_mp=nombre_mp,
+        unidad_base=unidad_base,
+        costo_unitario_ref=costo_ref_origen,
+        registrado_por="AGENTE_WHATSAPP",
+        recalcular_sheets=True,
+        tz=datetime.now(TZ),
+    )
 
     invalidar_cache_bd_mp()
     return {
         "ejecutado": True,
-        "cod_mov": cod_base,
+        "cod_mov": res["cod_mov"],
         "mensaje": (
             f"Traslado registrado: {cantidad} {unidad_base} de {cod_mp} "
             f"de {nombre_bodega(bodega_origen)} a {nombre_bodega(bodega_destino)}. "
-            "Stock recalculado en Sheets."
+            "Stock y costo ref recalculados en Sheets."
         ),
     }
 
@@ -1733,11 +1991,15 @@ def tool_ventas_por_plato(args):
     from ventas_resumen_tools import (
         calcular_resumen_ventas,
         formatear_resumen_ventas_whatsapp,
+        resolver_rango_fechas,
     )
 
+    try:
+        fecha_ini, fecha_fin, label = resolver_rango_fechas(args)
+    except ValueError as e:
+        return {"ok": False, "error": str(e), "texto_whatsapp": str(e)}
+
     sb = conectar_supabase()
-    periodo = args.get("periodo", "semana")
-    fecha_ini, fecha_fin, label = _rango_periodo_ventas(periodo)
 
     rows = supabase_query_all(
         sb,
@@ -1786,6 +2048,72 @@ def _rango_periodo_ventas(periodo: str) -> tuple[str, str, str]:
 
     return _rango_periodo(periodo)
 
+
+# ── TOOL — ventas por día en un rango/mes ────────────────────
+def tool_ventas_por_dia(args):
+    from ventas_resumen_tools import (
+        etiqueta_fecha_ecuador,
+        formatear_ventas_por_dia_whatsapp,
+        resolver_rango_fechas,
+    )
+
+    try:
+        fecha_ini, fecha_fin, label = resolver_rango_fechas(args)
+    except ValueError as e:
+        return {"ok": False, "error": str(e), "texto_whatsapp": str(e)}
+
+    d_ini = date.fromisoformat(fecha_ini)
+    d_fin = date.fromisoformat(fecha_fin)
+    incluir_dias_cero = bool(args.get("incluir_dias_cero", False))
+
+    por_dia = _totales_por_dia_hist(fecha_ini, fecha_fin)
+    dias: list[dict] = []
+    total_periodo = 0.0
+    tickets_periodo = 0
+
+    d = d_ini
+    while d <= d_fin:
+        ds = d.isoformat()
+        total_dia, tickets_dia = por_dia.get(ds, (0.0, 0))
+        total_periodo += total_dia
+        tickets_periodo += tickets_dia
+
+        if incluir_dias_cero or total_dia > 0 or tickets_dia > 0:
+            meta = etiqueta_fecha_ecuador(ds)
+            dias.append(
+                {
+                    "fecha": ds,
+                    "dia_semana": meta["dia_semana"],
+                    "total_ventas": total_dia,
+                    "tickets": tickets_dia,
+                    "fuente": "hist_ventas",
+                }
+            )
+        d += timedelta(days=1)
+
+    fuente = "hist_ventas"
+
+    texto = formatear_ventas_por_dia_whatsapp(
+        periodo_label=label,
+        fecha_ini=fecha_ini,
+        fecha_fin=fecha_fin,
+        dias=dias,
+        total_periodo=round(total_periodo, 2),
+        tickets_periodo=tickets_periodo,
+        fuente=fuente,
+    )
+    return {
+        "fecha_ini": fecha_ini,
+        "fecha_fin": fecha_fin,
+        "periodo": label,
+        "dias_con_ventas": len(dias),
+        "total_ventas": round(total_periodo, 2),
+        "tickets": tickets_periodo,
+        "fuente": fuente,
+        "dias": dias,
+        "texto_whatsapp": texto,
+    }
+
 # ── TOOL 9 — rotación baja ──────────────────────────────────
 def tool_rotacion_baja(args):
     sb = conectar_supabase()
@@ -1814,26 +2142,34 @@ def tool_rotacion_baja(args):
 
 # ── TOOL 10 — stock ingrediente ─────────────────────────────
 def tool_stock_ingrediente(args):
-    nombre = args.get("nombre_mp","").strip().lower()
+    from inventario_stock_mp import agrupar_stock_par_por_mp, norm_mp
+
+    nombre = args.get("nombre_mp", "").strip().lower()
     rows = leer_bd_mp_sistema()
-    resultados = []
-    for r in rows:
-        if nombre in str(r.get("nombre_mp","")).strip().lower():
-            try:
-                stock = _to_float(r.get("stock_actual", "0") or "0")
-                par = _to_float(r.get("par_level", "0") or "0")
-            except: stock = par = 0
-            resultados.append({
-                "cod_mp": str(r.get("cod_mp_sistema","")).strip(),
-                "nombre_mp": str(r.get("nombre_mp","")).strip(),
-                "stock_actual": round(stock,2),
-                "par_level": round(par,2),
-                "unidad_base": str(r.get("unidad_base","")).strip(),
-                "bodega": str(r.get("cod_bodega","")).strip(),
-                "bajo_par": stock < par
-            })
-    if not resultados:
+    matching = [r for r in rows if nombre in str(r.get("nombre_mp", "")).strip().lower()]
+    if not matching:
         return {"encontrado": False, "mensaje": f"No encontre '{args.get('nombre_mp')}' en el sistema."}
+    agrupado = agrupar_stock_par_por_mp(matching)
+    resultados = []
+    for r in matching:
+        try:
+            stock = _to_float(r.get("stock_actual", "0") or "0")
+            par = _to_float(r.get("par_level", "0") or "0")
+        except Exception:
+            stock = par = 0
+        cod = str(r.get("cod_mp_sistema", "")).strip()
+        g = agrupado.get(norm_mp(cod), {})
+        resultados.append({
+            "cod_mp": cod,
+            "nombre_mp": str(r.get("nombre_mp", "")).strip(),
+            "stock_actual": round(stock, 2),
+            "stock_total_mp": g.get("stock_total", round(stock, 2)),
+            "par_level": round(par, 2),
+            "unidad_base": str(r.get("unidad_base", "")).strip(),
+            "bodega": str(r.get("cod_bodega", "")).strip(),
+            "bajo_par": stock < par,
+            "bajo_par_global": g.get("bajo_par", stock < par),
+        })
     return {"encontrado": True, "resultados": resultados}
 
 
@@ -2165,10 +2501,18 @@ def tool_auditar_costos_recetas(args=None):
 
 # ── TOOL — ventas día específico ─────────────────────────
 def tool_ventas_dia(args):
+    from ventas_resumen_tools import etiqueta_fecha_ecuador, formatear_ventas_dia_whatsapp
+
     fecha = args.get("fecha", "").strip()
     if not fecha:
         fecha = date.today().isoformat()
 
+    incluir_productos = args.get("incluir_productos")
+    if incluir_productos is None:
+        incluir_productos = False
+    incluir_productos = bool(incluir_productos)
+
+    meta_fecha = etiqueta_fecha_ecuador(fecha)
     sm = total_smartmenu_dia(fecha)
 
     sb = conectar_supabase()
@@ -2181,12 +2525,23 @@ def tool_ventas_dia(args):
     rows = _hist_ventas_sin_anulados(rows)
 
     if not rows and sm is None:
+        texto = formatear_ventas_dia_whatsapp(
+            etiqueta_fecha=meta_fecha["etiqueta_fecha"],
+            total_ventas=0,
+            tickets=0,
+            fuente="hist_ventas",
+            platos=[],
+            incluir_productos=False,
+        )
         return {
             "fecha": fecha,
+            **meta_fecha,
             "total_ventas": 0,
             "tickets": 0,
             "platos": [],
             "sin_datos": True,
+            "incluir_productos": False,
+            "texto_whatsapp": texto,
         }
 
     conteo = defaultdict(lambda: {"cantidad": 0, "total": 0})
@@ -2195,20 +2550,24 @@ def tool_ventas_dia(args):
         conteo[nombre]["cantidad"] += _to_float(r.get("cantidad_vendida"), 0)
         conteo[nombre]["total"] += _to_float(r.get("total"), 0.0)
     # Ordenar por monto (USD neto) para que el "que se vendió" sea un ranking útil.
-    ranking = sorted(conteo.items(), key=lambda x: x[1]["total"], reverse=True)
+    ranking_full = sorted(conteo.items(), key=lambda x: x[1]["total"], reverse=True)
     lim = _limite_ranking(args)
-    if lim is not None:
-        ranking = ranking[:lim]
+    ranking = ranking_full if lim is None else ranking_full[:lim]
+
+    platos = [
+        {"plato": n, "cantidad": round(d["cantidad"]), "total_usd": round(d["total"], 2)}
+        for n, d in ranking
+    ]
 
     resultado = {
         "fecha": fecha,
-        "platos": [
-            {"plato": n, "cantidad": round(d["cantidad"]), "total_usd": round(d["total"], 2)}
-            for n, d in ranking
-        ],
+        **meta_fecha,
+        "incluir_productos": incluir_productos,
         "total_productos_distintos": len(conteo),
         "truncado_a": lim,
     }
+    if incluir_productos:
+        resultado["platos"] = platos
     if sm is not None:
         resultado["total_ventas"] = round(sm.get("total", 0), 2)
         resultado["ventas_brutas"] = round(sm.get("total_bruto", sm.get("total", 0)), 2)
@@ -2220,6 +2579,15 @@ def tool_ventas_dia(args):
         resultado["total_ventas"] = total_hv
         resultado["tickets"] = docs_hv
         resultado["fuente"] = "hist_ventas"
+    resultado["texto_whatsapp"] = formatear_ventas_dia_whatsapp(
+        etiqueta_fecha=meta_fecha["etiqueta_fecha"],
+        total_ventas=resultado.get("total_ventas", 0),
+        tickets=resultado.get("tickets", 0),
+        fuente=resultado.get("fuente", ""),
+        platos=platos,
+        incluir_productos=incluir_productos,
+        total_productos_distintos=len(conteo),
+    )
     return resultado
 
 
@@ -2295,7 +2663,7 @@ TOOLS = [
     {"name": "inventario_por_bodega", "description": "Resumen de valor (USD) y stock total por bodega desde BD_MP_SISTEMA.", "input_schema": {"type": "object", "properties": {"incluir_sin_costo": {"type": "boolean"}}, "required": []}},
     {"name": "facturas_parciales", "description": "Facturas con estado PARCIAL en Supabase (facturas_procesadas).", "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
     {"name": "items_pendientes_factura", "description": "Ítems pendientes (BD_ITEMS_PENDIENTES) filtrando por num_factura o ruc_proveedor.", "input_schema": {"type": "object", "properties": {"num_factura": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
-    {"name": "compras_facturas_rango", "description": "Compras por facturas aplicadas a inventario (mov_inventario ENTRADA) entre fecha_desde y fecha_hasta (YYYY-MM-DD). Devuelve totales, top facturas, top productos (nombre_mp del sistema) y por_proveedor con razon_social desde BD_PROV. Si preguntan por un proveedor por nombre (ej. Maramar), pasa nombre_proveedor; o ruc_proveedor. NO inventes nombres de producto.", "input_schema": {"type": "object", "properties": {"fecha_desde": {"type": "string"}, "fecha_hasta": {"type": "string"}, "nombre_proveedor": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "top_facturas": {"type": "integer"}, "top_productos": {"type": "integer"}}, "required": ["fecha_desde", "fecha_hasta"]}},
+    {"name": "compras_facturas_rango", "description": "Compras/gasto por proveedor: SOLO lineas ya ingresadas al inventario (mov_inventario ENTRADA), no el total XML de la factura si hubo lineas sin match. Devuelve texto_whatsapp: copialo tal cual. Fechas YYYY-MM-DD o mes_nombre+anio (ej. mayo 2026). razon_social desde BD_PROV; si falta nombre indica facturas_ejemplo.", "input_schema": {"type": "object", "properties": {"fecha_desde": {"type": "string"}, "fecha_hasta": {"type": "string"}, "mes_nombre": {"type": "string"}, "anio": {"type": "integer"}, "mes": {"type": "integer"}, "nombre_proveedor": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "top_facturas": {"type": "integer"}, "top_productos": {"type": "integer"}}, "required": []}},
     {"name": "compras_factura_detalle", "description": "Lineas EXACTAS ingresadas al inventario de UNA factura de compra (mov_inventario). Devuelve texto_whatsapp: copialo tal cual. Para ultima factura de un proveedor: ultima=true con nombre_proveedor (ej. Maramar) o ruc_proveedor. Para una factura concreta: num_factura. NUNCA inventes productos ni cantidades.", "input_schema": {"type": "object", "properties": {"num_factura": {"type": "string"}, "nombre_proveedor": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "ultima": {"type": "boolean"}}, "required": []}},
     {"name": "mp_incompletas", "description": "MPs con datos incompletos en BD_MP_SISTEMA (sin_costo, sin_par, sin_bodega).", "input_schema": {"type": "object", "properties": {"tipo": {"type": "string", "enum": ["sin_costo","sin_par","sin_bodega"]}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
     {"name": "resumen_operativo_hoy", "description": "Resumen compacto: ventas hoy + bajo par + negativos + facturas parciales.", "input_schema": {"type": "object", "properties": {"top": {"type": "integer"}}, "required": []}},
@@ -2303,7 +2671,7 @@ TOOLS = [
     {"name": "plato_top_semana", "description": "Top 10 platos mas vendidos esta semana por cantidad.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "buscar_bodega", "description": "En que bodega se encuentra un ingrediente o insumo.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "trasladar_mp", "description": "Trasladar un insumo de una bodega a otra. Siempre pedir confirmacion antes de ejecutar.", "input_schema": {"type": "object", "properties": {"cod_mp_sistema": {"type": "string"}, "bodega_origen": {"type": "string"}, "bodega_destino": {"type": "string"}, "cantidad": {"type": "number"}, "confirmado": {"type": "boolean"}}, "required": ["cod_mp_sistema","bodega_origen","bodega_destino","cantidad","confirmado"]}},
-    {"name": "ventas_por_plato", "description": "Ventas al cliente (hist_ventas): total del periodo (siempre) + ranking SOLO productos en BD_PRODUCTOS (carta) si incluir_productos=true. Nunca inventes platos que no esten en ranking. Periodo hoy/semana/mes. orden: usd (default) o cantidad. Devuelve texto_whatsapp: copialo tal cual al usuario. Si sin_truncar=true, devuelve TODOS los productos (se enviará en varios mensajes).", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}, "orden": {"type": "string", "enum": ["usd", "cantidad"]}, "limite": {"type": "integer"}, "incluir_productos": {"type": "boolean", "description": "Si false: responde solo total del periodo y pregunta si quiere detalle de productos."}, "sin_truncar": {"type": "boolean", "description": "Si true: incluye todos los productos (sin '... y N más')."}}, "required": ["periodo"]}},
+    {"name": "ventas_por_plato", "description": "Ventas al cliente (hist_ventas): total del periodo + ranking SOLO productos en BD_PRODUCTOS (carta) si incluir_productos=true. Para un mes pasado usa mes_nombre (ej. mayo) + anio, o fecha_ini/fecha_fin ISO — NO uses periodo=mes (eso es solo el mes calendario en curso). periodo hoy/semana/mes actual. Devuelve texto_whatsapp: copialo tal cual.", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}, "fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}, "anio": {"type": "integer"}, "mes": {"type": "integer", "description": "1-12"}, "mes_nombre": {"type": "string", "description": "ej. mayo, junio"}, "orden": {"type": "string", "enum": ["usd", "cantidad"]}, "limite": {"type": "integer"}, "incluir_productos": {"type": "boolean", "description": "Si false: responde solo total del periodo y pregunta si quiere detalle de productos."}, "sin_truncar": {"type": "boolean", "description": "Si true: incluye todos los productos (sin '... y N más')."}}, "required": []}},
     {"name": "rotacion_baja", "description": "Productos con nula o baja rotacion en los ultimos N dias.", "input_schema": {"type": "object", "properties": {"dias": {"type": "integer"}, "umbral_unidades": {"type": "number"}}, "required": []}},
     {"name": "stock_ingrediente", "description": "Cuanto tengo en inventario de un ingrediente especifico.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "consumo_ingrediente_recetas", "description": "Consumo teorico de una materia prima segun ventas (hist_ventas estado_match PROCESADO) y gramajes en BD_RECETAS_DETALLE; misma logica que el descargo de inventario; NO es stock en bodega. Devuelve total_consumo_teorico y por_plato (lista completa por nombre_producto de venta). No inventes filas ni subtotales: la suma de consumo_mp en por_plato debe coincidir con total_consumo_teorico. nombre_mp obligatorio. Periodo: semana (default lunes a hoy), mes, hoy; o fecha_ini y fecha_fin ISO.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}, "periodo": {"type": "string", "enum": ["semana", "mes", "hoy"]}, "fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}}, "required": ["nombre_mp"]}},
@@ -2311,7 +2679,8 @@ TOOLS = [
     {"name": "receta_ingredientes", "description": "Ingredientes y costos de un plato vendido (cantidades por 1 unidad + USD por linea y total). Misma logica que costo_plato; usar cuando pidan receta, ingredientes, gramajes o desglose de un plato (ej. TARTA VASCA, BAO). cod_receta o nombre_plato; opcional variedad.", "input_schema": {"type": "object", "properties": {"cod_receta": {"type": "string"}, "nombre_plato": {"type": "string"}, "nombre_receta": {"type": "string"}, "variedad_smart_menu": {"type": "string"}, "variedad": {"type": "string"}}, "required": []}},
     {"name": "costo_subreceta", "description": "Costo teorico del lote estandar de una subreceta (BD_SUBRECETAS_DETALLE): MPs y subrecetas hijas con cantidades, unidad_base, costo_unitario y costo_linea; total lote y costo por unidad de rendimiento. Usar para salsas, masas, rellenos, etc. Pasa cod_subreceta (ej. 010) o nombre_subreceta (substring).", "input_schema": {"type": "object", "properties": {"cod_subreceta": {"type": "string"}, "nombre_subreceta": {"type": "string"}}, "required": []}},
     {"name": "auditar_costos_recetas", "description": "Auditoria de costos de platos inflados y lineas MP sospechosas en recetas (precio/kg mal como USD/gr, garnish caro en bebidas, sin costo). Usar cuando pidan revisar costos de carta, platos raros caros, o validar recetas vs costos. Devuelve top platos_inflados y lineas_mp_sospechosas con flags.", "input_schema": {"type": "object", "properties": {"umbral_plato": {"type": "number"}, "umbral_linea": {"type": "number"}, "top_platos": {"type": "integer"}, "top_lineas": {"type": "integer"}}, "required": []}},
-    {"name": "ventas_dia", "description": "Ventas de un dia (fecha YYYY-MM-DD; default hoy): total, tickets, y TODOS los productos/platos distintos con cantidad y monto. Devuelve la lista `platos` ordenada por total_usd (USD neto) desc. Opcional limite solo si piden top N.", "input_schema": {"type": "object", "properties": {"fecha": {"type": "string"}, "limite": {"type": "integer"}}, "required": []}},
+    {"name": "ventas_dia", "description": "Ventas de un dia (fecha YYYY-MM-DD; default hoy): total oficial, tickets, dia_semana y etiqueta_fecha calculados. Devuelve texto_whatsapp: copialo tal cual. Si incluir_productos=false (default): solo total + pregunta si quiere detalle de platos. Si incluir_productos=true: incluye ranking en platos (orden total_usd desc; limite si piden top N).", "input_schema": {"type": "object", "properties": {"fecha": {"type": "string"}, "limite": {"type": "integer"}, "incluir_productos": {"type": "boolean", "description": "Si false: solo total del dia y pregunta si quiere detalle de productos/platos."}}, "required": []}},
+    {"name": "ventas_por_dia", "description": "Desglose de ventas POR CADA DIA en un mes o rango: total diario y tickets. Usar cuando pidan valor por dia, desglose diario, ventas dia a dia de un mes (ej. mayo). Pasa mes_nombre=mayo + anio, o fecha_ini/fecha_fin (2026-05-01 a 2026-05-31). Devuelve texto_whatsapp: copialo tal cual. NO usar ventas_por_plato para esto.", "input_schema": {"type": "object", "properties": {"fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}, "anio": {"type": "integer"}, "mes": {"type": "integer"}, "mes_nombre": {"type": "string"}, "periodo": {"type": "string", "enum": ["hoy","semana","mes"], "description": "Solo mes/semana/hoy actual si no pasas mes_nombre ni fechas."}, "incluir_dias_cero": {"type": "boolean", "description": "Si true, lista dias sin ventas con 0 USD."}}, "required": []}},
     {"name": "conteo_iniciar", "description": "Inicia inventario físico cíclico: crea conteo_ciclo en Supabase, carga snapshot de MPs de la bodega y genera pestaña CONTEO/CONTEO_BARRA en el maestro Sheets. Usar cuando pidan empezar conteo, toma de inventario, inventario físico de cocina o barra. cod_bodega obligatorio (BOD-001 cocina, BOD-002 barra). semana_iso/anio opcionales (default semana ISO actual). Devuelve ciclo_id, URL de la hoja e instrucciones.", "input_schema": {"type": "object", "properties": {"cod_bodega": {"type": "string"}, "anio": {"type": "integer"}, "semana_iso": {"type": "integer"}, "sheet_name": {"type": "string"}, "reemplazar_snapshot": {"type": "boolean"}, "sobreescribir_hoja": {"type": "boolean"}, "responsable_nombre": {"type": "string"}, "notas": {"type": "string"}}, "required": ["cod_bodega"]}},
     {"name": "conteo_listar_ciclos", "description": "Lista ciclos de inventario físico en Supabase (conteo_ciclo). Filtros opcionales estado y cod_bodega.", "input_schema": {"type": "object", "properties": {"estado": {"type": "string"}, "cod_bodega": {"type": "string"}, "limit": {"type": "integer"}}, "required": []}},
     {"name": "conteo_ciclos_abiertos", "description": "Resumen de ciclos de conteo que NO están CONTABILIZADO ni ANULADO (borradores activos).", "input_schema": {"type": "object", "properties": {}, "required": []}},
@@ -2343,6 +2712,7 @@ TOOL_FNS = {
     "costo_subreceta": tool_costo_subreceta,
     "auditar_costos_recetas": lambda a: tool_auditar_costos_recetas(a),
     "ventas_dia":        tool_ventas_dia,
+    "ventas_por_dia":    tool_ventas_por_dia,
     "conteo_iniciar": tool_conteo_iniciar,
     "conteo_listar_ciclos": tool_conteo_listar_ciclos,
     "conteo_ciclos_abiertos": lambda a: tool_conteo_ciclos_abiertos(),
@@ -2352,18 +2722,22 @@ SYSTEM = """Eres el agente de gestion de Tatami Bao Bar, gastrobar asiatico en C
 Respondes preguntas sobre ventas, inventario, bodegas y pedidos con datos reales del sistema.
 Responde siempre en espanol, de forma clara y directa, como si hablaras con el socio del restaurante.
 Usa los datos exactos de las tools. Si no hay datos dilo claramente.
-Regla estricta VENTAS vs COMPRAS: si preguntan cuanto se vendio, ventas del mes/semana, productos mas vendidos al cliente, usa `ventas_por_plato` (periodo mes/semana/hoy). NO uses compras_facturas_rango salvo que pregunten explicitamente compras a proveedores o facturas de compra.
-Si el usuario pide SOLO la cifra (ej. "cuanto se vendio en mayo", "total de ventas de la semana"), primero responde SOLO el total y pregunta si quiere tambien el detalle de productos. Para eso, llama `ventas_por_plato` con incluir_productos=false.
-Si el usuario pide ranking/detalle (ej. "top 20", "detalle", "productos mas vendidos"), llama `ventas_por_plato` con incluir_productos=true (default) y responde copiando literalmente `texto_whatsapp`.
-NUNCA inventes productos (ej. TATAMI WINGS, EDAMAME) que no esten en `ranking` de la tool. Solo existen los platos en BD_PRODUCTOS que aparecen en el JSON.
-Si preguntan detalle de UN solo dia, usa `ventas_dia` y el array `platos` exacto de la tool.
+Regla estricta VENTAS vs COMPRAS: si preguntan cuanto se vendio, ventas del mes/semana, productos mas vendidos al cliente, usa las tools de ventas. NO uses compras_facturas_rango salvo que pregunten explicitamente compras a proveedores o facturas de compra.
+Mes pasado o con nombre (ej. mayo, abril): usa mes_nombre + anio (ej. mayo 2026 → mes_nombre=mayo, anio=2026) o fecha_ini/fecha_fin ISO. periodo=mes en ventas_por_plato/ventas_por_dia significa SOLO el mes calendario en curso (1 de este mes a hoy), nunca un mes pasado.
+Si piden ventas POR DIA o desglose diario de un mes/rango (ej. "valor por dia en mayo", "cuanto se vendio cada dia"): usa ventas_por_dia con mes_nombre/anio o fecha_ini/fecha_fin y copia texto_whatsapp. NO uses ventas_por_plato para desglose diario.
+Si el usuario pide SOLO la cifra de ventas (total del periodo, sin desglose diario):
+- Un dia concreto (hoy, ayer, fecha): `ventas_dia` con incluir_productos=false y copia literalmente `texto_whatsapp` (usa dia_semana y etiqueta_fecha del JSON; no calcules el dia de la semana).
+- Periodo hoy/semana/mes: `ventas_por_plato` con incluir_productos=false y copia `texto_whatsapp`.
+Si pide ranking/detalle/productos mas vendidos de un dia: `ventas_dia` con incluir_productos=true (limite si piden top N) y copia `texto_whatsapp`.
+Si pide ranking de un periodo (semana/mes): `ventas_por_plato` con incluir_productos=true y copia `texto_whatsapp`.
+NUNCA inventes productos (ej. TATAMI WINGS, EDAMAME) que no esten en `ranking` o `platos` de la tool.
 Si la lista es larga y no hay texto_whatsapp, continua en mensajes siguientes sin inventar filas.
 Si te piden listados de stock negativo, usa la tool stocks_negativos (no adivines nombres ni cantidades).
 Si te piden productos bajo par level, usa la tool stock_critico y devuelve el listado completo salvo que el usuario pida \"top N\".
 Si te piden valorizacion de inventario, usa inventario_valorizado (y si preguntan por bodegas usa inventario_por_bodega).
 Si piden el valorizado de un producto o materia prima por nombre (ej. camarones, aceite), llama inventario_valorizado con nombre_mp o buscar igual al texto que dio el usuario; no listes solo el top global sin filtrar por nombre.
 Si te piden facturas pendientes/parciales, usa facturas_parciales e items_pendientes_factura.
-Si preguntan compras a proveedores, valor de compras o productos comprados en un periodo, usa compras_facturas_rango con fecha_desde y fecha_hasta (YYYY-MM-DD). Si nombran el proveedor (ej. Maramar), pasa nombre_proveedor en la misma llamada; no pidas el RUC si el nombre esta en BD_PROV. Los productos en top_productos son nombre_mp del sistema (CAMARON, SALMON, etc.): no los renombres ni inventes (langostinos, camaron pelado, etc.).
+Si preguntan compras a proveedores, gasto por proveedor o productos comprados en un periodo, usa compras_facturas_rango (mes_nombre+anio o fecha_desde/fecha_hasta) y copia texto_whatsapp. Esos montos son SOLO lo ingresado al inventario (mov_inventario), no el total de la factura XML si hubo lineas sin match; dilo asi si preguntan que incluye. Si nombran el proveedor (ej. Maramar), pasa nombre_proveedor. Proveedor solo con RUC: usa facturas_ejemplo del JSON para orientar; no inventes nombres.
 Si piden detalle de UNA factura, lineas ingresadas, cantidades o valores de la ultima factura de un proveedor, usa compras_factura_detalle (ultima=true + nombre_proveedor, o num_factura) y responde copiando literalmente texto_whatsapp.
 La ultima factura de un proveedor es la de mayor fecha_factura en facturas_procesadas, no la de mayor fecha_proceso.
 Si el listado es largo y el usuario pidio TODO el detalle (ej. todos los platos vendidos con cantidades y montos), enumera el listado COMPLETO que devuelve la tool sin acortar a top 10. Si no cabe en un mensaje, continua en mensajes siguientes numerados.
@@ -2383,7 +2757,7 @@ Para traslados entre bodegas usa trasladar_mp. Bodegas: BOD-001 cocina, BOD-002 
 Stock y PAR: el stock es por bodega; el par_level es global por materia prima (suma stock en todas las bodegas para comparar).
 Descargo de ventas solo afecta cocina o barra segun cod_bodega en la receta.
 Cuando la fuente sea hist_ventas aclaralo como aproximado.
-Nunca inventes ni calcules fechas de memoria: siempre usa el bloque "Contexto temporal" que recibes y las fechas ISO indicadas al llamar ventas_dia."""
+Nunca inventes ni calcules fechas de memoria: usa el bloque "Contexto temporal" para hoy/ayer y las fechas ISO al llamar tools. Nunca calcules el dia de la semana de una fecha: usa dia_semana y etiqueta_fecha que devuelve ventas_dia."""
 
 _MESES = (
     "",
@@ -2422,7 +2796,9 @@ def _contexto_fechas_ecuador() -> str:
         f"- ayer: {ayer.isoformat()} ({dias[ayer.weekday()]} {ayer.day} de {_MESES[ayer.month]} de {ayer.year})\n"
         "Reglas: si el usuario dice 'ayer', llama ventas_dia con fecha exactamente "
         f'"{ayer.isoformat()}". Si dice "hoy", usa "{hoy.isoformat()}". '
-        "No uses otra fecha para ayer/hoy."
+        "No uses otra fecha para ayer/hoy. "
+        "Para otras fechas (ej. 30 de mayo), pasa fecha ISO a ventas_dia; "
+        "el dia de la semana viene en dia_semana/etiqueta_fecha de la tool, no lo adivines."
     )
 
 
@@ -2492,6 +2868,8 @@ def _system_completo() -> str:
     return SYSTEM + "\n\n" + _contexto_fechas_ecuador()
 
 def llamar_agente(mensaje, telefono):
+    if get_rol(telefono) is None:
+        return MSG_NO_AUTORIZADO
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     if telefono not in historiales:
         historiales[telefono] = []
@@ -2534,11 +2912,19 @@ def llamar_agente(mensaje, telefono):
         for tc in tool_calls:
             fn = TOOL_FNS.get(tc.name)
             try:
-                result = fn(tc.input) if fn else {"error": f"Tool {tc.name} no encontrada"}
+                if not autorizado_tool(telefono, tc.name):
+                    result = {"error": "No autorizado para esta operación."}
+                else:
+                    result = fn(tc.input) if fn else {"error": f"Tool {tc.name} no encontrada"}
             except Exception as e:
                 result = {"error": str(e)}
             if (
-                tc.name == "ventas_por_plato"
+                tc.name in (
+                    "ventas_por_plato",
+                    "ventas_dia",
+                    "ventas_por_dia",
+                    "compras_facturas_rango",
+                )
                 and isinstance(result, dict)
                 and (result.get("texto_whatsapp") or "").strip()
             ):
@@ -2562,6 +2948,15 @@ def llamar_agente(mensaje, telefono):
 
 
 # ── Meta WhatsApp Cloud API (verify + webhook URL típica /webhook) ──
+def verificar_firma_meta(payload: bytes, signature: str, app_secret: str) -> bool:
+    if not app_secret or not signature:
+        return False
+    expected = "sha256=" + hmac.new(
+        app_secret.encode(), payload, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
 @app.get("/webhook")
 async def verificar_webhook(request: Request):
     mode = request.query_params.get("hub.mode")
@@ -2587,26 +2982,24 @@ async def enviar_mensaje_meta(telefono: str, texto: str) -> bool:
         "type": "text",
         "text": {"body": texto},
     }
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                },
-            )
-        print(f"[Meta] Enviado a {telefono}: {resp.status_code}")
-        if resp.status_code >= 400:
-            try:
-                print(f"[Meta] Error body: {resp.text[:500]}")
-            except Exception:
-                pass
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"[Meta] Error enviando mensaje: {e}")
-        return False
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    for intento in range(1, 4):
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+            print(f"[Meta] Enviado a {telefono}: {resp.status_code} (intento {intento})")
+            if resp.status_code == 200:
+                return True
+            print(f"[Meta] Error body: {resp.text[:500]}")
+        except Exception as e:
+            err = str(e).strip() or repr(e)
+            print(f"[Meta] Error enviando mensaje ({type(e).__name__}): {err} (intento {intento})")
+        if intento < 3:
+            await asyncio.sleep(1.5 * intento)
+    return False
 
 
 async def enviar_documento_meta(
@@ -2688,6 +3081,10 @@ async def _wa_runner(wa_id: str) -> None:
 async def procesar_mensaje(wa_id: str, msg: dict) -> None:
     """Procesa un mensaje de Meta en background (POST /webhook ya respondió 200)."""
     try:
+        if get_rol(wa_id) is None:
+            await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+            return
+
         mtype = (msg.get("type") or "").strip()
 
         if mtype == "text":
@@ -2701,6 +3098,10 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             # Comandos de conteo físico
             sesion_conteo = get_sesion_activa(wa_id)
             if sesion_conteo:
+                if not autorizado_comando(wa_id, texto):
+                    await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+                    return
+
                 sid = sesion_conteo["id"]
                 envio_id = sesion_conteo["envio_id"]
 
@@ -2842,6 +3243,9 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             # Comando rápido: INICIAR CONTEO BOD-001
             cod_bod_rapido = _parse_iniciar_conteo_comando(texto)
             if cod_bod_rapido is not None:
+                if not autorizado_comando(wa_id, texto):
+                    await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+                    return
                 if not cod_bod_rapido:
                     ay, aw = semana_iso_actual()
                     out = (
@@ -2925,8 +3329,22 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
 @app.post("/webhook")
 async def recibir_webhook_meta(request: Request, background_tasks: BackgroundTasks):
+    body = await request.body()
+    skip_sig = (os.getenv("WHATSAPP_SKIP_SIGNATURE") or "").strip() == "1"
+    if not skip_sig:
+        app_secret = (os.getenv("WHATSAPP_APP_SECRET") or "").strip()
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        if not app_secret:
+            print("[Meta webhook] 401: falta WHATSAPP_APP_SECRET en .env (guardar y reiniciar)")
+            raise HTTPException(status_code=401, detail="Firma webhook inválida")
+        if not signature:
+            print("[Meta webhook] 401: falta header X-Hub-Signature-256")
+            raise HTTPException(status_code=401, detail="Firma webhook inválida")
+        if not verificar_firma_meta(body, signature, app_secret):
+            print("[Meta webhook] 401: firma no coincide — revisar WHATSAPP_APP_SECRET en Meta Developer")
+            raise HTTPException(status_code=401, detail="Firma webhook inválida")
     try:
-        data = await request.json()
+        data = json.loads(body)
     except Exception:
         return {"status": "ok"}
 

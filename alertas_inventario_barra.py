@@ -113,32 +113,31 @@ def _to_float(v: object, default: float = 0.0) -> float:
 
 def evaluar_bajo_par_barra() -> list[dict]:
     """
-    MPs de proveedores barra con fila BOD-002 bajo par_level global.
+    MPs de proveedores barra bajo par_level global (stock = suma todas las bodegas).
     """
+    from inventario_stock_mp import mps_bajo_par, norm_mp
     from whatsapp_webhook import leer_bd_mp_sistema
 
     mps_barra = cargar_cod_mps_proveedores_barra()
     if not mps_barra:
         return []
 
+    mps_barra_norm = {norm_mp(c) for c in mps_barra}
     out: list[dict] = []
-    for r in leer_bd_mp_sistema():
-        cod = _norm_cod_mp(r.get("cod_mp_sistema"))
-        bod = (r.get("cod_bodega") or "").strip().upper()
-        if cod not in mps_barra or bod != "BOD-002":
+    for cod, info in mps_bajo_par(leer_bd_mp_sistema()).items():
+        if cod not in mps_barra_norm:
             continue
-        stock = _to_float(r.get("stock_actual"))
-        par = _to_float(r.get("par_level"))
-        if par <= 0 or stock >= par:
-            continue
+        par = float(info["par_level"])
+        stock = float(info["stock_total"])
         out.append(
             {
                 "cod_mp": cod,
-                "nombre_mp": (r.get("nombre_mp") or cod).strip(),
-                "cod_bodega": bod,
+                "nombre_mp": info["nombre_mp"],
+                "cod_bodega": "TOTAL",
                 "stock_actual": round(stock, 4),
+                "stock_por_bodega": info["por_bodega"],
                 "par_level": round(par, 4),
-                "unidad": (r.get("unidad_base") or "").strip(),
+                "unidad": info["unidad_base"],
                 "deficit_pct": round((1 - stock / par) * 100, 1) if par else 0.0,
             }
         )
@@ -180,10 +179,14 @@ def _formatear_lineas(items: list[dict], *, tipo: str) -> str:
     lineas = []
     for it in items[:25]:
         if tipo == "par":
+            desglose = it.get("stock_por_bodega") or {}
+            extra = ""
+            if desglose:
+                extra = " (" + ", ".join(f"{b}:{v}" for b, v in desglose.items()) + ")"
             lineas.append(
-                f"• {it['cod_mp']} {it['nombre_mp'][:38]} @ {it['cod_bodega']}: "
-                f"stock {it['stock_actual']} / PAR {it['par_level']} {it['unidad']} "
-                f"({it['deficit_pct']}% bajo)"
+                f"• {it['cod_mp']} {it['nombre_mp'][:38]}: "
+                f"stock total {it['stock_actual']} / PAR {it['par_level']} {it['unidad']}"
+                f"{extra} ({it['deficit_pct']}% bajo)"
             )
         else:
             lineas.append(

@@ -8,9 +8,10 @@ Formula por (cod_mp, cod_bodega):
   - SALIDA_VENTA, AJUSTE_NEGATIVO, TRASLADO_SALIDA (cod_bodega_origen)
 
 Costo costo_unitario_ref (política canónica, ver costo_mp_canonico.py):
-  1. Promedio ponderado de ENTRADAs en ventana (COSTO_REF_DIAS_VENTANA, default 90).
+  1. Promedio ponderado de ENTRADAs y TRASLADO_ENTRADA (con costo) en ventana.
   2. Si BD_ITEMS_PROV tiene precio_ref: se usa prov salvo que el promedio mov sea coherente.
-  3. Si el promedio mov parece pack sin dividir (>0.05 USD/gr), se corrige con factor del ítem.
+  3. Si sigue vacío: mismo costo en otra bodega del MP (prioridad BOD-001, 002, 005, 003).
+  4. Si el promedio mov parece pack sin dividir (>0.05 USD/gr), se corrige con factor del ítem.
   Evita que entradas históricas mal cargadas reinflen col/almidón y subrecetas.
 
 CLI:
@@ -43,6 +44,9 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 TIPOS_SUMA_DESTINO = {"AJUSTE_POSITIVO", "ENTRADA", "TRASLADO_ENTRADA"}
 TIPOS_RESTA_ORIGEN = {"SALIDA_VENTA", "AJUSTE_NEGATIVO", "TRASLADO_SALIDA"}
+
+# Si una bodega no tiene costo en catálogo/mov, heredar de otra fila del mismo MP.
+_BODEGA_PRIO_COSTO_HERMANO = ("BOD-001", "BOD-002", "BOD-005", "BOD-003")
 
 
 def _cod_mp_norm(c: str) -> str:
@@ -201,6 +205,39 @@ def _cargar_costo_promedio_items_prov(sh) -> dict[str, float]:
     }
 
 
+def _build_costo_ref_por_mp_desde_hoja(
+    data_rows: list,
+    *,
+    col_cod: int,
+    col_bod: int,
+    col_costo: int,
+) -> dict[str, float]:
+    """Mejor costo_unitario_ref por MP según prioridad de bodega (traslados barra→consignación)."""
+    from numeros_sheets import parse_numero_sheets
+
+    prio_rank = {b: i for i, b in enumerate(_BODEGA_PRIO_COSTO_HERMANO)}
+    best: dict[str, tuple[int, float]] = {}
+    for row in data_rows:
+        if not any((c or "").strip() for c in row):
+            continue
+        cod = row[col_cod].strip() if col_cod < len(row) else ""
+        bod = normalizar_cod_bodega(row[col_bod] if col_bod < len(row) else "")
+        nk = _cod_mp_norm(cod)
+        if not nk or not bod:
+            continue
+        try:
+            cu = parse_numero_sheets(row[col_costo] if col_costo < len(row) else 0)
+        except ValueError:
+            cu = 0.0
+        if cu <= 0:
+            continue
+        rank = prio_rank.get(bod, 99)
+        prev = best.get(nk)
+        if prev is None or rank < prev[0]:
+            best[nk] = (rank, cu)
+    return {k: round(v[1], 6) for k, v in best.items()}
+
+
 def recalcular(
     dry_run: bool = True,
     *,
@@ -232,10 +269,10 @@ def recalcular(
     if dias_ventana > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(days=dias_ventana)
         print(
-            f"    Costo ref: promedio ponderado ENTRADAs (ultimos {dias_ventana} dias)"
+            f"    Costo ref: ENTRADAs + TRASLADO_ENTRADA (ultimos {dias_ventana} dias)"
         )
     else:
-        print("    Costo ref: promedio ponderado ENTRADAs (historial completo)")
+        print("    Costo ref: ENTRADAs + TRASLADO_ENTRADA (historial completo)")
 
     stock_calculado: dict[tuple[str, str], float] = defaultdict(float)
     costo_ponderado_suma: dict[tuple[str, str], float] = defaultdict(float)
@@ -270,7 +307,7 @@ def recalcular(
             stock_calculado[k] -= cantidad
 
         if (
-            tipo == "ENTRADA"
+            tipo in ("ENTRADA", "TRASLADO_ENTRADA")
             and costo > 0
             and bod
             and cantidad > 0
@@ -358,14 +395,24 @@ def recalcular(
     prov_canon = cargar_costo_desde_items_prov(sh)
     factores_prov = cargar_factor_items_prov(sh)
     costo_fallback_prov = _cargar_costo_promedio_items_prov(sh)
-    print(
-        f"    Catálogo prov (canónico min): {len(prov_canon)} MPs | "
-        f"fallback promedio: {len(costo_fallback_prov)}"
-    )
 
     print("\n[3] Preparando updates...")
     updates = []
     data_rows = values[header_row_idx + 1:]
+    col_costo_idx = col_costo - 1 if col_costo else None
+    costo_hoja_mp: dict[str, float] = {}
+    if col_costo_idx is not None:
+        costo_hoja_mp = _build_costo_ref_por_mp_desde_hoja(
+            data_rows,
+            col_cod=col_cod,
+            col_bod=col_bod,
+            col_costo=col_costo_idx,
+        )
+    print(
+        f"    Catálogo prov (canónico min): {len(prov_canon)} MPs | "
+        f"fallback promedio: {len(costo_fallback_prov)} | "
+        f"costo en hoja (hermano bodega): {len(costo_hoja_mp)}"
+    )
     filas_tocadas = 0
 
     for i, row in enumerate(data_rows):
@@ -416,11 +463,24 @@ def recalcular(
             )
             if costo_esc is None:
                 costo_esc = costo_fallback_prov.get(nk or k[0])
+            if (costo_esc is None or costo_esc <= 0) and nk:
+                costo_esc = costo_hoja_mp.get(nk)
             if costo_esc is not None and costo_esc > 0:
+                costo_ant = 0.0
+                try:
+                    from numeros_sheets import parse_numero_sheets
+
+                    costo_ant = parse_numero_sheets(
+                        row[col_costo_idx] if col_costo_idx is not None and col_costo_idx < len(row) else 0
+                    )
+                except ValueError:
+                    costo_ant = 0.0
                 updates.append({
                     "range": rowcol_to_a1(row_1based, col_costo),
                     "values": [[costo_esc]],
                 })
+                if abs(costo_esc - costo_ant) > 1e-6 and (costo_ant <= 0 or costo_esc != costo_ant):
+                    print(f"    {cod} @ {bod}: costo {costo_ant} -> {costo_esc}")
 
     if cod_mp_filtro and filas_tocadas == 0:
         print(f"\n  WARN: ninguna fila para cod_mp={cod_mp_filtro!r}")

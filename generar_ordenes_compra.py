@@ -11,9 +11,10 @@ Uso:
 
 Criterio:
   - PAR global por cod_mp (columna par_level en BD_MP_SISTEMA).
-  - Stock comparado en la bodega del área (BOD-002 barra, BOD-001 cocina).
+  - Stock para comparar vs PAR = suma de stock_actual en **todas** las bodegas activas del MP.
+  - Ingreso de compra sigue cod_bodega_destino del ítem (ej. BOD-002 barra).
   - Proveedores filtrados por BD_PROV.Tipo y proveedor_inventario=SI.
-  - Cantidad a pedir = PAR - stock_bodega; unidades compra = ceil(cant_base / factor_conversion).
+  - Cantidad a pedir = PAR - stock_total; unidades compra = ceil(cant_base / factor_conversion).
 """
 
 from __future__ import annotations
@@ -35,6 +36,11 @@ TIPO_A_BODEGA = {
     "BARRA": "BOD-002",
     "COCINA": "BOD-001",
 }
+
+# MPs con fila en estas bodegas entran al anexo "stock en cero" (alertas barra).
+BODEGAS_STOCK_ALERTA_BARRA = frozenset({"BOD-002", "BOD-003"})
+
+STOCK_CERO_TOL = 0.001
 
 DIA_MAP = {"LUN": 0, "MAR": 1, "MIE": 2, "JUE": 3, "VIE": 4, "SAB": 5, "DOM": 6}
 
@@ -121,52 +127,22 @@ def proveedor_activo_hoy(ventana: str, hoy: date) -> bool:
 
 
 def cargar_stock_por_mp_bodega(tipo: str) -> dict[str, dict]:
-    """cod_mp -> {stock, par, nombre, unidad, cod_bodega}"""
+    """cod_mp -> línea con stock_total (todas las bodegas) vs par global."""
+    from inventario_stock_mp import mps_bajo_par
     from whatsapp_webhook import leer_bd_mp_sistema
 
-    bodega = TIPO_A_BODEGA.get(tipo.upper()) if tipo.upper() in TIPO_A_BODEGA else None
-    # par_level es global: tomar de cualquier fila del MP
-    par_por_mp: dict[str, float] = {}
-    meta_por_mp: dict[str, dict] = {}
-    stock_bodega: dict[str, float] = {}
-    tiene_fila_bodega: set[str] = set()
-
-    for r in leer_bd_mp_sistema():
-        cod = _norm_cod_mp(r.get("cod_mp_sistema"))
-        if not cod:
-            continue
-        bod = (r.get("cod_bodega") or "").strip().upper()
-        par = _to_float(r.get("par_level"))
-        if par > 0 and cod not in par_por_mp:
-            par_por_mp[cod] = par
-            meta_por_mp[cod] = {
-                "nombre_mp": (r.get("nombre_mp") or cod).strip(),
-                "unidad_base": (r.get("unidad_base") or "").strip(),
-            }
-        if bodega and bod != bodega:
-            continue
-        if not bodega:
-            stock_bodega[cod] = stock_bodega.get(cod, 0.0) + _to_float(r.get("stock_actual"))
-        else:
-            tiene_fila_bodega.add(cod)
-            stock_bodega[cod] = _to_float(r.get("stock_actual"))
-
+    bodega_pedido = TIPO_A_BODEGA.get(tipo.upper()) if tipo.upper() in TIPO_A_BODEGA else None
     out: dict[str, dict] = {}
-    for cod, par in par_por_mp.items():
-        if bodega and cod not in tiene_fila_bodega:
-            continue
-        stock = stock_bodega[cod]
-        if par <= 0 or stock >= par:
-            continue
-        meta = meta_por_mp.get(cod, {})
+    for cod, info in mps_bajo_par(leer_bd_mp_sistema()).items():
         out[cod] = {
             "cod_mp_sistema": cod,
-            "nombre_mp": meta.get("nombre_mp", cod),
-            "unidad_base": meta.get("unidad_base", ""),
-            "stock_actual": round(stock, 4),
-            "par_level": round(par, 4),
-            "cantidad_base": round(par - stock, 4),
-            "cod_bodega": bodega or "GLOBAL",
+            "nombre_mp": info["nombre_mp"],
+            "unidad_base": info["unidad_base"],
+            "stock_actual": info["stock_total"],
+            "stock_por_bodega": info["por_bodega"],
+            "par_level": info["par_level"],
+            "cantidad_base": info["cantidad_faltante"],
+            "cod_bodega": bodega_pedido or "GLOBAL",
         }
     return out
 
@@ -458,6 +434,138 @@ def generar_ordenes(
             }
         )
     return ordenes
+
+
+def _mp_en_area_barra(info: dict) -> bool:
+    por = info.get("por_bodega") or {}
+    return bool(BODEGAS_STOCK_ALERTA_BARRA.intersection(por))
+
+
+def _linea_pedido_propuesta(
+    mp: dict,
+    item: dict,
+    *,
+    tipo: str,
+) -> dict:
+    """Misma lógica que generar_ordenes para texto de cantidad sugerida."""
+    cant_base = float(mp.get("cantidad_base") or 0)
+    factor = _to_float(item.get("factor_conversion"), 1.0) or 1.0
+    linea = {
+        **mp,
+        "descripcion_proveedor": item.get("descripcion_proveedor"),
+        "unidad_compra": item.get("unidad_compra"),
+        "unidades_a_pedir": math.ceil(cant_base / factor) if factor > 0 else math.ceil(cant_base),
+        "factor_conversion": factor,
+    }
+    if tipo.strip().lower() == "barra":
+        enriquecer_linea_unidades_barra(linea, item)
+    else:
+        linea["texto_cantidad"] = _linea_cantidad_texto(linea)
+    return linea
+
+
+def _indice_lineas_ordenes(ordenes: list[dict]) -> dict[str, dict]:
+    """cod_mp -> línea ya incluida en órdenes generadas."""
+    out: dict[str, dict] = {}
+    for oc in ordenes:
+        for ln in oc.get("lineas") or []:
+            cod = _norm_cod_mp(ln.get("cod_mp_sistema"))
+            if cod:
+                out[cod] = ln
+    return out
+
+
+def listar_mp_stock_cero_para_alertas(
+    *,
+    tipo: str = "barra",
+    sin_ventana: bool = False,
+    hoy: date | None = None,
+    ordenes: list[dict] | None = None,
+) -> list[dict]:
+    """
+    MPs con stock total <= 0 en bodegas barra/consignación.
+    Incluye pedido propuesto si hay catálogo; si no, motivo general.
+    """
+    from inventario_stock_mp import agrupar_stock_par_por_mp
+    from whatsapp_webhook import leer_bd_mp_sistema
+
+    hoy = hoy or date.today()
+    tipo_l = tipo.strip().lower()
+    bodega = TIPO_A_BODEGA.get(tipo_l.upper()) if tipo_l in ("barra", "cocina") else None
+
+    proveedores = cargar_proveedores_por_tipo(tipo_l)
+    mps_bajo = cargar_stock_por_mp_bodega(tipo_l)
+    items_por_mp = cargar_items_prov_por_mp(proveedores, bodega)
+    en_orden = _indice_lineas_ordenes(ordenes or [])
+    agrupado = agrupar_stock_par_por_mp(leer_bd_mp_sistema())
+
+    filas: list[dict] = []
+    for cod, info in agrupado.items():
+        if not _mp_en_area_barra(info):
+            continue
+        stock = float(info["stock_total"])
+        if stock > STOCK_CERO_TOL:
+            continue
+
+        par = float(info["par_level"])
+        fila: dict = {
+            "cod_mp_sistema": cod,
+            "nombre_mp": info["nombre_mp"],
+            "unidad_base": info["unidad_base"],
+            "stock_total": round(stock, 4),
+            "par_level": round(par, 4),
+            "stock_por_bodega": info["por_bodega"],
+            "pedido_propuesto": None,
+            "motivo_sin_pedido": None,
+            "nota": None,
+        }
+
+        if cod in en_orden:
+            ln = en_orden[cod]
+            fila["pedido_propuesto"] = _linea_cantidad_texto(ln)
+            fila["nota"] = "Ya incluido en las órdenes de compra de este mensaje"
+            fila["descripcion_proveedor"] = (ln.get("descripcion_proveedor") or "").strip()
+        elif par <= STOCK_CERO_TOL:
+            fila["motivo_sin_pedido"] = (
+                "PAR en 0: no hay consumo calculado en recetas o no se ha corrido calcular_par_levels"
+            )
+        elif cod not in mps_bajo:
+            fila["motivo_sin_pedido"] = (
+                "Stock total en cero pero PAR no exige reposición (revisar par_level)"
+            )
+        elif cod not in items_por_mp:
+            fila["motivo_sin_pedido"] = (
+                "Sin fila en BD_ITEMS_PROV para proveedor Barra con destino BOD-002"
+            )
+        else:
+            item = items_por_mp[cod][0]
+            fila["descripcion_proveedor"] = (item.get("descripcion_proveedor") or "").strip()
+            cp = item["cod_proveedor"]
+            if cp not in proveedores:
+                fila["motivo_sin_pedido"] = "Proveedor del ítem no está activo en BD_PROV"
+            elif not sin_ventana and not proveedor_activo_hoy(
+                proveedores[cp]["ventana_pedido"], hoy
+            ):
+                fila["motivo_sin_pedido"] = (
+                    f"Proveedor sin ventana de pedido hoy "
+                    f"({proveedores[cp].get('ventana_pedido') or 'sin ventana'})"
+                )
+            else:
+                prop = _linea_pedido_propuesta(mps_bajo[cod], item, tipo=tipo_l)
+                fila["pedido_propuesto"] = _linea_cantidad_texto(prop)
+                fila["nota"] = "Bajo PAR pero no entró al bloque de órdenes (revisar ventana/catálogo)"
+
+        filas.append(fila)
+
+    # Anexo útil: PAR > 0 o pedido concreto (omitir PAR=0 sin reposición sugerida).
+    filas = [
+        f
+        for f in filas
+        if float(f.get("par_level") or 0) > STOCK_CERO_TOL or f.get("pedido_propuesto")
+    ]
+
+    filas.sort(key=lambda x: (-float(x["par_level"]), x["nombre_mp"]))
+    return filas
 
 
 def escribir_hoja_ordenes(ordenes: list[dict], *, tipo: str, fecha: date) -> None:
