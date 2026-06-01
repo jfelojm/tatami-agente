@@ -808,8 +808,10 @@ def procesar_descargo(fecha: str | None = None) -> dict:
 
     if alertas_stock_negativo:
         try:
+            from alertas_inventario_barra import alerta_wa_descargo_stock_negativo_barra
             from alertas_tatami import alerta_wa_descargo_stock_negativo
 
+            alerta_wa_descargo_stock_negativo_barra(alertas_stock_negativo)
             alerta_wa_descargo_stock_negativo(alertas_stock_negativo)
         except Exception as e:
             print(f"  WARN: alerta descargo stock negativo: {e}")

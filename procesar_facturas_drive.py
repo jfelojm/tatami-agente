@@ -32,6 +32,10 @@ load_dotenv(override=True)
 # Hoja maestra: ítems de factura XML sin match en BD_ITEMS_PROV (para alta manual / MP).
 BD_ITEMS_PENDIENTES_SHEET = "BD_ITEMS_PENDIENTES"
 FECHA_MIN_COSTO_TOTAL_PENDIENTES = "2026-05-21"
+# No registrar mov_inventario ni stock Sheets desde facturas con fecha anterior a este día.
+FECHA_MIN_INGRESO_FACTURA = (
+    os.getenv("TATAMI_FECHA_MIN_INGRESO_FACTURA", "2026-05-29").strip()[:10]
+)
 COL_COSTO_TOTAL_PENDIENTES = "costo_total_xml"
 
 SCOPES = [
@@ -1214,9 +1218,81 @@ def _pendientes_boot_sheet_cache(ws: gspread.Worksheet) -> bool:
 def _pendientes_header_row_idx(values: list[list[str]]) -> int | None:
     """Fila 0-based donde está la cabecera con columna clave_unica (puede no ser la fila 1)."""
     for i, row in enumerate(values):
-        if any((c or "").strip() == "clave_unica" for c in row):
+        cells = [(c or "").strip() for c in row]
+        if "clave_unica" in cells:
+            return i
+        # Cabecera legacy corrupta (A1 = "ama" en lugar de clave_unica).
+        if cells and cells[0] == "ama" and "fecha_registro" in cells:
             return i
     return None
+
+
+def _pendientes_col_clave_unica(headers: list[str]) -> int:
+    """Índice 0-based de clave_unica (o legacy 'ama')."""
+    for name in ("clave_unica", "ama"):
+        try:
+            return headers.index(name)
+        except ValueError:
+            continue
+    return 0
+
+
+def fecha_factura_permite_ingreso_stock(fecha_factura: str) -> bool:
+    """False si la factura es anterior a FECHA_MIN_INGRESO_FACTURA (sin mov ni stock)."""
+    f = (fecha_factura or "").strip()[:10]
+    if not f or len(f) < 10:
+        return False
+    return f >= FECHA_MIN_INGRESO_FACTURA
+
+
+def reparar_bd_items_pendientes_cabecera() -> dict[str, str | int | bool]:
+    """
+    Corrige cabecera BD_ITEMS_PENDIENTES: A1 'ama' → clave_unica;
+    agrega columnas faltantes (motivo_pendiente, origen_factura).
+    """
+    sh = _get_sheet()
+    ws = sh.worksheet(BD_ITEMS_PENDIENTES_SHEET)
+    vals = ws.get_all_values()
+    hi = _pendientes_header_row_idx(vals)
+    if hi is None:
+        return {"ok": False, "error": "no se detectó fila de cabecera"}
+
+    headers = [(c or "").strip() for c in vals[hi]]
+    cambios: list[str] = []
+    row_1based = hi + 1
+
+    if headers and headers[0] == "ama":
+        ws.update(
+            values=[["clave_unica"]],
+            range_name=rowcol_to_a1(row_1based, 1),
+            value_input_option=ValueInputOption.user_entered,
+        )
+        headers[0] = "clave_unica"
+        cambios.append("A1: ama → clave_unica")
+
+    canon = _pendientes_headers_canonicos()
+    for col_name in ("motivo_pendiente", "origen_factura"):
+        if col_name not in headers:
+            col_1 = len(headers) + 1
+            ws.update(
+                values=[[col_name]],
+                range_name=rowcol_to_a1(row_1based, col_1),
+                value_input_option=ValueInputOption.user_entered,
+            )
+            headers.append(col_name)
+            cambios.append(f"+columna {col_name}")
+
+    _pendientes_invalidate_sheet_cache()
+    global _items_pendientes_cache_keys, _items_pendientes_ignorados_por_item
+    _items_pendientes_cache_keys = None
+    _items_pendientes_ignorados_por_item = None
+
+    return {
+        "ok": True,
+        "cambios": cambios,
+        "filas_datos": max(0, len(vals) - hi - 1),
+        "cabeceras": len(headers),
+    }
 
 
 def _pendientes_load_keys(ws: gspread.Worksheet) -> dict[str, str]:
@@ -1244,13 +1320,15 @@ def _pendientes_load_keys(ws: gspread.Worksheet) -> dict[str, str]:
     out: dict[str, str] = {}
     ignorados: dict[str, str] = {}
 
+    idx_clave = _pendientes_col_clave_unica(headers)
+
     for row in vals[hi + 1 :]:
         if not row or not any((c or "").strip() for c in row):
             continue
         if str(row[0]).strip().startswith("["):
             continue
-        cell = (row[0] or "").strip()
-        if not cell or cell == "clave_unica":
+        cell = (row[idx_clave] if idx_clave < len(row) else row[0] or "").strip()
+        if not cell or cell in ("clave_unica", "ama"):
             continue
         estado = (
             (row[idx_estado] if idx_estado is not None and idx_estado < len(row) else "")
@@ -2056,6 +2134,10 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False) -> dict:
     xmls = listar_xmls_pendientes()
     sin_xmls = len(xmls) == 0
     print(f"XMLs en Drive: {len(xmls)}")
+    print(
+        f"Ingreso stock/mov: solo facturas con fecha >= {FECHA_MIN_INGRESO_FACTURA} "
+        "(TATAMI_FECHA_MIN_INGRESO_FACTURA)."
+    )
 
     global _items_pendientes_cache_keys, _items_pendientes_ignorados_por_item
     _items_pendientes_cache_keys = None
@@ -2427,6 +2509,16 @@ def procesar_factura_dict(
                 procesar_variacion_precio(item_prov, factura, item)
             continue
 
+        if not fecha_factura_permite_ingreso_stock(factura.get("fecha_factura", "")):
+            print(
+                f"    SKIP INGRESO: fecha factura {factura.get('fecha_factura')} "
+                f"< {FECHA_MIN_INGRESO_FACTURA} — sin mov/stock "
+                f"(protege inventario barra/cocina ya cuadrado)."
+            )
+            if not dry_run:
+                procesar_variacion_precio(item_prov, factura, item)
+            continue
+
         ok_conv, motivo_conv = conversion_compra_definida(item_prov)
         if not ok_conv:
             msg = (
@@ -2506,6 +2598,12 @@ if __name__ == "__main__":
         print("Creando pestaña de ítems pendientes (si no existe)...")
         crear_hoja_bd_items_pendientes()
         sys.exit(0)
+
+    if "--reparar-hoja-items-pendientes" in sys.argv:
+        print("Reparando cabecera BD_ITEMS_PENDIENTES...")
+        r = reparar_bd_items_pendientes_cabecera()
+        print(r)
+        sys.exit(0 if r.get("ok") else 1)
 
     if "--backfill-items-pendientes" in sys.argv:
         dry = "--dry-run" in sys.argv

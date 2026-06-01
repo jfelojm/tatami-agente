@@ -586,6 +586,37 @@ def main() -> None:
         step=6,
         fecha_objetivo=fecha_objetivo,
     )
+    try:
+        from alertas_inventario_barra import enviar_alertas_inventario_barra
+
+        ab = enviar_alertas_inventario_barra(origen="pipeline")
+        if ab.get("enviado"):
+            print(
+                f"  WA inventario barra: bajo PAR={ab.get('bajo_par')} "
+                f"negativos={ab.get('negativos')}"
+            )
+        elif ab.get("omitido") and ab.get("omitido") not in ("sin alertas",):
+            if ab.get("omitido") != "TATAMI_ALERT_INVENTARIO_BARRA no activo":
+                print(f"  INFO inventario barra: {ab.get('omitido')}")
+    except Exception as e:
+        print(f"  WARN: alertas inventario barra: {e}")
+
+    try:
+        from alertas_ordenes_compra_barra import enviar_alertas_ordenes_compra_barra
+
+        oc = enviar_alertas_ordenes_compra_barra(origen="pipeline")
+        if oc.get("proveedores"):
+            print(
+                f"  WA órdenes compra barra: {oc.get('proveedores')} proveedores, "
+                f"{oc.get('lineas')} líneas"
+            )
+        elif oc.get("omitido") and oc.get("omitido") not in (
+            "sin ítems bajo PAR",
+            "TATAMI_ALERT_ORDENES_COMPRA_BARRA no activo",
+        ):
+            print(f"  INFO órdenes compra barra: {oc.get('omitido')}")
+    except Exception as e:
+        print(f"  WARN: alertas órdenes compra barra: {e}")
 
     if args.with_costos:
         run_step(
