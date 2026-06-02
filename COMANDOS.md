@@ -61,13 +61,40 @@ python pipeline_diario.py --skip-reconciliar
 
 Sin `--fecha`, **fecha objetivo** = día calendario **anterior** en `America/Guayaquil` (típico: tarea diaria a las **12:00** del día D carga ventas del día **D−1** completo, 00:00–23:59).
 
-**Orden interno del pipeline:** ventas → reconciliar grid vs hist → descargo → facturas → recalcular stock → PAR  
-(equivale a: `ventas_smartmenu.py` → `reconciliar_ventas_dia.py` → `descargo_inventario.py` → `procesar_facturas_drive` → `recalcular_stock_sheets.py` → `calcular_par_levels.py`).
+**Orden interno del pipeline:** ventas → reconciliar grid vs hist → descargo **solo del día objetivo** → facturas → recalcular stock → PAR  
+(equivale a: `ventas_smartmenu.py` → `reconciliar_ventas_dia.py` → `descargo_inventario.py --fecha <ayer>` → `procesar_facturas_drive` → `recalcular_stock_sheets.py` → `calcular_par_levels.py`).
+
+### Cuadrante 4× día (12:00 · 18:00 · 00:00 · 01:00)
+
+| Hora | Script | Modo | Fecha |
+|------|--------|------|-------|
+| 12:00 | `-Slot mediodia` | completo | ayer |
+| 18:00 | `-Slot tarde` | operativo | hoy |
+| 00:00 | `-Slot medianoche` | operativo | ayer |
+| 01:00 | `-Slot seguridad` | nocturno | ayer |
+
+```powershell
+.\ejecutar_pipeline_cuadrante.ps1 -Slot mediodia
+.\registrar_cuadrante_tareas.ps1   # Task Scheduler (admin)
+```
+
+### Política anti-carga parcial (grave)
+
+| Regla | Implementación |
+|-------|----------------|
+| Intradía (18:00 / 00:00) | `--modo operativo`: ventas progresivas + descargo **solo pendientes** + alertas |
+| Cierre 12:00 | `--modo completo`: ayer cuadrado + facturas + PAR |
+| Red 01:00 | `--modo nocturno`: reconciliar estricto + recalcular; WA si falla |
+| Repoblar huecos | `python repoblar_ventas_desde.py --desde 2026-05-29 --descargo` |
 
 | Flag | Efecto |
 |------|--------|
+| `--modo operativo` | Ventas progresivas + descargo + alertas (sin facturas/PAR) |
+| `--modo nocturno` | Cierre nocturno: reconciliar estricto + descargo + recalcular |
 | `--skip-ventas` | Omite el paso de ventas Smart Menu |
-| `--skip-reconciliar` | Omite la reconciliación grid vs Supabase (**no recomendado**; el descargo puede correr sin cuadre) |
+| `--skip-reconciliar` | Omite la reconciliación grid vs Supabase (**no recomendado** en cierre diario) |
+| `--solo-ventas` | Solo carga ventas (corrida horaria); sin descargo ni stock |
+| `--modo-progresivo` | Con `--solo-ventas`: permite hoy e incompleto (ventas progresivas) |
 | `--strict-ventas` | Falla el pipeline si `ventas_smartmenu.py --strict` falla y envía alerta si está configurada |
 
 Tras ventas, **`reconciliar_ventas_dia.py`** compara subtotal del grid con sumas en `hist_ventas` y el número de documentos; si no cuadra dentro de **`RECONCILIAR_TOL_ABS`** (default **0,05** USD), el pipeline **termina con error** y **`alertas_tatami`** puede enviar webhook / escribir log:

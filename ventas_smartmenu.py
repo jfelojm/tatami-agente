@@ -1,9 +1,11 @@
 import os
 import argparse
 import re
+import sys
 import time
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -27,6 +29,7 @@ SMART_MENU_URL = _required_env("SMART_MENU_BASE_URL")
 SMART_MENU_PHPSESSID = (os.getenv("SMART_MENU_PHPSESSID") or "").strip()
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+ZONA_EC = ZoneInfo("America/Guayaquil")
 
 _http = requests.Session()
 _http.headers.update(
@@ -245,6 +248,85 @@ def _venta_header_from_row(row: list[str]) -> dict:
         "estado_documento": estado_documento,
         "detalle_anulacion": detalle_anulacion or None,
     }
+
+
+def _fecha_hoy_ec() -> str:
+    return datetime.now(ZONA_EC).date().isoformat()
+
+
+def validar_fecha_carga_permitida(fecha: str, *, force: bool = False) -> None:
+    """
+    Bloquea cargar ventas del día calendario en curso (Smart Menu aún recibe tickets).
+    El pipeline oficial carga siempre el día anterior completo (00:00–23:59 EC).
+    """
+    if force or (os.getenv("VENTAS_PERMITIR_HOY") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    ):
+        return
+    f = _normalize_fecha_input(fecha).strip().split()[0]
+    hoy = _fecha_hoy_ec()
+    if f >= hoy:
+        print(
+            f"\nERROR: no se permite cargar ventas de {f} mientras el día está en curso "
+            f"(hoy America/Guayaquil={hoy}).\n"
+            "  → Use pipeline_diario.py (carga el día anterior cerrado).\n"
+            "  → Carga manual del mismo día solo con --force-fecha (cierre excepcional).\n"
+        )
+        raise SystemExit(1)
+
+
+def _alerta_carga_incompleta(rep: dict) -> None:
+    try:
+        from alertas_tatami import enviar_alerta
+
+        from ventas_completitud import mensaje_completitud
+
+        enviar_alerta(
+            "Carga ventas incompleta (grid vs hist_ventas)",
+            mensaje_completitud(rep),
+            estado="ERROR",
+        )
+    except Exception as e:
+        print(f"  WARN: no se pudo enviar alerta carga incompleta: {e}")
+
+
+def _verificar_completitud_post_carga(
+    fecha: str,
+    grid_rows: list[list[str]],
+    *,
+    force_incompleta: bool = False,
+) -> dict:
+    from ventas_completitud import (
+        auditar_completitud,
+        exigir_completitud,
+        id_documentos_desde_grid_rows,
+        mensaje_completitud,
+    )
+
+    grid_ids = id_documentos_desde_grid_rows(grid_rows)
+    rep = auditar_completitud(fecha, grid_ids, sb=supabase)
+    print(f"\n[3] Completitud carga (id_documento grid vs hist_ventas)")
+    print(f"  Grid: {rep['grid_docs']} | Hist: {rep['hist_docs']}")
+    if rep["ok"]:
+        print("  OK — todos los documentos del grid están en hist_ventas.")
+        return rep
+
+    print(f"  FALLO — {mensaje_completitud(rep)}")
+    _alerta_carga_incompleta(rep)
+    if force_incompleta or not exigir_completitud():
+        print(
+            "  WARN: continuando pese a incompletitud "
+            "(--force-incompleta o VENTAS_EXIGIR_COMPLETITUD=0)."
+        )
+        return rep
+
+    print(
+        "  El pipeline NO debe continuar a descargo hasta cuadrar.\n"
+        "  Cuando el día esté cerrado, vuelva a ejecutar ventas (insertará solo faltantes)."
+    )
+    raise SystemExit(1)
 
 
 def construir_lineas_hist_ventas(header: dict, detalles: list[dict]) -> list[dict]:
@@ -603,10 +685,18 @@ def borrar_hist_ventas_dia(fecha: str) -> int:
         return 0
 
 
-def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
+def procesar_un_dia(
+    fecha: str,
+    reemplazar: bool = False,
+    *,
+    force_fecha: bool = False,
+    force_incompleta: bool = False,
+) -> dict:
     fecha = _normalize_fecha_input(fecha)
     if " " in fecha:
         fecha = fecha.split(" ", 1)[0]
+
+    validar_fecha_carga_permitida(fecha, force=force_fecha)
 
     print(f"\n{'=' * 50}")
     print(f"MODULO VENTAS — {fecha}")
@@ -640,8 +730,17 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
         print(f"\n{'=' * 50}")
         return {"insertadas": 0, "duplicadas": 0, "errores": 0, "docs": 0}
 
+    # Conservar filas del grid antes de truncar (completitud vs hist)
+    grid_rows_completitud = list(rows)
     _max_docs_env = os.getenv("SMART_MENU_MAX_DOCS")
     max_docs = int(_max_docs_env) if _max_docs_env else 999999
+    if len(rows) > max_docs:
+        print(
+            f"\nERROR: SMART_MENU_MAX_DOCS={max_docs} truncaría {len(rows) - max_docs} "
+            f"documentos del grid ({len(rows)} total).\n"
+            "  Aumente o elimine SMART_MENU_MAX_DOCS en .env antes de cargar ventas."
+        )
+        raise SystemExit(1)
     rows = rows[:max_docs]
 
     print("\n[2] Descargando detalle por venta y guardando en Supabase...")
@@ -721,6 +820,12 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
             f"(grid tenia {n_grid_total}); puede haber ventas sin cargar."
         )
 
+    completitud = _verificar_completitud_post_carga(
+        fecha,
+        grid_rows_completitud,
+        force_incompleta=force_incompleta,
+    )
+
     print(f"\n{'=' * 50}")
     return {
         "insertadas": insertadas,
@@ -729,6 +834,7 @@ def procesar_un_dia(fecha: str, reemplazar: bool = False) -> dict:
         "docs": len(rows),
         "audit": audit,
         "n_grid_total": n_grid_total,
+        "completitud": completitud,
     }
 
 
@@ -826,7 +932,16 @@ if __name__ == "__main__":
     import sys
 
     # CLI moderno (no-interactivo)
-    _cli_flags = ("--fecha", "--reemplazar", "--historico", "--strict", "--audit")
+    _cli_flags = (
+        "--fecha",
+        "--reemplazar",
+        "--historico",
+        "--strict",
+        "--audit",
+        "--force-fecha",
+        "--force-incompleta",
+        "--modo-progresivo",
+    )
     if any(a in _cli_flags for a in sys.argv[1:]):
         p = argparse.ArgumentParser(description="Carga ventas Smart Menu -> hist_ventas")
         p.add_argument("--fecha", required=False, help="YYYY-MM-DD (default: hoy)")
@@ -838,7 +953,22 @@ if __name__ == "__main__":
         p.add_argument(
             "--strict",
             action="store_true",
-            help="Sale con codigo 1 si hay errores de insert o BD vacia con docs en grid",
+            help="Sale con codigo 1 si hay errores de insert, BD vacia con docs en grid, o carga incompleta",
+        )
+        p.add_argument(
+            "--force-fecha",
+            action="store_true",
+            help="Permite cargar el día calendario en curso (solo cierre excepcional)",
+        )
+        p.add_argument(
+            "--force-incompleta",
+            action="store_true",
+            help="No abortar si faltan documentos en hist (no usar en pipeline de cierre)",
+        )
+        p.add_argument(
+            "--modo-progresivo",
+            action="store_true",
+            help="Corrida horaria: permite hoy + carga incompleta (solo hist_ventas, sin descargo)",
         )
         p.add_argument(
             "--audit",
@@ -870,15 +1000,23 @@ if __name__ == "__main__":
         elif a.historico:
             _main_carga_historica(fecha_inicio=a.historico[0], fecha_fin=a.historico[1])
         else:
+            progresivo = a.modo_progresivo
+            if progresivo:
+                print("  Modo progresivo: carga parcial permitida (sin descargo en horario)")
             res = procesar_un_dia(
                 a.fecha or date.today().strftime("%Y-%m-%d"),
                 reemplazar=a.reemplazar,
+                force_fecha=a.force_fecha or progresivo,
+                force_incompleta=a.force_incompleta or progresivo,
             )
             if a.strict:
                 if res.get("errores", 0) > 0:
                     sys.exit(1)
                 audit = res.get("audit") or {}
                 if res.get("docs", 0) > 0 and audit.get("lineas", 0) == 0:
+                    sys.exit(1)
+                comp = res.get("completitud") or {}
+                if not comp.get("ok"):
                     sys.exit(1)
     else:
         # Modo legacy (interactivo)

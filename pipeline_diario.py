@@ -339,6 +339,23 @@ def _fecha_objetivo_desde_arg(arg_fecha: str | None) -> str:
     return (hoy_ec - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
+def _alertas_inventario_pipeline(origen: str = "pipeline") -> None:
+    try:
+        from alertas_inventario_barra import enviar_alertas_inventario_barra
+
+        ab = enviar_alertas_inventario_barra(origen=origen)
+        if ab.get("enviado"):
+            print(
+                f"  WA inventario barra: bajo PAR={ab.get('bajo_par')} "
+                f"negativos={ab.get('negativos')}"
+            )
+        elif ab.get("omitido") and ab.get("omitido") not in ("sin alertas",):
+            if ab.get("omitido") != "TATAMI_ALERT_INVENTARIO_BARRA no activo":
+                print(f"  INFO inventario barra: {ab.get('omitido')}")
+    except Exception as e:
+        print(f"  WARN: alertas inventario barra: {e}")
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Pipeline diario Tatami (6 pasos)")
     p.add_argument("--skip-ventas", action="store_true", help="Omitir pasos 1 y 2")
@@ -357,6 +374,22 @@ def _parse_args() -> argparse.Namespace:
         metavar="YYYY-MM-DD",
         default=None,
         help="Fecha ventas/reconcilio (default: ayer en America/Guayaquil)",
+    )
+    p.add_argument(
+        "--solo-ventas",
+        action="store_true",
+        help="Solo paso 1 (ventas); sin descargo ni inventario. Usar en corrida horaria.",
+    )
+    p.add_argument(
+        "--modo-progresivo",
+        action="store_true",
+        help="Con --solo-ventas: permite día en curso e incompletitud (sin mover stock).",
+    )
+    p.add_argument(
+        "--modo",
+        choices=("completo", "operativo", "nocturno"),
+        default="completo",
+        help="completo=cierre 12:00 | operativo=ventas+descargo+alertas | nocturno=ayer cuadrado+recalcular",
     )
     p.add_argument(
         "--with-costos",
@@ -415,6 +448,12 @@ def _alerta_pipeline_ok(
 
 def main() -> None:
     args = _parse_args()
+    if args.modo == "operativo":
+        args.modo_progresivo = True
+        args.skip_reconciliar = True
+    elif args.modo == "nocturno":
+        args.skip_reconciliar = False
+
     fecha_objetivo = _fecha_objetivo_desde_arg(args.fecha)
     hoy_ec = datetime.now(ZONA_EC).date()
 
@@ -441,18 +480,24 @@ def main() -> None:
     print(f"  Skip ventas Smart Menu: {args.skip_ventas}")
     print(f"  Skip reconciliacion: {args.skip_reconciliar}")
     print(f"  Ventas estrictas: {args.strict_ventas}")
+    print(f"  Solo ventas (horario): {args.solo_ventas}")
+    print(f"  Modo pipeline: {args.modo}")
+    if args.solo_ventas:
+        print(f"  Modo progresivo: {args.modo_progresivo}")
 
     _checkpoint_warn_previous(fecha_objetivo)
     _checkpoint_start(fecha_objetivo)
 
     if not args.skip_ventas:
         ventas_argv = ["ventas_smartmenu.py", "--fecha", fecha_objetivo]
-        if args.strict_ventas:
+        if args.modo_progresivo:
+            ventas_argv.append("--modo-progresivo")
+        elif args.strict_ventas:
             ventas_argv.append("--strict")
         rc = run_step(
             "1/6 — Ventas Smart Menu -> hist_ventas",
             ventas_argv,
-            check=False,
+            check=True,
             step=1,
             fecha_objetivo=fecha_objetivo,
         )
@@ -469,15 +514,16 @@ def main() -> None:
             print(f"\nERROR: ventas termino con codigo {rc} (--strict-ventas)")
             sys.exit(rc)
 
-        if not args.skip_reconciliar:
+        if not args.skip_reconciliar and not args.solo_ventas:
+            rec_check = args.modo == "nocturno"
             rc_rec = run_step(
                 "2/6 — Reconciliar grid Smart Menu vs hist_ventas",
                 ["reconciliar_ventas_dia.py", "--fecha", fecha_objetivo],
-                check=False,
+                check=rec_check,
                 step=2,
                 fecha_objetivo=fecha_objetivo,
             )
-            if rc_rec != 0:
+            if rc_rec != 0 and not rec_check:
                 print(
                     f"\nWARN: reconciliación falló (codigo {rc_rec}). "
                     "Reintentando ventas + reconciliación una vez..."
@@ -507,12 +553,50 @@ def main() -> None:
         _checkpoint_step_ok(fecha_objetivo, 1, "omitido (--skip-ventas)")
         _checkpoint_step_ok(fecha_objetivo, 2, "omitido (--skip-ventas)")
 
+    if args.solo_ventas:
+        print("\n[2/6] Omitido (--solo-ventas): sin reconciliación en corrida horaria")
+        _checkpoint_step_ok(fecha_objetivo, 2, "omitido (--solo-ventas)")
+        print("\n[3–6] Omitidos (--solo-ventas): sin descargo, facturas, stock ni PAR")
+        _checkpoint_step_ok(fecha_objetivo, 4, "omitido (--solo-ventas)")
+        _checkpoint_step_ok(fecha_objetivo, 5, "omitido (--solo-ventas)")
+        _checkpoint_step_ok(fecha_objetivo, 6, "omitido (--solo-ventas)")
+        _checkpoint_complete(fecha_objetivo)
+        _pipeline_ctx["finished"] = True
+        print("\nPipeline solo ventas completado.")
+        return
+
     run_step(
         "3/6 — Descargo inventario (hist_ventas -> mov_inventario + stock Sheets)",
-        ["descargo_inventario.py"],
+        ["descargo_inventario.py", "--fecha", fecha_objetivo],
         step=3,
         fecha_objetivo=fecha_objetivo,
     )
+
+    if args.modo == "operativo":
+        print("\n[4–6] Omitidos (modo operativo): sin facturas, recalcular global ni PAR")
+        _checkpoint_step_ok(fecha_objetivo, 4, "omitido (modo operativo)")
+        _checkpoint_step_ok(fecha_objetivo, 5, "omitido (modo operativo)")
+        _checkpoint_step_ok(fecha_objetivo, 6, "omitido (modo operativo)")
+        _alertas_inventario_pipeline(origen=f"operativo {fecha_objetivo}")
+        _checkpoint_complete(fecha_objetivo)
+        _pipeline_ctx["finished"] = True
+        print("\nPipeline operativo completado (ventas + descargo + alertas).")
+        return
+
+    if args.modo == "nocturno":
+        run_step(
+            "5/6 — Recalcular stock/costo Sheets (cierre nocturno)",
+            ["recalcular_stock_sheets.py", "--produccion"],
+            step=5,
+            fecha_objetivo=fecha_objetivo,
+        )
+        _checkpoint_step_ok(fecha_objetivo, 4, "omitido (modo nocturno)")
+        _checkpoint_step_ok(fecha_objetivo, 6, "omitido (modo nocturno)")
+        _alertas_inventario_pipeline(origen=f"nocturno {fecha_objetivo}")
+        _checkpoint_complete(fecha_objetivo)
+        _pipeline_ctx["finished"] = True
+        print("\nPipeline nocturno completado (ventas + reconciliar + descargo + recalcular).")
+        return
 
     print("\n" + "=" * 60)
     print(
@@ -587,21 +671,6 @@ def main() -> None:
         fecha_objetivo=fecha_objetivo,
     )
     try:
-        from alertas_inventario_barra import enviar_alertas_inventario_barra
-
-        ab = enviar_alertas_inventario_barra(origen="pipeline")
-        if ab.get("enviado"):
-            print(
-                f"  WA inventario barra: bajo PAR={ab.get('bajo_par')} "
-                f"negativos={ab.get('negativos')}"
-            )
-        elif ab.get("omitido") and ab.get("omitido") not in ("sin alertas",):
-            if ab.get("omitido") != "TATAMI_ALERT_INVENTARIO_BARRA no activo":
-                print(f"  INFO inventario barra: {ab.get('omitido')}")
-    except Exception as e:
-        print(f"  WARN: alertas inventario barra: {e}")
-
-    try:
         from alertas_ordenes_compra_barra import enviar_alertas_ordenes_compra_barra
 
         oc = enviar_alertas_ordenes_compra_barra(origen="pipeline")
@@ -617,6 +686,8 @@ def main() -> None:
             print(f"  INFO órdenes compra barra: {oc.get('omitido')}")
     except Exception as e:
         print(f"  WARN: alertas órdenes compra barra: {e}")
+
+    _alertas_inventario_pipeline(origen="pipeline")
 
     if args.with_costos:
         run_step(

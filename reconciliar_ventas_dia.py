@@ -43,28 +43,10 @@ def _count_grid_rows(fecha: str) -> int:
 
 
 def _count_distinct_docs_hist(fecha: str) -> int:
+    from ventas_completitud import id_documentos_hist
     from ventas_smartmenu import supabase
 
-    docs: set[str] = set()
-    offset = 0
-    while True:
-        chunk = (
-            supabase.table("hist_ventas")
-            .select("num_documento")
-            .eq("fecha", fecha)
-            .range(offset, offset + 999)
-            .execute()
-            .data
-            or []
-        )
-        for row in chunk:
-            nd = (row.get("num_documento") or "").strip()
-            if nd:
-                docs.add(nd)
-        if len(chunk) < 1000:
-            break
-        offset += 1000
-    return len(docs)
+    return len(id_documentos_hist(supabase, fecha))
 
 
 def reconciliar(fecha: str, tol_abs: float) -> tuple[bool, dict]:
@@ -136,7 +118,7 @@ def reconciliar(fecha: str, tol_abs: float) -> tuple[bool, dict]:
 
     if diff_docs != 0:
         failures.append(
-            f"documentos grid={n_grid} vs distinct num_documento en hist={n_hist_docs}"
+            f"documentos grid={n_grid} vs id_documento en hist={n_hist_docs}"
         )
 
     if internal_check > 0.02:
@@ -195,7 +177,7 @@ def main() -> None:
     print(f"  hist total (campo total línea):          {rep['hist_total_lineas']:.2f}")
     print(f"  Lineas en tabla hist_ventas:              {rep['hist_lineas_tabla']}")
     print(f"  Docs grid (cabeceras):                   {rep['grid_filas_cabecera']}")
-    print(f"  Docs distinct hist (num_documento):       {rep['hist_docs_distinct']}")
+    print(f"  Docs distinct hist (id_documento):        {rep['hist_docs_distinct']}")
     print(f"  Diff subtotal:                           {rep['diff_sub']:.4f}")
     print(f"  Diff docs (grid - hist):                  {rep['diff_docs']}")
 
