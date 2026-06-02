@@ -26,6 +26,12 @@ from codigo_factura_match import (
     normalizar_cod_proveedor_para_match,
 )
 from config_sheets import cfg
+from sheets_formulas_es import (
+    formula_pendientes_link_xml,
+    formula_pendientes_nombre_mp,
+    formula_pendientes_ref_columna,
+    formula_pendientes_unidad_base,
+)
 
 load_dotenv(override=True)
 
@@ -1187,6 +1193,15 @@ def _bd_mp_sistema_column_indexes(sh) -> tuple[int, int, int] | None:
 _items_pendientes_cache_keys: dict[str, str] | None = None
 _items_pendientes_ignorados_por_item: dict[str, str] | None = None
 _cod_proveedores_strip_cache: frozenset[str] | None = None
+_cod_a_nombre_prov_cache: dict[str, str] | None = None
+
+_COLUMNAS_PENDIENTES_EXTRA = (
+    "motivo_pendiente",
+    "origen_factura",
+    "estab",
+    "formato_compra",
+    "proveedor_logico",
+)
 
 
 def _cod_proveedores_strip_para_catalogo() -> frozenset[str]:
@@ -1271,10 +1286,165 @@ def fecha_factura_permite_ingreso_stock(fecha_factura: str) -> bool:
     return f >= FECHA_MIN_INGRESO_FACTURA
 
 
-def reparar_bd_items_pendientes_cabecera() -> dict[str, str | int | bool]:
+def _nombre_proveedor_logico(cod_proveedor: str) -> str:
+    """Nombre corto desde BD_PROV (SUPERMAXI, TITAN, etc.) para pendientes."""
+    from proveedor_favorita import COD_PROVEEDOR_SUPERMAXI, COD_PROVEEDOR_TITAN
+
+    cod = normalizar_cod_proveedor_para_match(cod_proveedor)
+    if not cod:
+        return ""
+    global _cod_a_nombre_prov_cache
+    if _cod_a_nombre_prov_cache is None:
+        lookup: dict[str, str] = {}
+        try:
+            sh = _get_sheet()
+            ws = sh.worksheet("BD_PROV")
+            values = ws.get_all_values()
+            hi = None
+            for i, row in enumerate(values):
+                if any((c or "").strip() == "cod_proveedor" for c in row):
+                    hi = i
+                    break
+            if hi is not None:
+                headers = [(c or "").strip() for c in values[hi]]
+                ic = headers.index("cod_proveedor")
+                ir = headers.index("razon_social") if "razon_social" in headers else -1
+                for row in values[hi + 1 :]:
+                    if not any((c or "").strip() for c in row):
+                        continue
+                    ck = normalizar_cod_proveedor_para_match(
+                        row[ic] if ic < len(row) else ""
+                    )
+                    if not ck:
+                        continue
+                    nom = (
+                        (row[ir] if ir >= 0 and ir < len(row) else "") or ""
+                    ).strip()
+                    if nom:
+                        lookup[ck] = nom
+        except Exception as e:
+            print(f"  WARN: no se pudo cargar nombres BD_PROV: {e}")
+        lookup.setdefault(COD_PROVEEDOR_SUPERMAXI, "SUPERMAXI")
+        lookup.setdefault(COD_PROVEEDOR_TITAN, "TITAN")
+        _cod_a_nombre_prov_cache = lookup
+    return _cod_a_nombre_prov_cache.get(cod, cod)
+
+
+def _meta_estab_formato_factura(factura: dict, cod_proveedor: str) -> dict[str, str]:
+    from proveedor_favorita import (
+        estab_desde_num_factura,
+        formato_compra_para_factura,
+    )
+
+    num = (factura.get("num_factura") or "").strip()
+    ruc = (factura.get("ruc") or "").strip()
+    estab = estab_desde_num_factura(num)
+    return {
+        "estab": estab,
+        "formato_compra": formato_compra_para_factura(ruc, num),
+        "proveedor_logico": _nombre_proveedor_logico(cod_proveedor),
+    }
+
+
+def backfill_estab_formato_en_pendientes(*, dry_run: bool = False) -> dict[str, int]:
+    """
+    Rellena estab, formato_compra y proveedor_logico en filas existentes
+    (desde num_factura y cod_proveedor). No toca precios ni estado.
+    """
+    from proveedor_favorita import (
+        estab_desde_num_factura,
+        formato_compra_para_factura,
+    )
+
+    sh = _get_sheet()
+    ws = sh.worksheet(BD_ITEMS_PENDIENTES_SHEET)
+    vals = ws.get_all_values()
+    hi = _pendientes_header_row_idx(vals)
+    if hi is None:
+        return {"ok": 0, "error": 1}
+
+    headers = [(c or "").strip() for c in vals[hi]]
+    needed = (
+        "num_factura",
+        "ruc_proveedor",
+        "cod_proveedor",
+        "estab",
+        "formato_compra",
+        "proveedor_logico",
+    )
+    idx = {}
+    for name in needed:
+        try:
+            idx[name] = headers.index(name)
+        except ValueError:
+            print(f"  WARN backfill pendientes: falta columna {name}")
+            return {"ok": 0, "skip": 1}
+
+    updates: list[dict] = []
+    stats = {"filas": 0, "celdas": 0, "sin_num": 0, "formato_limpiados": 0}
+
+    for i in range(hi + 1, len(vals)):
+        row = vals[i]
+        if not row or not any((c or "").strip() for c in row):
+            continue
+        if str(row[0]).strip().startswith("["):
+            continue
+        stats["filas"] += 1
+        sheet_row = i + 1
+        num = (row[idx["num_factura"]] if idx["num_factura"] < len(row) else "").strip()
+        ruc = (row[idx["ruc_proveedor"]] if idx["ruc_proveedor"] < len(row) else "").strip()
+        cod = (row[idx["cod_proveedor"]] if idx["cod_proveedor"] < len(row) else "").strip()
+        if not num:
+            stats["sin_num"] += 1
+            continue
+        estab = estab_desde_num_factura(num)
+        formato = formato_compra_para_factura(ruc, num)
+        nombre = _nombre_proveedor_logico(cod)
+        new_vals = {
+            "estab": estab,
+            "formato_compra": formato,
+            "proveedor_logico": nombre,
+        }
+        for col_name, val in new_vals.items():
+            j = idx[col_name]
+            old = (row[j] if j < len(row) else "").strip()
+            if old == val:
+                continue
+            if col_name == "formato_compra" and not val and old in ("SUPERMAXI", "TITAN"):
+                stats["formato_limpiados"] += 1
+            updates.append(
+                {
+                    "range": rowcol_to_a1(sheet_row, j + 1),
+                    "values": [[val]],
+                }
+            )
+            stats["celdas"] += 1
+
+    if dry_run:
+        print(
+            f"  [DRY RUN] backfill estab/formato: {stats['filas']} filas, "
+            f"{stats['celdas']} celdas a escribir"
+        )
+        return stats
+
+    for batch_start in range(0, len(updates), 50):
+        chunk = updates[batch_start : batch_start + 50]
+        if chunk:
+            ws.batch_update(chunk, value_input_option=ValueInputOption.user_entered)
+            time.sleep(0.8)
+
+    if updates:
+        _pendientes_invalidate_sheet_cache()
+        print(f"  backfill estab/formato: {stats['celdas']} celdas en {stats['filas']} filas")
+    return stats
+
+
+def reparar_bd_items_pendientes_cabecera(
+    *, backfill_estab: bool = True, dry_run: bool = False
+) -> dict[str, str | int | bool]:
     """
     Corrige cabecera BD_ITEMS_PENDIENTES: A1 'ama' → clave_unica;
-    agrega columnas faltantes (motivo_pendiente, origen_factura).
+    agrega columnas faltantes (motivo, origen, estab, formato_compra, proveedor_logico).
     """
     sh = _get_sheet()
     ws = sh.worksheet(BD_ITEMS_PENDIENTES_SHEET)
@@ -1296,10 +1466,10 @@ def reparar_bd_items_pendientes_cabecera() -> dict[str, str | int | bool]:
         headers[0] = "clave_unica"
         cambios.append("A1: ama → clave_unica")
 
-    canon = _pendientes_headers_canonicos()
-    for col_name in ("motivo_pendiente", "origen_factura"):
+    for col_name in _COLUMNAS_PENDIENTES_EXTRA:
         if col_name not in headers:
             col_1 = len(headers) + 1
+            _pendientes_ensure_grid_cols(ws, max(col_1 + 2, 32))
             ws.update(
                 values=[[col_name]],
                 range_name=rowcol_to_a1(row_1based, col_1),
@@ -1313,11 +1483,16 @@ def reparar_bd_items_pendientes_cabecera() -> dict[str, str | int | bool]:
     _items_pendientes_cache_keys = None
     _items_pendientes_ignorados_por_item = None
 
+    backfill_stats: dict = {}
+    if backfill_estab and "estab" in headers:
+        backfill_stats = backfill_estab_formato_en_pendientes(dry_run=dry_run)
+
     return {
         "ok": True,
         "cambios": cambios,
         "filas_datos": max(0, len(vals) - hi - 1),
         "cabeceras": len(headers),
+        "backfill": backfill_stats,
     }
 
 
@@ -1391,6 +1566,30 @@ def _pendientes_col_letter(headers: list[str], col_name: str) -> str:
         return "A"
 
 
+def _pendientes_ensure_grid_cols(ws: gspread.Worksheet, min_cols: int) -> None:
+    """Amplía columnas de la pestaña si hace falta (límite Sheets al append)."""
+    cur = int(getattr(ws, "col_count", 0) or 0)
+    if cur >= min_cols:
+        return
+    sh = ws.spreadsheet
+    sh.batch_update(
+        {
+            "requests": [
+                {
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": ws.id,
+                            "gridProperties": {"columnCount": min_cols},
+                        },
+                        "fields": "gridProperties.columnCount",
+                    }
+                }
+            ]
+        }
+    )
+    time.sleep(0.5)
+
+
 def _pendientes_headers_canonicos() -> list[str]:
     return [
         "clave_unica",
@@ -1400,6 +1599,9 @@ def _pendientes_headers_canonicos() -> list[str]:
         "ruc_proveedor",
         "razon_social",
         "cod_proveedor",
+        "estab",
+        "formato_compra",
+        "proveedor_logico",
         "cod_item_xml",
         "descripcion_xml",
         "cantidad",
@@ -1452,7 +1654,7 @@ def _ensure_bd_items_pendientes_sheet(sh):
         return ws
     except gspread.exceptions.WorksheetNotFound:
         ws = sh.add_worksheet(
-            title=BD_ITEMS_PENDIENTES_SHEET, rows=2000, cols=26
+            title=BD_ITEMS_PENDIENTES_SHEET, rows=2000, cols=32
         )
         headers = _pendientes_headers_canonicos()
         ws.update(
@@ -1546,18 +1748,10 @@ def registrar_item_pendiente_factura(
     headers_row = _pendientes_headers_actuales()
     p_col = _pendientes_col_letter(headers_row, "cod_mp_asignado")
     drive_col = _pendientes_col_letter(headers_row, "drive_file_id")
-    fq_nom = (
-        f'=IF(${p_col}{next_row}="","", IFERROR(INDEX(BD_MP_SISTEMA!${col_nom_l}:${col_nom_l}, '
-        f'MATCH(${p_col}{next_row}, BD_MP_SISTEMA!${col_cod_l}:${col_cod_l}, 0)), "NO EN BD"))'
-    )
-    fq_uni = (
-        f'=IF(${p_col}{next_row}="","", IFERROR(INDEX(BD_MP_SISTEMA!${col_uni_l}:${col_uni_l}, '
-        f'MATCH(${p_col}{next_row}, BD_MP_SISTEMA!${col_cod_l}:${col_cod_l}, 0)), ""))'
-    )
-    fq_link = (
-        f'=IF({drive_col}{next_row}="","", HYPERLINK("https://drive.google.com/file/d/" & '
-        f'{drive_col}{next_row} & "/view", "Ver XML"))'
-    )
+    col_desc = _pendientes_col_letter(headers_row, "descripcion_xml")
+    fq_nom = formula_pendientes_nombre_mp(p_col, col_nom_l, col_cod_l, next_row)
+    fq_uni = formula_pendientes_unidad_base(p_col, col_uni_l, col_cod_l, next_row)
+    fq_link = formula_pendientes_link_xml(drive_col, next_row)
     # Sugerencia para copiar a BD_ITEMS_PROV (COLEMUN: sin sufijo -N; H conserva XML crudo)
     cod_plantilla = cod_item_prov_para_catalogo(
         item["cod_item_xml"],
@@ -1566,11 +1760,12 @@ def registrar_item_pendiente_factura(
         cod_proveedor=cod_proveedor,
         cod_proveedores_strip=_cod_proveedores_strip_para_catalogo(),
     )
-    fq_pmp = f"=P{next_row}"
-    fq_pdesc = f"=I{next_row}"
+    fq_pmp = formula_pendientes_ref_columna(p_col, next_row)
+    fq_pdesc = formula_pendientes_ref_columna(col_desc, next_row)
 
     motivo = (motivo_pendiente or "SIN_MATCH").strip().upper() or "SIN_MATCH"
     origen_row = (origen_factura or "").strip().upper()
+    meta_prov = _meta_estab_formato_factura(factura, cod_proveedor)
 
     base_row = {
         "clave_unica": clave,
@@ -1580,6 +1775,9 @@ def registrar_item_pendiente_factura(
         "ruc_proveedor": factura["ruc"],
         "razon_social": factura.get("razon_social", ""),
         "cod_proveedor": cod_proveedor,
+        "estab": meta_prov["estab"],
+        "formato_compra": meta_prov["formato_compra"],
+        "proveedor_logico": meta_prov["proveedor_logico"],
         "cod_item_xml": item["cod_item_xml"],
         "descripcion_xml": item["descripcion_proveedor"],
         "cantidad": str(item["cantidad"]).replace(".", ","),
@@ -2636,10 +2834,25 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if "--reparar-hoja-items-pendientes" in sys.argv:
+        dry_rep = "--dry-run" in sys.argv
+        solo_cab = "--solo-cabecera" in sys.argv
         print("Reparando cabecera BD_ITEMS_PENDIENTES...")
-        r = reparar_bd_items_pendientes_cabecera()
+        r = reparar_bd_items_pendientes_cabecera(
+            backfill_estab=not solo_cab,
+            dry_run=dry_rep,
+        )
         print(r)
         sys.exit(0 if r.get("ok") else 1)
+
+    if "--backfill-estab-pendientes" in sys.argv:
+        dry = "--dry-run" in sys.argv
+        print(
+            f"Backfill estab / formato_compra / proveedor_logico "
+            f"({'DRY RUN' if dry else 'escribiendo'})..."
+        )
+        stats = backfill_estab_formato_en_pendientes(dry_run=dry)
+        print(stats)
+        sys.exit(0 if not stats.get("error") else 1)
 
     if "--backfill-items-pendientes" in sys.argv:
         dry = "--dry-run" in sys.argv

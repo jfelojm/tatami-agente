@@ -153,6 +153,7 @@ function ejecutarPromocionPendientes_(dryRun) {
   var omitidas = 0;
   var erroresMp = 0;
   var incompletas = 0;
+  var sinCodMp = 0;
   var filasAppend = [];
   var estadoUpdates = [];
   var lineas = [];
@@ -174,7 +175,16 @@ function ejecutarPromocionPendientes_(dryRun) {
     var ruc = String(pend.ruc_proveedor || '').trim();
 
     if (!codMp || !codProv || !codXml) {
-      if (codMp && (!codProv || !codXml)) {
+      if (!codMp && codProv && codXml) {
+        sinCodMp++;
+        if (sinCodMp <= 5) {
+          lineas.push(
+            'fila ' +
+              sheetRow +
+              ': falta cod_mp_asignado (columna vacía → "NO EN BD" en nombre MP)'
+          );
+        }
+      } else if (codMp && (!codProv || !codXml)) {
         incompletas++;
         lineas.push(
           'fila ' +
@@ -182,6 +192,8 @@ function ejecutarPromocionPendientes_(dryRun) {
             ': falta ' +
             (!codProv ? 'cod_proveedor' : 'cod_item_xml')
         );
+      } else if (!codProv || !codXml) {
+        incompletas++;
       }
       continue;
     }
@@ -247,8 +259,21 @@ function ejecutarPromocionPendientes_(dryRun) {
     omitidas +
     ' sin_mp=' +
     erroresMp +
+    ' sin_cod_mp=' +
+    sinCodMp +
     ' incompletas=' +
     incompletas;
+
+  if (
+    insertadas === 0 &&
+    omitidas === 0 &&
+    erroresMp === 0 &&
+    incompletas === 0 &&
+    sinCodMp > 0
+  ) {
+    resumen +=
+      '\n\nAsigne cod_mp_sistema en la columna cod_mp_asignado de cada fila PENDIENTE.';
+  }
 
   return {
     resumen: resumen,
@@ -256,6 +281,7 @@ function ejecutarPromocionPendientes_(dryRun) {
     omitidas: omitidas,
     erroresMp: erroresMp,
     incompletas: incompletas,
+    sinCodMp: sinCodMp,
     lineas: lineas,
   };
 }

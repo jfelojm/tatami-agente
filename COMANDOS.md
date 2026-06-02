@@ -184,6 +184,9 @@ python procesar_facturas_drive.py --backfill-items-pendientes --dry-run
 | `--dry-run` | No escribe Supabase/Sheets |
 | `--reprocesar` | Ignora facturas ya `COMPLETA` (riesgo de duplicar movimientos) |
 | `--crear-hoja-items-pendientes` | Crea pestaña `BD_ITEMS_PENDIENTES` si no existe |
+| `--reparar-hoja-items-pendientes` | Cabecera + columnas `estab`, `formato_compra`, `proveedor_logico`; backfill filas existentes |
+| `--reparar-hoja-items-pendientes --solo-cabecera` | Solo agrega columnas faltantes (sin backfill) |
+| `--backfill-estab-pendientes` | Rellena estab / formato / proveedor lógico en filas ya existentes |
 | `--backfill-items-pendientes` | Recorre XML en Drive y registra ítems sin match en la hoja |
 | `--backfill-items-pendientes --dry-run` | Simula backfill sin escribir |
 

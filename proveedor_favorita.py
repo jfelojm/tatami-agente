@@ -30,9 +30,20 @@ def estab_desde_num_factura(num_factura: str) -> str:
 
 
 def formato_compra_desde_estab(estab: str) -> str:
+    """Solo lógica Favorita: 219 → TITAN; cualquier otro estab → SUPERMAXI."""
     if (estab or "").strip() in ESTABS_TITAN:
         return "TITAN"
     return "SUPERMAXI"
+
+
+def formato_compra_para_factura(ruc: str, num_factura: str = "") -> str:
+    """
+    SUPERMAXI / TITAN solo si el emisor es Corporación Favorita.
+    Otros proveedores: cadena vacía (no aplicar regla Supermaxi/Titán).
+    """
+    if not es_ruc_favorita(ruc):
+        return ""
+    return formato_compra_desde_estab(estab_desde_num_factura(num_factura))
 
 
 def resolver_cod_proveedor_factura(
@@ -93,7 +104,7 @@ def meta_proveedor_factura(factura: dict) -> dict:
     out: dict = {
         "estab": estab,
         "cod_proveedor": cod,
-        "formato_compra": formato_compra_desde_estab(estab),
+        "formato_compra": formato_compra_para_factura(ruc, num),
     }
     razon = (factura.get("razon_social") or "").strip()
     if razon:

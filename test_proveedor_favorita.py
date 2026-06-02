@@ -4,6 +4,7 @@ from proveedor_favorita import (
     COD_PROVEEDOR_SUPERMAXI,
     COD_PROVEEDOR_TITAN,
     RUC_CORPORACION_FAVORITA,
+    formato_compra_para_factura,
     resolver_cod_proveedor_factura,
 )
 
@@ -37,9 +38,19 @@ def test_estab_025_supermaxi():
     assert cod == COD_PROVEEDOR_SUPERMAXI
 
 
+def test_formato_compra_solo_favorita():
+    assert formato_compra_para_factura(RUC_CORPORACION_FAVORITA, "219-1-1") == "TITAN"
+    assert (
+        formato_compra_para_factura(RUC_CORPORACION_FAVORITA, "016-1-1") == "SUPERMAXI"
+    )
+    assert formato_compra_para_factura("0992613092001", "016-1-1") == ""
+    assert formato_compra_para_factura("", "219-1-1") == ""
+
+
 if __name__ == "__main__":
     test_lookup_default_supermaxi()
     test_estab_219_titan()
     test_estab_016_supermaxi()
     test_estab_025_supermaxi()
+    test_formato_compra_solo_favorita()
     print("OK proveedor_favorita")
