@@ -99,6 +99,7 @@ def main() -> None:
                     item["cod_item_xml"],
                     item["descripcion_proveedor"],
                     factura.get("razon_social", ""),
+                    factura.get("num_factura", ""),
                 )
 
                 if not item_prov:

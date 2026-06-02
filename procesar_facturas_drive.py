@@ -381,7 +381,14 @@ def _ruc_claves_equivalentes(ruc: str) -> list[str]:
     return out
 
 
-def _cod_proveedor_desde_ruc(lookup: dict[str, str], ruc: str) -> str:
+def _cod_proveedor_desde_ruc(
+    lookup: dict[str, str], ruc: str, num_factura: str = ""
+) -> str:
+    from proveedor_favorita import resolver_cod_proveedor_factura
+
+    cod = resolver_cod_proveedor_factura(ruc, num_factura, lookup=lookup)
+    if cod:
+        return cod
     for key in _ruc_claves_equivalentes(ruc):
         v = lookup.get(key)
         if v:
@@ -472,19 +479,26 @@ def cargar_lookup_ruc() -> dict[str, str]:
                 if key:
                     lookup[key] = cod
 
+    from proveedor_favorita import aplicar_default_lookup_favorita
+
+    aplicar_default_lookup_favorita(lookup)
     print(f"  {len(lookup)} proveedores en lookup RUC")
     _prov_ruc_cache = lookup
     return lookup
 
 
 def buscar_item_prov(
-    ruc: str, cod_item_xml: str, descripcion: str = "", razon_social: str = ""
+    ruc: str,
+    cod_item_xml: str,
+    descripcion: str = "",
+    razon_social: str = "",
+    num_factura: str = "",
 ) -> dict | None:
     items = cargar_bd_items_prov()
 
     lookup_ruc = cargar_lookup_ruc()
     ruc_s = (ruc or "").strip().strip("'")
-    cod_prov = _cod_proveedor_desde_ruc(lookup_ruc, ruc_s)
+    cod_prov = _cod_proveedor_desde_ruc(lookup_ruc, ruc_s, num_factura)
     cod_prov_n = normalizar_cod_proveedor_para_match(cod_prov)
 
     cod_item_norm = normalizar_cod_item_para_match(cod_item_xml, razon_social, ruc_s)
@@ -527,6 +541,9 @@ def buscar_item_prov(
         ]
         if len(mp_hits) == 1:
             return mp_hits[0]
+
+    if cod_prov_n:
+        return None
 
     for item in items:
         item_cod = normalizar_cod_item_para_match(
@@ -1082,12 +1099,12 @@ def registrar_factura_procesada(
         return
 
     estado = "COMPLETA" if items_warn == 0 else "PARCIAL"
-    meta = factura.get("_meta") or {}
+    from proveedor_favorita import meta_proveedor_factura
+
+    meta = dict(factura.get("_meta") or {})
+    meta.update(meta_proveedor_factura(factura))
     if factura.get("_pendiente_bodega"):
         meta["pendiente_bodega"] = factura["_pendiente_bodega"]
-    razon = (factura.get("razon_social") or "").strip()
-    if razon:
-        meta["razon_social"] = razon
     total_xml = factura.get("total_sin_impuesto")
     if total_xml is not None:
         try:
@@ -1640,7 +1657,8 @@ def sincronizar_items_pendientes_factura_drive(
     nuevos = 0
     ya_en_hoja = 0
     lookup_ruc = cargar_lookup_ruc()
-    cod_prov = _cod_proveedor_desde_ruc(lookup_ruc, str(factura.get("ruc", "")).strip())
+    num_f = str(factura.get("num_factura", "")).strip()
+    cod_prov = _cod_proveedor_desde_ruc(lookup_ruc, str(factura.get("ruc", "")).strip(), num_f)
     cargar_bd_items_prov()
     for item in factura.get("items") or []:
         item_prov = buscar_item_prov(
@@ -1648,6 +1666,7 @@ def sincronizar_items_pendientes_factura_drive(
             item["cod_item_xml"],
             item["descripcion_proveedor"],
             factura.get("razon_social", ""),
+            num_f,
         )
         if item_prov:
             continue
@@ -1873,8 +1892,9 @@ def backfill_items_pendientes_desde_drive(*, dry_run: bool = False) -> dict[str,
             print(f"  SKIP parse: {archivo.get('name')}")
             continue
         stats["xmls"] += 1
-        cod_prov = _cod_proveedor_desde_ruc(lookup_ruc, factura["ruc"].strip())
-        print(f"\n  {archivo.get('name')} | {factura['num_factura']} | items={len(factura['items'])}")
+        num_f = factura["num_factura"].strip()
+        cod_prov = _cod_proveedor_desde_ruc(lookup_ruc, factura["ruc"].strip(), num_f)
+        print(f"\n  {archivo.get('name')} | {num_f} | items={len(factura['items'])}")
 
         for item in factura["items"]:
             item_prov = buscar_item_prov(
@@ -1882,6 +1902,7 @@ def backfill_items_pendientes_desde_drive(*, dry_run: bool = False) -> dict[str,
                 item["cod_item_xml"],
                 item["descripcion_proveedor"],
                 factura.get("razon_social", ""),
+                num_f,
             )
             if item_prov:
                 stats["ya_catalogados"] += 1
@@ -2076,6 +2097,7 @@ def sincronizar_precios_items_prov_desde_todos_xml_drive(*, dry_run: bool = Fals
                 item["cod_item_xml"],
                 item["descripcion_proveedor"],
                 factura.get("razon_social", ""),
+                factura.get("num_factura", ""),
             )
             if not item_prov:
                 lineas_sin_match += 1
@@ -2369,7 +2391,10 @@ def procesar_factura_dict(
     items_matcheados = 0
 
     lookup_ruc = cargar_lookup_ruc()
-    cod_prov_factura = _cod_proveedor_desde_ruc(lookup_ruc, str(factura.get("ruc", "")).strip())
+    num_f = str(factura.get("num_factura", "")).strip()
+    cod_prov_factura = _cod_proveedor_desde_ruc(
+        lookup_ruc, str(factura.get("ruc", "")).strip(), num_f
+    )
     archivo = factura.get("_archivo_drive") or {"id": "", "name": ""}
 
     bodegas_linea: dict[str, str] = factura.get("bodegas_linea") or {}
@@ -2422,11 +2447,13 @@ def procesar_factura_dict(
             item["cod_item_xml"],
             item["descripcion_proveedor"],
             factura.get("razon_social", ""),
+            num_f,
         )
 
         if not item_prov:
             msg = (
                 f"no encontrado en BD_ITEMS_PROV | ruc={factura['ruc']} | "
+                f"cod_prov={cod_prov_factura} | "
                 f"cod={item['cod_item_xml']} | desc={item['descripcion_proveedor']}"
             )
             print(f"    WARN: {msg}")

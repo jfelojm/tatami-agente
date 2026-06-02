@@ -1107,6 +1107,7 @@ def tool_compras_facturas_rango(args):
     ruc_razon_meta: dict[str, str] = {}
     n_facturas_parciales = 0
     items_sin_match_total = 0
+    meta_by_num: dict[str, dict] = {}
     for i in range(0, len(nums), 80):
         part = nums[i : i + 80]
         try:
@@ -1123,8 +1124,11 @@ def tool_compras_facturas_rango(args):
                 if not n:
                     continue
                 ruc_map[n] = (x.get("ruc_proveedor") or "").strip()
+                meta_raw = x.get("meta")
+                if isinstance(meta_raw, dict):
+                    meta_by_num[n] = meta_raw
                 ruc_k = _solo_digitos_ruc(x.get("ruc_proveedor", ""))
-                rz_meta = _razon_desde_meta_factura(x.get("meta"))
+                rz_meta = _razon_desde_meta_factura(meta_raw)
                 if ruc_k and rz_meta and ruc_k not in ruc_razon_meta:
                     ruc_razon_meta[ruc_k] = rz_meta
                 if (x.get("estado") or "").strip().upper() == "PARCIAL":
@@ -1132,6 +1136,14 @@ def tool_compras_facturas_rango(args):
                 items_sin_match_total += int(x.get("items_sin_match") or 0)
         except Exception:
             pass
+
+    from proveedor_favorita import es_ruc_favorita, resolver_cod_proveedor_factura
+
+    cod_nombre = {
+        str(p.get("cod_proveedor", "")).strip(): str(p.get("razon_social", "")).strip()
+        for p in leer_bd_prov()
+        if p.get("cod_proveedor")
+    }
 
     ruc_nombre = _mapa_ruc_razon_social()
     for rk, rz in ruc_razon_meta.items():
@@ -1178,10 +1190,33 @@ def tool_compras_facturas_rango(args):
                 mp["costo_total"] += ct
 
     por_prov: dict[str, float] = defaultdict(float)
+    prov_info: dict[str, dict] = {}
     for d in doc_vals:
+        n = d["num_factura"]
         ruc = (d.get("ruc_proveedor") or "").strip()
-        clave = ruc if ruc else f"sin_ruc:{d['num_factura']}"
-        por_prov[clave] += d["total_usd"]
+        meta_fp = meta_by_num.get(n) or {}
+        if es_ruc_favorita(ruc):
+            cod = (meta_fp.get("cod_proveedor") or "").strip() or resolver_cod_proveedor_factura(
+                ruc, n
+            )
+            clave = f"cod:{cod}"
+            por_prov[clave] += d["total_usd"]
+            if clave not in prov_info:
+                prov_info[clave] = {
+                    "cod_proveedor": cod,
+                    "ruc_proveedor": ruc,
+                    "razon_social": cod_nombre.get(cod, cod),
+                }
+        else:
+            clave = ruc if ruc else f"sin_ruc:{n}"
+            por_prov[clave] += d["total_usd"]
+            if clave not in prov_info:
+                ruc_k = _solo_digitos_ruc(ruc)
+                prov_info[clave] = {
+                    "cod_proveedor": "",
+                    "ruc_proveedor": ruc_k or ruc,
+                    "razon_social": ruc_nombre.get(ruc_k, ""),
+                }
 
     top_f = sorted(doc_vals, key=lambda x: x["total_usd"], reverse=True)[:top_facturas]
     for x in top_f:
@@ -1202,16 +1237,31 @@ def tool_compras_facturas_rango(args):
 
     prov_out = []
     proveedores_sin_nombre: list[str] = []
+    facturas_por_clave: dict[str, list[str]] = defaultdict(list)
+    for d in doc_vals:
+        n = d["num_factura"]
+        ruc = (d.get("ruc_proveedor") or "").strip()
+        meta_fp = meta_by_num.get(n) or {}
+        if es_ruc_favorita(ruc):
+            cod = (meta_fp.get("cod_proveedor") or "").strip() or resolver_cod_proveedor_factura(
+                ruc, n
+            )
+            facturas_por_clave[f"cod:{cod}"].append(n)
+        elif ruc:
+            facturas_por_clave[ruc].append(n)
+
     for k, v in sorted(por_prov.items(), key=lambda kv: -kv[1])[:30]:
-        ruc_k = _solo_digitos_ruc(k) if k.isdigit() or len(_solo_digitos_ruc(k)) >= 10 else ""
-        razon = ruc_nombre.get(ruc_k, "") if ruc_k else ""
-        fac_ej = sorted(facturas_por_ruc.get(ruc_k, []))[:3] if ruc_k else []
+        info = prov_info.get(k, {})
+        ruc_k = _solo_digitos_ruc(info.get("ruc_proveedor", ""))
+        razon = info.get("razon_social") or (ruc_nombre.get(ruc_k, "") if ruc_k else "")
+        fac_ej = sorted(facturas_por_clave.get(k, []))[:3]
         if ruc_k and not razon:
             proveedores_sin_nombre.append(ruc_k)
         prov_out.append(
             {
                 "proveedor_clave": k,
-                "ruc_proveedor": ruc_k or (k if k.isdigit() else ""),
+                "cod_proveedor": info.get("cod_proveedor", ""),
+                "ruc_proveedor": ruc_k or info.get("ruc_proveedor", ""),
                 "razon_social": razon,
                 "facturas_ejemplo": fac_ej,
                 "total_usd": round(v, 2),
