@@ -50,12 +50,12 @@ $Label = ""
 
 switch ($Slot) {
     "mediodia" {
-        $Label = "Cierre completo — ayer ($Ayer)"
+        $Label = "Cierre completo - ayer ($Ayer)"
         # Sin --fecha: pipeline_diario usa ayer calendario EC
         $PipelineArgs = @("$Root\pipeline_diario.py", "--modo", "completo")
     }
     "tarde" {
-        $Label = "Operativo — hoy ($Hoy)"
+        $Label = "Operativo - hoy ($Hoy)"
         $PipelineArgs = @(
             "$Root\pipeline_diario.py",
             "--modo", "operativo",
@@ -63,7 +63,7 @@ switch ($Slot) {
         )
     }
     "medianoche" {
-        $Label = "Operativo — ayer ($Ayer) post-cierre"
+        $Label = "Operativo - ayer ($Ayer) post-cierre"
         $PipelineArgs = @(
             "$Root\pipeline_diario.py",
             "--modo", "operativo",
@@ -71,7 +71,7 @@ switch ($Slot) {
         )
     }
     "seguridad" {
-        $Label = "Nocturno — cuadre ayer ($Ayer)"
+        $Label = "Nocturno - cuadre ayer ($Ayer)"
         $PipelineArgs = @(
             "$Root\pipeline_diario.py",
             "--modo", "nocturno",
@@ -81,7 +81,7 @@ switch ($Slot) {
 }
 
 Write-LogLine "========================================"
-Write-LogLine "Cuadrante Tatami [$Slot] — $Label"
+Write-LogLine "Cuadrante Tatami [$Slot] - $Label"
 Write-LogLine "Log: $LogFile"
 Write-LogLine "========================================"
 
@@ -95,6 +95,6 @@ try {
 }
 
 Write-LogLine "========================================"
-Write-LogLine "Cuadrante [$Slot] — fin codigo_salida=$code"
+Write-LogLine "Cuadrante [$Slot] - fin codigo_salida=$code"
 Write-LogLine "========================================"
 exit $code
