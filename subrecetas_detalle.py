@@ -73,7 +73,9 @@ def _buscar_header(values: list[list], columnas_minimas: tuple[str, ...]) -> tup
 
 
 def cargar_bd_subrecetas(sh=None) -> dict[str, dict]:
-    """cod_subreceta -> cabecera."""
+    """cod_subreceta canónico (SUB-051) -> cabecera."""
+    from codigos_subreceta import cod_sub_canonico
+
     sh = sh or _abrir_maestro()
     values = sh.worksheet(SHEET_CABECERA).get_all_values()
     hi, headers = _buscar_header(values, ("cod_subreceta", "rendimiento_estandar"))
@@ -82,9 +84,10 @@ def cargar_bd_subrecetas(sh=None) -> dict[str, dict]:
         if not any((c or "").strip() for c in row):
             continue
         r = _fila_a_dict(headers, row)
-        cod = (r.get("cod_subreceta") or "").strip()
+        cod = cod_sub_canonico(r.get("cod_subreceta") or "")
         if not cod:
             continue
+        r["cod_subreceta"] = cod
         out[cod] = r
     return out
 
@@ -104,9 +107,12 @@ def cargar_bd_subrecetas_detalle(sh=None) -> list[dict]:
 
 
 def agrupar_detalle_por_padre(lineas: list[dict]) -> dict[str, list[dict]]:
+    from codigos_subreceta import cod_sub_canonico
+
     por: dict[str, list[dict]] = defaultdict(list)
     for r in lineas:
-        padre = (r.get("cod_subreceta_padre") or r.get("cod_subreceta") or "").strip()
+        raw = (r.get("cod_subreceta_padre") or r.get("cod_subreceta") or "").strip()
+        padre = cod_sub_canonico(raw)
         if padre:
             por[padre].append(r)
     return dict(por)

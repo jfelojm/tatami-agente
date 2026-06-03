@@ -67,12 +67,9 @@ COL_FECHA = "costo_calc_at"
 
 
 def _norm_sub(cod: str) -> str:
-    s = (cod or "").strip()
-    if not s:
-        return ""
-    if s.isdigit():
-        return str(int(s))
-    return s
+    from codigos_subreceta import cod_sub_canonico
+
+    return cod_sub_canonico(cod)
 
 
 def cargar_unitarios_subreceta(sh) -> dict[str, float]:

@@ -153,12 +153,9 @@ def calcular_costos(
 
 
 def _norm_sub_cod(cod: str) -> str:
-    s = (cod or "").strip()
-    if not s:
-        return ""
-    if s.isdigit():
-        return str(int(s))
-    return s
+    from codigos_subreceta import cod_sub_canonico
+
+    return cod_sub_canonico(cod)
 
 
 def resumen_subreceta_costo(

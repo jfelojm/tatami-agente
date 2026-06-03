@@ -27,6 +27,7 @@ from whatsapp_factura_handler import handle_confirmacion, handle_mensaje_media
 
 from sesiones_conteo import get_sesion_activa, aprobar_items, rechazar_items, cerrar_sesion
 from conteo_fisico import contabilizar_envio, ConteoOperacionError
+from subreceta_operaciones import producir_subreceta_wa, SubrecetaOperacionError
 from conteo_operaciones import (
     iniciar_conteo_wa,
     resumen_ciclos_abiertos,
@@ -54,10 +55,12 @@ ROLES = {
 TOOLS_ESCRITURA_SOCIO_OPERATIVO = {
     "trasladar_mp",
     "conteo_iniciar",
+    "produccion_subreceta",
 }
 
 COMANDOS_OPERATIVO = {
     "APROBAR TODO", "APROBAR", "RECHAZAR", "KARDEX", "CSV", "INICIAR CONTEO",
+    "PRODUCIR SUB", "PREPARAR SUB", "PRODUCCION SUB",
 }
 
 MSG_NO_AUTORIZADO = "No tienes acceso a este agente."
@@ -2425,12 +2428,9 @@ def tool_costo_plato(args):
 
 
 def _norm_sub_cod_wa(cod: str) -> str:
-    s = (cod or "").strip()
-    if not s:
-        return ""
-    if s.isdigit():
-        return str(int(s))
-    return s
+    from codigos_subreceta import cod_sub_canonico
+
+    return cod_sub_canonico(cod)
 
 
 def _buscar_subrecetas(
@@ -2692,6 +2692,58 @@ def tool_conteo_ciclos_abiertos(args=None):
     return resumen_ciclos_abiertos()
 
 
+def tool_produccion_subreceta(args):
+    cods_raw = args.get("cod_subreceta") or args.get("codigos") or []
+    if isinstance(cods_raw, str):
+        cods = [c.strip() for c in cods_raw.replace(",", " ").split() if c.strip()]
+    else:
+        cods = [str(c).strip() for c in cods_raw if str(c).strip()]
+    if not cods and args.get("cod_subreceta"):
+        cods = [str(args.get("cod_subreceta")).strip()]
+    try:
+        return producir_subreceta_wa(
+            cods,
+            bodega=(args.get("bodega") or "BOD-002").strip(),
+            cantidad=float(args["cantidad"]) if args.get("cantidad") is not None else None,
+            registrado_por=(args.get("registrado_por") or "WhatsApp").strip(),
+            simular=bool(args.get("simular", True)),
+            forzar=bool(args.get("forzar")),
+            recalcular=bool(args.get("recalcular", True)),
+        )
+    except SubrecetaOperacionError as e:
+        return {"ok": False, "error": e.code, "mensaje": e.message}
+    except Exception as e:
+        return {"ok": False, "error": "ERROR", "mensaje": str(e)}
+
+
+def _parse_producir_sub_comando(texto: str) -> dict | None:
+    """PRODUCIR SUB 051 052 BOD-002 CONFIRMAR → plan o registro."""
+    raw = (texto or "").strip()
+    upper = raw.upper()
+    prefix = None
+    for p in ("PRODUCIR SUB", "PREPARAR SUB", "PRODUCCION SUB"):
+        if upper.startswith(p):
+            prefix = p
+            break
+    if not prefix:
+        return None
+    resto = raw[len(prefix) :].strip()
+    confirmar = "CONFIRMAR" in upper
+    limpio = resto.upper().replace("CONFIRMAR", " ").strip()
+    tokens = [t for t in limpio.split() if t]
+    bodega = "BOD-002"
+    cods: list[str] = []
+    for tok in tokens:
+        tu = tok.upper()
+        if tu.startswith("BOD-"):
+            bodega = tu
+        else:
+            num = tok.replace(".", "").replace(",", "")
+            if num.isdigit():
+                cods.append(tok)
+    return {"cods": cods, "bodega": bodega, "confirmar": confirmar}
+
+
 def _parse_iniciar_conteo_comando(texto: str) -> str | None:
     """INICIAR CONTEO BOD-001 → cod_bodega o None si no aplica."""
     t = (texto or "").strip().upper()
@@ -2734,6 +2786,7 @@ TOOLS = [
     {"name": "conteo_iniciar", "description": "Inicia inventario físico cíclico: crea conteo_ciclo en Supabase, carga snapshot de MPs de la bodega y genera pestaña CONTEO/CONTEO_BARRA en el maestro Sheets. Usar cuando pidan empezar conteo, toma de inventario, inventario físico de cocina o barra. cod_bodega obligatorio (BOD-001 cocina, BOD-002 barra). semana_iso/anio opcionales (default semana ISO actual). Devuelve ciclo_id, URL de la hoja e instrucciones.", "input_schema": {"type": "object", "properties": {"cod_bodega": {"type": "string"}, "anio": {"type": "integer"}, "semana_iso": {"type": "integer"}, "sheet_name": {"type": "string"}, "reemplazar_snapshot": {"type": "boolean"}, "sobreescribir_hoja": {"type": "boolean"}, "responsable_nombre": {"type": "string"}, "notas": {"type": "string"}}, "required": ["cod_bodega"]}},
     {"name": "conteo_listar_ciclos", "description": "Lista ciclos de inventario físico en Supabase (conteo_ciclo). Filtros opcionales estado y cod_bodega.", "input_schema": {"type": "object", "properties": {"estado": {"type": "string"}, "cod_bodega": {"type": "string"}, "limit": {"type": "integer"}}, "required": []}},
     {"name": "conteo_ciclos_abiertos", "description": "Resumen de ciclos de conteo que NO están CONTABILIZADO ni ANULADO (borradores activos).", "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "produccion_subreceta", "description": "Registra preparación/producción de subreceta(s) en barra o cocina: baja MPs del detalle y entra stock del semi (SUB-xxx) en mov_inventario. Por defecto SIMULA (no escribe); usar simular=false o comando con CONFIRMAR para aplicar. Eduardo barra: bodega BOD-002, subs 051-054. cod_subreceta puede ser lista o string. Devuelve texto_whatsapp.", "input_schema": {"type": "object", "properties": {"cod_subreceta": {"type": "array", "items": {"type": "string"}, "description": "Códigos 051 052 etc."}, "codigos": {"type": "array", "items": {"type": "string"}}, "bodega": {"type": "string", "description": "BOD-002 barra (default) o BOD-001 cocina"}, "cantidad": {"type": "number", "description": "ml/gr/unidades producidas; default rendimiento estándar del lote"}, "simular": {"type": "boolean", "description": "true=solo muestra plan (default true para evaluar)"}, "forzar": {"type": "boolean", "description": "true=registrar aunque falte stock MP"}, "confirmar": {"type": "boolean"}, "registrado_por": {"type": "string"}, "recalcular": {"type": "boolean"}}, "required": ["cod_subreceta"]}},
 ]
 
 TOOL_FNS = {
@@ -2766,6 +2819,7 @@ TOOL_FNS = {
     "conteo_iniciar": tool_conteo_iniciar,
     "conteo_listar_ciclos": tool_conteo_listar_ciclos,
     "conteo_ciclos_abiertos": lambda a: tool_conteo_ciclos_abiertos(),
+    "produccion_subreceta": tool_produccion_subreceta,
 }
 
 SYSTEM = """Eres el agente de gestion de Tatami Bao Bar, gastrobar asiatico en Cuenca, Ecuador.
@@ -2802,6 +2856,7 @@ Si preguntan costo, ingredientes o cantidades de una subreceta o semi (salsa, ma
 Si piden revisar platos con costos muy altos, bebidas caras en costo, o MPs mal valorados en recetas, usa auditar_costos_recetas.
 Inventario físico / conteo cíclico: para INICIAR un nuevo conteo (crear ciclo + snapshot + hoja Sheets), usa conteo_iniciar con cod_bodega BOD-001 (cocina, hoja CONTEO) o BOD-002 (barra, hoja CONTEO_BARRA). No pidas ejecutar scripts de terminal al usuario. Para ver borradores activos usa conteo_ciclos_abiertos. Tras capturar en Sheets, el envío es menú Conteo → Enviar a Tatami; la aprobación por WA es APROBAR TODO cuando exista sesión de revisión.
 Comando directo (sin tool): el usuario puede escribir INICIAR CONTEO BOD-001.
+Producción subrecetas (barra/cocina): tool produccion_subreceta o comando PRODUCIR SUB 051 052 053 054 BOD-002 (simula). Para aplicar de verdad: añadir CONFIRMAR al final del mensaje. Inventario del semi vive en BD_MP_SISTEMA como SUB-051, SUB-052… por bodega (stock 0 hasta producir o contar).
 No uses markdown, asteriscos ni negritas. Solo texto plano.
 Para traslados entre bodegas usa trasladar_mp. Bodegas: BOD-001 cocina, BOD-002 barra, BOD-003 consignacion, BOD-005 externa (BOD-004 limpieza inactiva). Traslados permitidos: cocina<->barra<->externa; consignacion<->barra. SIEMPRE pide confirmacion antes de ejecutar.
 Stock y PAR: el stock es por bodega; el par_level es global por materia prima (suma stock en todas las bodegas para comparar).
@@ -3289,6 +3344,34 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     except Exception as e:
                         await enviar_mensaje_meta(wa_id, f"Error generando Excel: {e}")
                     return
+
+            # Comando rápido: PRODUCIR SUB 051 052 BOD-002 [CONFIRMAR]
+            prod_sub = _parse_producir_sub_comando(texto)
+            if prod_sub is not None:
+                if not autorizado_comando(wa_id, texto):
+                    await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+                    return
+                if not prod_sub["cods"]:
+                    out = (
+                        "Uso: PRODUCIR SUB 051 052 053 054 BOD-002\n"
+                        "(simula; añade CONFIRMAR para registrar en inventario)"
+                    )
+                else:
+                    try:
+                        r = producir_subreceta_wa(
+                            prod_sub["cods"],
+                            bodega=prod_sub["bodega"],
+                            registrado_por="WhatsApp",
+                            simular=not prod_sub["confirmar"],
+                            recalcular=prod_sub["confirmar"],
+                        )
+                        out = r.get("texto_whatsapp") or str(r)
+                    except SubrecetaOperacionError as e:
+                        out = f"No se pudo registrar producción: {e.message}"
+                    except Exception as e:
+                        out = f"Error: {e}"
+                await enviar_mensaje_meta(wa_id, out)
+                return
 
             # Comando rápido: INICIAR CONTEO BOD-001
             cod_bod_rapido = _parse_iniciar_conteo_comando(texto)

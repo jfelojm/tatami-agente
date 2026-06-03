@@ -23,24 +23,17 @@ def descargo_subrecetas_habilitado() -> bool:
 
 
 def pseudo_mp_cod(cod_subreceta: str) -> str:
-    """cod_subreceta maestro → cod_mp_sistema en BD_MP_SISTEMA."""
-    s = (cod_subreceta or "").strip()
-    if not s:
-        return ""
-    if s.upper().startswith(PREFIJO_PSEUDO_MP):
-        return s.upper()
-    if s.isdigit():
-        return f"{PREFIJO_PSEUDO_MP}{s.zfill(3)}"
-    return f"{PREFIJO_PSEUDO_MP}{s}"
+    """cod_subreceta maestro → cod_mp_sistema en BD_MP_SISTEMA (SUB-051)."""
+    from codigos_subreceta import cod_sub_canonico
+
+    return cod_sub_canonico(cod_subreceta)
 
 
 def norm_cod_sub(cod: str) -> str:
-    s = (cod or "").strip()
-    if not s:
-        return ""
-    if s.isdigit():
-        return str(int(s))
-    return s
+    """Clave canónica en dicts de subreceta (SUB-051)."""
+    from codigos_subreceta import cod_sub_canonico
+
+    return cod_sub_canonico(cod)
 
 
 def preparar_ingredientes_descargo(
