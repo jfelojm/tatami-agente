@@ -9,8 +9,12 @@ from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
 
-from config_sheets import cfg
 from costo_mp_canonico import norm_mp
+from dias_cobertura_par import (
+    dias_cobertura_global_default,
+    invalidar_cache_dias_cobertura,
+    resolver_dias_cobertura_mp,
+)
 from descargo_subreceta import calcular_consumo_sub, norm_cod_sub, pseudo_mp_cod
 from recetas_detalle import es_linea_mp, es_linea_subreceta, norm_cod_receta
 from subrecetas_detalle import (
@@ -299,23 +303,23 @@ def calcular_par_levels(dry_run: bool = False):
     """
     Actualiza BD_MP_SISTEMA en Sheets:
       - consumo_diario_calculado
-      - par_level = consumo_diario_calculado * dias_cobertura (si existe) o * 7 por defecto
+      - par_level = consumo_diario_calculado × días cobertura
+        (BD_MP_SISTEMA.dias_cobertura_par → frecuencia proveedor → BD_CONFIG; SUB-* config)
 
     Requiere columnas en BD_MP_SISTEMA:
       - cod_mp_sistema
+      - dias_cobertura_par (editable; no se sobrescribe al recalcular)
       - stock_actual
       - par_level
       - consumo_diario_calculado
 
     Nota: par_level y consumo_diario_calculado se escriben en todas las filas del MP.
+    dias_cobertura_par lo editas tú en BD_MP_SISTEMA (mismo valor lógico por cod_mp).
     Para comparar stock vs PAR (órdenes de compra, alertas), usar inventario_stock_mp:
     stock_total = suma de stock_actual en todas las bodegas activas del MP.
     """
-    dias_cobertura = float(
-        cfg("par_level_dias_cobertura", os.getenv("PAR_LEVEL_DIAS_COBERTURA", "7") or "7")
-    )
-
-    print(f"Dias cobertura (par): {dias_cobertura}")
+    invalidar_cache_dias_cobertura()
+    print(f"Dias cobertura default (BD_CONFIG): {dias_cobertura_global_default()}")
 
     print("[1] Cargando recetas (BD_RECETAS_DETALLE) y calculando consumos...")
     recetas = _cargar_recetas_detalle()
@@ -351,11 +355,16 @@ def calcular_par_levels(dry_run: bool = False):
     # PAR y consumo son globales por cod_mp (no por bodega)
     par_por_mp: dict[str, float] = {}
     consumo_por_mp: dict[str, float] = {}
+    dias_por_mp: dict[str, float] = {}
+    fuente_por_mp: dict[str, str] = {}
     for cod, cd in consumo_diario.items():
         consumo_por_mp[cod] = cd
-        par_por_mp[cod] = round(cd * dias_cobertura, 4) if cd > 0 else 0.0
+        dias, fuente = resolver_dias_cobertura_mp(cod)
+        dias_por_mp[cod] = dias
+        fuente_por_mp[cod] = fuente
+        par_por_mp[cod] = round(cd * dias, 4) if cd > 0 else 0.0
 
-    print("[3] Calculando par levels (global por cod_mp)...")
+    print("[3] Calculando par levels (dias: BD_MP_SISTEMA -> frecuencia_compra -> config)...")
     for i, row in enumerate(data_rows):
         if not any(c.strip() for c in row):
             continue
@@ -378,7 +387,8 @@ def calcular_par_levels(dry_run: bool = False):
         if consumo_por_mp[cod] > 0:
             print(
                 f"  {cod}: consumo_diario={round(consumo_por_mp[cod], 6)} "
-                f"par={par_por_mp[cod]} (todas las filas MP×bodega)"
+                f"dias={dias_por_mp[cod]} ({fuente_por_mp[cod]}) "
+                f"par={par_por_mp[cod]}"
             )
 
     print(f"[4] {'DRY RUN - no escribe' if dry_run else 'Escribiendo'}: {len(updates)} updates")

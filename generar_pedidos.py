@@ -65,7 +65,9 @@ def cargar_bd_prov(sheet):
     col_lt = idx("lead_time_dias")
     col_ventana = idx("ventana_pedido")
     col_pago = idx("condicion_pago")
-    col_freq = idx("frecuencia_entrega_dias")
+    col_freq = idx("frecuencia_compra_dias")
+    if col_freq is None:
+        col_freq = idx("frecuencia_entrega_dias")  # legacy
     col_activo = idx("activo")
     col_inv = idx("proveedor_inventario")
     col_ruc = idx("RUC")  # opcional
@@ -123,7 +125,7 @@ def cargar_bd_prov(sheet):
             "lead_time": lead_time,
             "ventana_pedido": (row[col_ventana] if col_ventana is not None and col_ventana < len(row) else "").strip(),
             "condicion_pago": (row[col_pago] if col_pago is not None and col_pago < len(row) else "").strip(),
-            "frecuencia_entrega_dias": freq,
+            "frecuencia_compra_dias": freq,
         }
 
     return proveedores

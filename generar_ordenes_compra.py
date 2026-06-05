@@ -113,6 +113,7 @@ def cargar_proveedores_por_tipo(tipo: str) -> dict[str, dict]:
             "ventana_pedido": (r.get("ventana_pedido") or "").strip(),
             "condicion_pago": (r.get("condicion_pago") or "").strip(),
             "lead_time_dias": int(_to_float(r.get("lead_time_dias"), 1) or 1),
+            "frecuencia_compra_dias": _to_float(r.get("frecuencia_compra_dias"), 0.0) or None,
             "contacto_whatsapp": (r.get("contacto_whatsapp") or "").strip(),
             "contacto_nombre": (r.get("contacto_nombre") or "").strip(),
         }
@@ -165,6 +166,10 @@ def cargar_items_prov_por_mp(proveedores: dict[str, dict], bodega: str | None) -
             if not bod_item or bod_item != bodega:
                 continue
         factor = _to_float(it.get("factor_conversion"), 1.0) or 1.0
+        try:
+            prioridad = int(_to_float(it.get("prioridad"), 99))
+        except (TypeError, ValueError):
+            prioridad = 99
         mp_items[cod].append(
             {
                 "cod_proveedor": cp,
@@ -173,7 +178,7 @@ def cargar_items_prov_por_mp(proveedores: dict[str, dict], bodega: str | None) -
                 "unidad_base_sistema": (it.get("unidad_base_sistema") or "").strip(),
                 "factor_conversion": factor,
                 "cod_bodega_destino": bod_item,
-                "prioridad": 0,
+                "prioridad": prioridad,
             }
         )
     for cod in mp_items:

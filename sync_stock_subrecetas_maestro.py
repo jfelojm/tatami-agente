@@ -28,7 +28,7 @@ from gspread.utils import ValueInputOption, rowcol_to_a1
 from bodegas_config import normalizar_cod_bodega
 from calcular_par_levels import consumo_diario_por_cod_mp
 from codigos_subreceta import cod_sub_canonico
-from config_sheets import cfg
+from dias_cobertura_par import resolver_dias_cobertura_mp
 from descargo_subreceta import PREFIJO_PSEUDO_MP, cargar_metadata_subrecetas, pseudo_mp_cod
 from numeros_sheets import parse_numero_sheets
 from recalcular_stock_sheets import build_stock_calculado, _clave_stock
@@ -82,20 +82,14 @@ def _leer_bd_mp(ws) -> tuple[list[str], dict[tuple[str, str], dict], dict[tuple[
     return headers, filas, row_idx
 
 
-def _dias_cobertura_par() -> float:
-    return float(
-        cfg("par_level_dias_cobertura", os.getenv("PAR_LEVEL_DIAS_COBERTURA", "7") or "7")
-    )
-
-
 def _cargar_metricas_sub() -> tuple[dict[tuple[str, str], float], dict[str, float], dict[str, float]]:
     """stock por (cod_mp, bod), consumo diario y par global por cod_mp."""
     stock_map = build_stock_calculado()
     consumo_map = consumo_diario_por_cod_mp(verbose=False)
-    dias = _dias_cobertura_par()
-    par_map = {
-        cod: round(cd * dias, 4) if cd > 0 else 0.0 for cod, cd in consumo_map.items()
-    }
+    par_map: dict[str, float] = {}
+    for cod, cd in consumo_map.items():
+        dias, _ = resolver_dias_cobertura_mp(cod)
+        par_map[cod] = round(cd * dias, 4) if cd > 0 else 0.0
     return stock_map, consumo_map, par_map
 
 
