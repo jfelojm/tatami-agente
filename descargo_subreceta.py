@@ -199,8 +199,10 @@ def procesar_linea_sub_venta(
         return None, None, "cod_subreceta vacío"
 
     bod_receta = normalizar_cod_bodega(ing.get("cod_bodega"))
+    from subrecetas_bodegas_stock import bodegas_para_subreceta
+
     mp_fb = None
-    for bod_try in ("BOD-001", "BOD-002"):
+    for bod_try in sorted(bodegas_para_subreceta(cod_sub)):
         mp_fb = mp_sistema.get(mp_key_fn(cod_mp, bod_try))
         if mp_fb:
             break

@@ -1,10 +1,13 @@
 """
 Crea/actualiza filas pseudo-MP (SUB-xxx) en BD_MP_SISTEMA por subreceta activa.
 
-Una fila por (cod_mp_sistema, cod_bodega) solo en bodegas del detalle de producción
-(BD_SUBRECETAS_DETALLE), típicamente BOD-002 barra o BOD-001 cocina.
-Elimina filas SUB-* en bodegas que ya no aplican.
-Stock inicial 0 si la fila es nueva (para ver entradas/descargos en maestro).
+Bodegas (regla fija, ver subrecetas_bodegas_stock.py):
+  - SUB-051..054 → BOD-002 (barra)
+  - Resto → BOD-001 + BOD-005 (cocina)
+
+Columnas sincronizadas por fila:
+  costo_unitario_ref, stock_actual, par_level, consumo_diario_calculado
+  (+ nombre_mp, unidad_base en filas nuevas/actualizadas)
 
 Uso:
   python sync_stock_subrecetas_maestro.py --dry-run
@@ -23,16 +26,27 @@ from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 
 from bodegas_config import normalizar_cod_bodega
+from calcular_par_levels import consumo_diario_por_cod_mp
 from codigos_subreceta import cod_sub_canonico
+from config_sheets import cfg
 from descargo_subreceta import PREFIJO_PSEUDO_MP, cargar_metadata_subrecetas, pseudo_mp_cod
 from numeros_sheets import parse_numero_sheets
+from recalcular_stock_sheets import build_stock_calculado, _clave_stock
 from subrecetas_bodegas_stock import mapa_bodegas_todas_subs
-from subrecetas_detalle import agrupar_detalle_por_padre, cargar_bd_subrecetas_detalle
 
 load_dotenv(override=True)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_MP = "BD_MP_SISTEMA"
+
+_METRICAS_COLS = (
+    "costo_unitario_ref",
+    "stock_actual",
+    "par_level",
+    "consumo_diario_calculado",
+)
+
+
 def _abrir_maestro():
     creds = Credentials.from_service_account_file(
         os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
@@ -68,20 +82,62 @@ def _leer_bd_mp(ws) -> tuple[list[str], dict[tuple[str, str], dict], dict[tuple[
     return headers, filas, row_idx
 
 
-def _fila_nueva(headers: list[str], *, cod_mp: str, bod: str, meta: dict) -> list:
-    """Construye fila alineada a headers; columnas desconocidas vacías."""
+def _dias_cobertura_par() -> float:
+    return float(
+        cfg("par_level_dias_cobertura", os.getenv("PAR_LEVEL_DIAS_COBERTURA", "7") or "7")
+    )
+
+
+def _cargar_metricas_sub() -> tuple[dict[tuple[str, str], float], dict[str, float], dict[str, float]]:
+    """stock por (cod_mp, bod), consumo diario y par global por cod_mp."""
+    stock_map = build_stock_calculado()
+    consumo_map = consumo_diario_por_cod_mp(verbose=False)
+    dias = _dias_cobertura_par()
+    par_map = {
+        cod: round(cd * dias, 4) if cd > 0 else 0.0 for cod, cd in consumo_map.items()
+    }
+    return stock_map, consumo_map, par_map
+
+
+def _metricas_fila(
+    *,
+    cod_mp: str,
+    bod: str,
+    meta: dict,
+    stock_map: dict[tuple[str, str], float],
+    consumo_map: dict[str, float],
+    par_map: dict[str, float],
+) -> dict[str, str | float]:
+    costo = parse_numero_sheets(meta.get("costo_unitario_estandar"), 0.0)
+    sk = _clave_stock(cod_mp, bod)
+    stock = round(stock_map.get(sk, 0.0), 4)
+    consumo = float(consumo_map.get(cod_mp, 0.0))
+    par = float(par_map.get(cod_mp, 0.0))
+    return {
+        "costo_unitario_ref": costo,
+        "stock_actual": stock,
+        "par_level": par,
+        "consumo_diario_calculado": consumo,
+    }
+
+
+def _fila_nueva(
+    headers: list[str],
+    *,
+    cod_mp: str,
+    bod: str,
+    meta: dict,
+    metricas: dict[str, str | float],
+) -> list:
+    """Construye fila alineada a headers."""
     nombre = meta.get("nombre_subreceta", "") or cod_mp
     unidad = meta.get("unidad", "gr") or "gr"
-    costo = parse_numero_sheets(meta.get("costo_unitario_estandar"), 0.0)
     valores = {
         "cod_mp_sistema": cod_mp,
         "nombre_mp": nombre,
         "unidad_base": unidad,
         "cod_bodega": bod,
-        "stock_actual": "0",
-        "costo_unitario_ref": str(costo) if costo else "0",
-        "par_level": "0",
-        "consumo_diario_calculado": "0",
+        **metricas,
     }
     return [valores.get(h, "") for h in headers]
 
@@ -89,21 +145,23 @@ def _fila_nueva(headers: list[str], *, cod_mp: str, bod: str, meta: dict) -> lis
 def sync(*, dry_run: bool, solo_cod: list[str] | None = None) -> dict[str, int]:
     sh = _abrir_maestro()
     subs = cargar_metadata_subrecetas()
-    por_padre = agrupar_detalle_por_padre(cargar_bd_subrecetas_detalle(sh))
-    bodegas_map = mapa_bodegas_todas_subs(subs, por_padre=por_padre, sh=sh)
+    bodegas_map = mapa_bodegas_todas_subs(subs)
+
+    print("  Calculando stock, consumo y PAR para pseudo-MP SUB-*...")
+    stock_map, consumo_map, par_map = _cargar_metricas_sub()
 
     ws = sh.worksheet(SHEET_MP)
     headers, existentes, row_idx = _leer_bd_mp(ws)
+    for col in _METRICAS_COLS:
+        if col not in headers:
+            raise RuntimeError(f"BD_MP_SISTEMA sin columna {col}")
 
     creadas = actualizadas = sin_bodega = eliminadas = 0
     updates: list[dict] = []
     nuevas: list[list] = []
     filas_borrar: list[int] = []
 
-    icod = headers.index("cod_mp_sistema") + 1
-    inom = headers.index("nombre_mp") + 1
-    iuni = headers.index("unidad_base") + 1
-    icosto = headers.index("costo_unitario_ref") + 1
+    col_idx = {c: headers.index(c) + 1 for c in headers}
 
     targets_canon = {cod_sub_canonico(c) for c in solo_cod} if solo_cod else None
 
@@ -116,35 +174,39 @@ def sync(*, dry_run: bool, solo_cod: list[str] | None = None) -> dict[str, int]:
             continue
 
         cod_mp = pseudo_mp_cod(cod_sub)
-        costo = parse_numero_sheets(meta.get("costo_unitario_estandar"), 0.0)
         nombre = meta.get("nombre_subreceta", "") or cod_sub
         unidad = meta.get("unidad", "gr") or "gr"
 
         for bod in bods:
+            metricas = _metricas_fila(
+                cod_mp=cod_mp,
+                bod=bod,
+                meta=meta,
+                stock_map=stock_map,
+                consumo_map=consumo_map,
+                par_map=par_map,
+            )
             key = (cod_mp, bod)
             if key in existentes:
                 row_n = row_idx[key]
                 updates.append(
-                    {
-                        "range": gspread.utils.rowcol_to_a1(row_n, inom),
-                        "values": [[nombre]],
-                    }
+                    {"range": rowcol_to_a1(row_n, col_idx["nombre_mp"]), "values": [[nombre]]}
                 )
                 updates.append(
-                    {
-                        "range": rowcol_to_a1(row_n, iuni),
-                        "values": [[unidad]],
-                    }
+                    {"range": rowcol_to_a1(row_n, col_idx["unidad_base"]), "values": [[unidad]]}
                 )
-                updates.append(
-                    {
-                        "range": rowcol_to_a1(row_n, icosto),
-                        "values": [[costo]],
-                    }
-                )
+                for col in _METRICAS_COLS:
+                    updates.append(
+                        {
+                            "range": rowcol_to_a1(row_n, col_idx[col]),
+                            "values": [[metricas[col]]],
+                        }
+                    )
                 actualizadas += 1
             else:
-                nuevas.append(_fila_nueva(headers, cod_mp=cod_mp, bod=bod, meta=meta))
+                nuevas.append(
+                    _fila_nueva(headers, cod_mp=cod_mp, bod=bod, meta=meta, metricas=metricas)
+                )
                 creadas += 1
 
         allowed = set(bods)
@@ -156,7 +218,6 @@ def sync(*, dry_run: bool, solo_cod: list[str] | None = None) -> dict[str, int]:
             filas_borrar.append(rn)
             eliminadas += 1
 
-    # MPs SUB huérfanos (sub desactivada): no borrar; solo reportar
     subs_cod_mp = {pseudo_mp_cod(c) for c in subs}
     huerfanos = [
         k for k in existentes if k[0].upper().startswith(PREFIJO_PSEUDO_MP) and k[0] not in subs_cod_mp
@@ -165,10 +226,8 @@ def sync(*, dry_run: bool, solo_cod: list[str] | None = None) -> dict[str, int]:
         print(f"  INFO: {len(huerfanos)} filas {PREFIJO_PSEUDO_MP}* sin sub activa (no se modifican)")
 
     print(f"  Subrecetas activas: {len(subs)}")
-    print(f"  Sin bodega en detalle producción: {sin_bodega}")
+    print(f"  Sin bodega asignada: {sin_bodega}")
     print(f"  Filas a crear: {creadas} | actualizar: {actualizadas} | eliminar bodega extra: {eliminadas}")
-    if solo_cod:
-        print(f"  Filtro cod: {solo_cod}")
 
     if dry_run:
         print("  [DRY-RUN] sin escritura en Sheets")
@@ -209,7 +268,7 @@ def main():
     stats = sync(dry_run=dry, solo_cod=args.cod or None)
     print(f"  OK: {stats}")
     if not dry:
-        print("  Siguiente: DESCARGO_SUBRECETAS=1 en .env y descargo_inventario.py")
+        print("  Siguiente: recalcular_stock_sheets.py --produccion (MPs + SUB) si hubo movimientos nuevos")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ from supabase import create_client
 
 from config_sheets import cfg
 from costo_mp_canonico import norm_mp
-from descargo_subreceta import calcular_consumo_sub, norm_cod_sub
+from descargo_subreceta import calcular_consumo_sub, norm_cod_sub, pseudo_mp_cod
 from recetas_detalle import es_linea_mp, es_linea_subreceta, norm_cod_receta
 from subrecetas_detalle import (
     agrupar_detalle_por_padre,
@@ -154,8 +154,18 @@ def _cargar_mp_por_unidad_subreceta() -> dict[str, dict[str, float]]:
     return out
 
 
-def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
-    print("  Leyendo hist_ventas desde Supabase...")
+def consumo_diario_por_cod_mp(
+    recetas: list[dict] | None = None, *, verbose: bool = False
+) -> dict[str, float]:
+    """Consumo diario por cod_mp_sistema (MPs y pseudo-MP SUB-*). Sin escritura en Sheets."""
+    if recetas is None:
+        recetas = _cargar_recetas_detalle()
+    return calcular_consumo_diario(recetas, verbose=verbose)
+
+
+def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dict[str, float]:
+    if verbose:
+        print("  Leyendo hist_ventas desde Supabase...")
 
     sel = "cod_receta,variedad_smart_menu,cantidad_vendida,fecha"
     try:
@@ -181,10 +191,12 @@ def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
             break
         offset += 1000
 
-    print(f"  {len(todas_ventas)} ventas cargadas")
+    if verbose:
+        print(f"  {len(todas_ventas)} ventas cargadas")
 
     mp_sub_unit = _cargar_mp_por_unidad_subreceta()
-    print(f"  {len(mp_sub_unit)} subrecetas con MPs expandidas")
+    if verbose:
+        print(f"  {len(mp_sub_unit)} subrecetas con MPs expandidas")
 
     # Key = (cod_receta normalizado, variedad normalizada) para empatar con hist_ventas,
     # que suele venir con ceros a la izquierda (ej. "007") mientras BD_RECETAS_DETALLE usa "7".
@@ -229,50 +241,53 @@ def calcular_consumo_diario(recetas: list[dict]) -> dict[str, float]:
                 )
             elif es_linea_subreceta(ing):
                 sub = norm_cod_sub(ing.get("cod_subreceta") or "")
-                mp_map = mp_sub_unit.get(sub, {})
-                if not mp_map:
-                    continue
                 units_sub = calcular_consumo_sub(ing, cantidad)
-                if units_sub <= 0:
+                if units_sub > 0:
+                    pseudo = pseudo_mp_cod(sub)
+                    if pseudo:
+                        consumo_total[pseudo] += units_sub
+                mp_map = mp_sub_unit.get(sub, {})
+                if not mp_map or units_sub <= 0:
                     continue
                 for mp, per_unit in mp_map.items():
                     consumo_total[mp] += units_sub * per_unit
 
     dias_activos = len(fechas_activas)
-    print(f"  {dias_activos} dias activos | {len(consumo_total)} MPs con consumo")
+    if verbose:
+        print(f"  {dias_activos} dias activos | {len(consumo_total)} cod_mp con consumo")
 
-    papa = consumo_total.get("120", 0)
-    print(
-        f"  DEBUG papa(120): consumo_total={papa:.0f}g | "
-        f"diario={round(papa/dias_activos,2) if dias_activos else 0}g"
-    )
-
-    print("  DEBUG desglose papa(120) por receta:")
-    consumo_por_receta: dict[str, float] = defaultdict(float)
-    for venta in todas_ventas:
-        if estado_documento_excluye_neto_operativo(venta.get("estado_documento")):
-            continue
-        cod_r = norm_cod_receta(venta.get("cod_receta") or "")
-        variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
-        cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
-        if not cod_r or cantidad <= 0:
-            continue
-
-        ingredientes = (
-            lookup_recetas.get((cod_r, variedad))
-            or lookup_recetas.get((cod_r, ""))
-            or []
+        papa = consumo_total.get("120", 0)
+        print(
+            f"  DEBUG papa(120): consumo_total={papa:.0f}g | "
+            f"diario={round(papa/dias_activos,2) if dias_activos else 0}g"
         )
-        for ing in ingredientes:
-            if norm_mp(ing.get("cod_mp_sistema", "")) == "120":
-                gramaje = _safe_float(ing.get("cantidad", 0))
-                if gramaje:
-                    consumo_por_receta[cod_r] += cantidad * gramaje
 
-    for cod_r, consumo in sorted(
-        consumo_por_receta.items(), key=lambda x: -x[1]
-    ):
-        print(f"    receta={cod_r} consumo={consumo:.0f}g")
+        print("  DEBUG desglose papa(120) por receta:")
+        consumo_por_receta: dict[str, float] = defaultdict(float)
+        for venta in todas_ventas:
+            if estado_documento_excluye_neto_operativo(venta.get("estado_documento")):
+                continue
+            cod_r = norm_cod_receta(venta.get("cod_receta") or "")
+            variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
+            cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
+            if not cod_r or cantidad <= 0:
+                continue
+
+            ingredientes = (
+                lookup_recetas.get((cod_r, variedad))
+                or lookup_recetas.get((cod_r, ""))
+                or []
+            )
+            for ing in ingredientes:
+                if norm_mp(ing.get("cod_mp_sistema", "")) == "120":
+                    gramaje = _safe_float(ing.get("cantidad", 0))
+                    if gramaje:
+                        consumo_por_receta[cod_r] += cantidad * gramaje
+
+        for cod_r, consumo in sorted(
+            consumo_por_receta.items(), key=lambda x: -x[1]
+        ):
+            print(f"    receta={cod_r} consumo={consumo:.0f}g")
 
     if dias_activos == 0:
         return {}

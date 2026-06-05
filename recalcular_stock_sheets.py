@@ -110,6 +110,31 @@ def _bodega_mov(m: dict, tipo: str) -> str:
     return ""
 
 
+def build_stock_calculado(movs: list[dict] | None = None) -> dict[tuple[str, str], float]:
+    """Stock por (cod_mp_sistema, cod_bodega) desde mov_inventario."""
+    if movs is None:
+        movs = paginar_todo(
+            "mov_inventario",
+            "cod_mp_sistema,tipo_mov,cantidad_mov,cod_bodega_origen,cod_bodega_destino",
+        )
+    stock_calculado: dict[tuple[str, str], float] = defaultdict(float)
+    for m in movs:
+        cod = (m.get("cod_mp_sistema") or "").strip()
+        if not cod:
+            continue
+        tipo = (m.get("tipo_mov") or "").strip()
+        cantidad = float(m.get("cantidad_mov") or 0)
+        bod = _bodega_mov(m, tipo)
+        if not bod:
+            continue
+        k = _clave_stock(cod, bod)
+        if tipo in TIPOS_SUMA_DESTINO:
+            stock_calculado[k] += cantidad
+        elif tipo in TIPOS_RESTA_ORIGEN:
+            stock_calculado[k] -= cantidad
+    return dict(stock_calculado)
+
+
 def _resolver_cod_mp_por_nombre_mp(
     values: list,
     header_row_idx: int,
@@ -274,7 +299,7 @@ def recalcular(
     else:
         print("    Costo ref: ENTRADAs + TRASLADO_ENTRADA (historial completo)")
 
-    stock_calculado: dict[tuple[str, str], float] = defaultdict(float)
+    stock_calculado = build_stock_calculado(movs)
     costo_ponderado_suma: dict[tuple[str, str], float] = defaultdict(float)
     cantidad_ponderada: dict[tuple[str, str], float] = defaultdict(float)
     # Costo ref único por MP (todas las bodegas comparten el mismo USD/unidad_base)
@@ -292,19 +317,6 @@ def recalcular(
         costo = float(m.get("costo_unitario") or 0)
         fecha = (m.get("fecha") or "").strip()
         bod = _bodega_mov(m, tipo)
-
-        if tipo in TIPOS_SUMA_DESTINO:
-            if not bod:
-                sin_bodega += 1
-                continue
-            k = _clave_stock(cod, bod)
-            stock_calculado[k] += cantidad
-        elif tipo in TIPOS_RESTA_ORIGEN:
-            if not bod:
-                sin_bodega += 1
-                continue
-            k = _clave_stock(cod, bod)
-            stock_calculado[k] -= cantidad
 
         if (
             tipo in ("ENTRADA", "TRASLADO_ENTRADA")

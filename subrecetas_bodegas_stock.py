@@ -1,50 +1,49 @@
 """
 Bodegas donde debe existir stock del pseudo-MP (SUB-xxx) en BD_MP_SISTEMA.
 
-Solo bodegas del detalle de producción (BD_SUBRECETAS_DETALLE, líneas MP).
-No se infieren desde la carta (BD_RECETAS_DETALLE): un plato en cocina que usa
-el batch no implica que el lote se almacene en BOD-001.
+Regla de negocio (no inferir desde carta ni solo desde detalle):
+  - Barra (BOD-002): SUB-051..054 (batches de barra).
+  - Cocina: todas las demás activas en BOD-001 (restaurante) y BOD-005 (externa).
 """
 
 from __future__ import annotations
 
 from codigos_subreceta import cod_sub_canonico
-from bodegas_config import BODEGAS_DESCARGO_VENTA, normalizar_cod_bodega
-from subrecetas_detalle import (
-    agrupar_detalle_por_padre,
-    cargar_bd_subrecetas_detalle,
-    es_linea_mp_detalle,
+
+# Batches de barra — única bodega BOD-002
+SUBRECETAS_BARRA = frozenset(
+    {
+        "SUB-051",  # Batch negroni
+        "SUB-052",  # batch tokio mule
+        "SUB-053",  # batch ron banana negroni
+        "SUB-054",  # Batch mojito de coco
+    }
 )
+
+BODEGAS_SUB_BARRA = frozenset({"BOD-002"})
+BODEGAS_SUB_COCINA = frozenset({"BOD-001", "BOD-005"})
 
 
 def bodegas_para_subreceta(
     cod_sub: str,
     *,
-    por_padre: dict[str, list[dict]] | None = None,
+    por_padre: dict | None = None,
     sh=None,
 ) -> set[str]:
-    """Bodegas donde la subreceta debe tener fila SUB-xxx (stock puede ser 0)."""
+    """Bodegas donde la subreceta debe tener fila SUB-xxx en BD_MP_SISTEMA."""
+    del por_padre, sh  # regla fija; parámetros legacy por compatibilidad de firma
     cod = cod_sub_canonico(cod_sub)
     if not cod:
         return set()
-
-    if por_padre is None:
-        por_padre = agrupar_detalle_por_padre(cargar_bd_subrecetas_detalle(sh))
-
-    bods: set[str] = set()
-    for ln in por_padre.get(cod, []):
-        if es_linea_mp_detalle(ln):
-            b = normalizar_cod_bodega(ln.get("cod_bodega"))
-            if b in BODEGAS_DESCARGO_VENTA:
-                bods.add(b)
-
-    return bods
+    if cod in SUBRECETAS_BARRA:
+        return set(BODEGAS_SUB_BARRA)
+    return set(BODEGAS_SUB_COCINA)
 
 
 def mapa_bodegas_todas_subs(
     subs_meta: dict[str, dict],
     *,
-    por_padre: dict[str, list[dict]] | None = None,
+    por_padre: dict | None = None,
     sh=None,
 ) -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
