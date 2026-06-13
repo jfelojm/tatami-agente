@@ -57,6 +57,17 @@ tr:hover td{background:#f5f4f0}
 .portal-nav a.on,.portal-nav span.on{background:#e6f1fb;color:#0c447c;border-color:#185fa5;font-weight:500}
 .portal-nav span[data-dash]{cursor:pointer;user-select:none}
 .portal-nav span[data-dash]:hover{background:#f5f4f0}
+.dd-wrap{position:relative;display:inline-block}
+.dd-btn{font-size:12px;padding:4px 10px;border-radius:6px;border:0.5px solid #b4b2a9;background:#fff;color:#2c2c2a;cursor:pointer;height:28px;min-width:150px;text-align:left;display:inline-flex;justify-content:space-between;align-items:center;gap:8px}
+.dd-btn::after{content:'▾';font-size:10px;color:#888780;flex-shrink:0}
+.dd-btn.open{border-color:#185fa5;background:#e6f1fb}
+.dd-menu{display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:200;background:#fff;border:0.5px solid #d3d1c7;border-radius:8px;padding:4px 0;min-width:200px;max-height:280px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.1)}
+.dd-menu.open{display:block}
+.dd-menu .chk-item{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:12px;width:100%;margin:0}
+.dd-menu .chk-item:hover{background:#f5f4f0}
+.dd-actions{display:flex;gap:6px;padding:8px 12px 6px;border-top:0.5px solid #eceae4;margin-top:2px}
+.dd-actions button{font-size:11px;padding:3px 10px;border-radius:5px;border:0.5px solid #b4b2a9;background:#fff;cursor:pointer;color:#444441}
+.dd-actions button:hover{background:#f5f4f0}
 .filter-panel{background:#faf9f6;border:0.5px solid #d3d1c7;border-radius:8px;padding:8px 10px;margin-top:6px;width:100%}
 .filter-panel-title{font-size:11px;color:#888780;margin-bottom:6px;font-weight:500}
 .chk-grid{display:flex;flex-wrap:wrap;gap:4px 10px}
@@ -138,9 +149,9 @@ tr:hover td{background:#f5f4f0}
     </div>
     <span id="wrap-pv">
     <span class="fl">Punto de venta</span>
-    <div class="filter-panel" style="max-width:320px">
-      <div class="filter-panel-title">Seleccionar puntos de venta</div>
-      <div class="chk-grid" id="pv-panel"></div>
+    <div class="dd-wrap" id="dd-pv-wrap">
+      <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-pv-wrap')"><span id="dd-pv-label">P. venta: todos</span></button>
+      <div class="dd-menu" id="pv-panel"></div>
     </div>
     </span>
     <span id="filtros-operativo" class="hid">
@@ -173,21 +184,13 @@ tr:hover td{background:#f5f4f0}
       <button class="mb" onclick="setAg('dia',this)">Día</button>
     </div>
     <select id="ra" onchange="onYearChange();cargar()"><option>2024</option><option>2025</option><option selected>2026</option></select>
-    <div id="panel-periodo-mes" class="filter-panel">
-      <div class="filter-panel-title">Meses a incluir</div>
-      <div class="chk-grid" id="chk-meses"></div>
+    <div class="dd-wrap" id="dd-meses-wrap">
+      <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-meses-wrap')"><span id="dd-meses-label">Meses: todos</span></button>
+      <div class="dd-menu" id="chk-meses"></div>
     </div>
-    <div id="panel-periodo-semana" class="filter-panel hid">
-      <div class="filter-panel-title">Semanas a incluir</div>
-      <div class="chk-grid" id="chk-semanas"></div>
-    </div>
-    <div id="panel-periodo-dia" class="filter-panel hid">
-      <div class="filter-panel-title">Días a incluir</div>
-      <div class="chk-grid" id="chk-dias"></div>
-    </div>
-    <div id="panel-dias-sem" class="filter-panel hid">
-      <div class="filter-panel-title">Días de la semana</div>
-      <div class="chk-grid" id="chk-dias-sem"></div>
+    <div class="dd-wrap hid" id="dd-semanas-wrap">
+      <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-semanas-wrap')"><span id="dd-semanas-label">Semanas: todas</span></button>
+      <div class="dd-menu" id="chk-semanas"></div>
     </div>
     <select id="rm" class="hid" onchange="cargar()">
       <option value="01">Ene</option><option value="02">Feb</option><option value="03">Mar</option>
@@ -195,6 +198,14 @@ tr:hover td{background:#f5f4f0}
       <option value="07">Jul</option><option value="08">Ago</option><option value="09">Sep</option>
       <option value="10">Oct</option><option value="11">Nov</option><option value="12">Dic</option>
     </select>
+    <div class="dd-wrap hid" id="dd-dias-wrap">
+      <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-dias-wrap')"><span id="dd-dias-label">Días: todos</span></button>
+      <div class="dd-menu" id="chk-dias"></div>
+    </div>
+    <div class="dd-wrap hid" id="dd-dias-sem-wrap">
+      <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-dias-sem-wrap')"><span id="dd-dias-sem-label">Días sem.: todos</span></button>
+      <div class="dd-menu" id="chk-dias-sem"></div>
+    </div>
     <select id="rs" class="hid" onchange="cargar()">
       <option value="1">S1</option><option value="2">S2</option><option value="3">S3</option><option value="4" selected>S4</option>
     </select>
@@ -310,10 +321,10 @@ tr:hover td{background:#f5f4f0}
       </div>
       <span class="fl">Agrupar</span>
       <select id="cmp-agrup" onchange="cargarCompras()"><option value="mes" selected>Mes</option><option value="semana">Semana</option><option value="anio">Año</option></select>
-    </div>
-    <div class="filter-panel">
-      <div class="filter-panel-title">Meses a incluir (o todo el año si están todos marcados)</div>
-      <div class="chk-grid" id="cmp-meses"></div>
+      <div class="dd-wrap" id="dd-cmp-meses-wrap">
+        <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-cmp-meses-wrap')"><span id="dd-cmp-meses-label">Meses: todos</span></button>
+        <div class="dd-menu" id="cmp-meses"></div>
+      </div>
     </div>
   </div>
   <div class="metrics" id="compras-metrics"><div class="loading">Cargando...</div></div>
@@ -391,7 +402,7 @@ tr:hover td{background:#f5f4f0}
 </div>
 
 <script>
-/* Filtros compartidos: paneles checkbox, períodos, gráficos */
+/* Filtros compartidos: dropdowns con checkboxes, períodos, gráficos */
 (function (w) {
   const MESES = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
   const DIAS_SEM = [
@@ -405,24 +416,96 @@ tr:hover td{background:#f5f4f0}
     return String(new Date(y, m, 0).getDate()).padStart(2, '0');
   };
 
-  w.buildCheckboxPanel = function (container, items, { allByDefault = true, onChange } = {}) {
-    if (!container) return;
-    container.innerHTML = items.map(it => {
-      const id = container.id + '-cb-' + String(it.v).replace(/[^a-z0-9]/gi, '_');
-      const chk = allByDefault ? ' checked' : '';
-      return `<label class="chk-item" for="${id}"><input type="checkbox" id="${id}" value="${it.v}"${chk}> ${it.n}</label>`;
-    }).join('');
-    container.querySelectorAll('input').forEach(inp => {
-      inp.addEventListener('change', () => { if (onChange) onChange(); });
-    });
+  w.closeAllDropdowns = function () {
+    document.querySelectorAll('.dd-menu.open').forEach(m => m.classList.remove('open'));
+    document.querySelectorAll('.dd-btn.open').forEach(b => b.classList.remove('open'));
   };
+
+  w.toggleDropdownMenu = function (wrapId) {
+    const wrap = document.getElementById(wrapId);
+    if (!wrap) return;
+    const menu = wrap.querySelector('.dd-menu');
+    const btn = wrap.querySelector('.dd-btn');
+    if (!menu || !btn) return;
+    const wasOpen = menu.classList.contains('open');
+    w.closeAllDropdowns();
+    if (!wasOpen) {
+      menu.classList.add('open');
+      btn.classList.add('open');
+    }
+  };
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.dd-wrap')) w.closeAllDropdowns();
+  });
 
   w.getCheckedValues = function (container) {
     if (!container) return [];
-    return [...container.querySelectorAll('input:checked')].map(i => i.value);
+    const el = typeof container === 'string' ? document.getElementById(container) : container;
+    if (!el) return [];
+    return [...el.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
   };
 
-  w.initMesesPanel = function (year, containerId, onChange) {
+  w.updateDropdownLabel = function (containerId, labelId, prefix, items) {
+    const label = document.getElementById(labelId);
+    const c = document.getElementById(containerId);
+    if (!label || !c) return;
+    const checked = w.getCheckedValues(c);
+    const total = items ? items.length : c.querySelectorAll('input[type=checkbox]').length;
+    if (!checked.length || checked.length >= total) {
+      label.textContent = prefix + ': todos';
+      return;
+    }
+    if (checked.length <= 3 && items) {
+      const names = checked.map(v => (items.find(it => it.v === v) || {}).n || v);
+      label.textContent = prefix + ': ' + names.join(', ');
+      return;
+    }
+    label.textContent = prefix + ': ' + checked.length + ' sel.';
+  };
+
+  w.selectAllInDropdown = function (containerId, labelId, prefix, items, onChange) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    c.querySelectorAll('input[type=checkbox]').forEach(i => { i.checked = true; });
+    w.updateDropdownLabel(containerId, labelId, prefix, items);
+    if (onChange) onChange();
+  };
+
+  w.selectNoneInDropdown = function (containerId, labelId, prefix, items, onChange) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    c.querySelectorAll('input[type=checkbox]').forEach(i => { i.checked = false; });
+    w.updateDropdownLabel(containerId, labelId, prefix, items);
+    if (onChange) onChange();
+  };
+
+  w.buildCheckboxPanel = function (container, items, { allByDefault = true, labelId, prefix, onChange } = {}) {
+    if (!container) return;
+    const cid = container.id || 'panel';
+    const pre = prefix || 'Items';
+    const onChg = () => {
+      if (labelId) w.updateDropdownLabel(cid, labelId, pre, items);
+      if (onChange) onChange();
+    };
+    const rows = items.map(it => {
+      const id = cid + '-cb-' + String(it.v).replace(/[^a-z0-9]/gi, '_');
+      const chk = allByDefault ? ' checked' : '';
+      return `<label class="chk-item" for="${id}"><input type="checkbox" id="${id}" value="${it.v}"${chk}> ${it.n}</label>`;
+    }).join('');
+    const actions = labelId ? `<div class="dd-actions">
+      <button type="button" onclick="selectAllInDropdown('${cid}','${labelId}','${pre}',null,window._ddOnChange_${cid})">Todos</button>
+      <button type="button" onclick="selectNoneInDropdown('${cid}','${labelId}','${pre}',null,window._ddOnChange_${cid})">Ninguno</button>
+    </div>` : '';
+    container.innerHTML = rows + actions;
+    window['_ddOnChange_' + cid] = onChange;
+    container.querySelectorAll('input[type=checkbox]').forEach(inp => {
+      inp.addEventListener('change', onChg);
+    });
+    if (labelId) w.updateDropdownLabel(cid, labelId, pre, items);
+  };
+
+  w.initMesesPanel = function (year, containerId, labelId, onChange) {
     const c = document.getElementById(containerId);
     if (!c) return;
     const items = [];
@@ -430,36 +513,37 @@ tr:hover td{background:#f5f4f0}
       const mm = String(m).padStart(2, '0');
       items.push({ v: `${year}-${mm}`, n: MESES[m] });
     }
-    w.buildCheckboxPanel(c, items, { allByDefault: true, onChange });
+    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'Meses', onChange });
   };
 
-  w.initDiasSemPanel = function (containerId, onChange) {
+  w.initDiasSemPanel = function (containerId, labelId, onChange) {
     const c = document.getElementById(containerId);
     if (!c) return;
-    w.buildCheckboxPanel(c, DIAS_SEM.map(d => ({ v: String(d.v), n: d.n })), { allByDefault: true, onChange });
+    const items = DIAS_SEM.map(d => ({ v: String(d.v), n: d.n }));
+    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'Días sem.', onChange });
   };
 
-  w.initPvPanel = function (containerId, onChange) {
+  w.initPvPanel = function (containerId, labelId, onChange) {
     const c = document.getElementById(containerId);
     if (!c) return;
     const items = [
       { v: 'BARRA', n: 'Barra' }, { v: 'COCINA', n: 'Cocina' }, { v: 'OTRO', n: 'Otro' },
     ];
-    w.buildCheckboxPanel(c, items, { allByDefault: true, onChange });
+    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'P. venta', onChange });
   };
 
-  w.syncSemanasFromData = function (labels, containerId, onChange) {
+  w.syncSemanasFromData = function (labels, containerId, labelId, onChange) {
     const c = document.getElementById(containerId);
     if (!c || !labels) return;
     const items = labels.map(l => ({ v: l, n: l.replace('-W', ' S') }));
-    w.buildCheckboxPanel(c, items, { allByDefault: true, onChange });
+    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'Semanas', onChange });
   };
 
-  w.syncDiasFromData = function (labels, containerId, onChange) {
+  w.syncDiasFromData = function (labels, containerId, labelId, onChange) {
     const c = document.getElementById(containerId);
     if (!c || !labels) return;
     const items = labels.map(l => ({ v: l, n: l.slice(8) + '/' + l.slice(5, 7) }));
-    w.buildCheckboxPanel(c, items, { allByDefault: true, onChange });
+    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'Días', onChange });
   };
 
   w.pvIncludesCheck = function (containerId, key) {
@@ -499,8 +583,7 @@ tr:hover td{background:#f5f4f0}
         datasets: [{ data: values, backgroundColor: labels.map((_, i) => pal[i % pal.length]) }],
       },
       options: {
-        responsive: true,
-        maintainAspectRatio: false,
+        responsive: true, maintainAspectRatio: false,
         plugins: {
           legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } },
           tooltip: { callbacks: { label: ctx => `${ctx.label}: $${ctx.parsed.toLocaleString('es-EC')}` } },
@@ -628,7 +711,7 @@ tr:hover td{background:#f5f4f0}
   /* ——— Compras ——— */
   window.initComprasMeses = function () {
     const y = document.getElementById('cmp-anio').value;
-    initMesesPanel(y, 'cmp-meses', cargarCompras);
+    initMesesPanel(y, 'cmp-meses', 'dd-cmp-meses-label', cargarCompras);
   };
 
   window.getComprasRange = function () {
@@ -899,6 +982,7 @@ let _rentData = null;
 let _meta = null;
 let _rows = [];
 let _tv = 1;
+const PV_KEYS = ['BARRA', 'COCINA', 'OTRO'];
 
 function monthEnd(year, monthStr) {
   const y = parseInt(year, 10);
@@ -1081,17 +1165,17 @@ function setAg(a, btn) {
   btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
   btn.classList.add('on');
   h('ra', true);
+  h('dd-meses-wrap', a === 'mes' || a === 'anio');
+  h('dd-semanas-wrap', a === 'semana');
   h('rm', a === 'semana' || a === 'dia');
-  h('panel-periodo-mes', a === 'mes' || a === 'anio');
-  h('panel-periodo-semana', a === 'semana');
-  h('panel-periodo-dia', a === 'dia');
-  h('panel-dias-sem', a === 'dia');
+  h('dd-dias-wrap', a === 'dia');
+  h('dd-dias-sem-wrap', a === 'dia');
   if (a === 'mes' || a === 'anio') onYearChange();
   cargar();
 }
 
 function onYearChange() {
-  initMesesPanel(document.getElementById('ra').value, 'chk-meses', () => { if (_data) applyPeriodFilter(); else cargar(); });
+  initMesesPanel(document.getElementById('ra').value, 'chk-meses', 'dd-meses-label', () => { if (_data) applyPeriodFilter(); else cargar(); });
 }
 
 function onPeriodCheckChange() {
@@ -1278,8 +1362,8 @@ async function cargar() {
     }
     _data = await res.json();
     window._periodFilter = getRanges()._filterLabels || null;
-    if (ag === 'semana' && _data.labels) syncSemanasFromData(_data.labels, 'chk-semanas', onPeriodCheckChange);
-    if (ag === 'dia' && _data.labels) syncDiasFromData(_data.labels, 'chk-dias', onPeriodCheckChange);
+    if (ag === 'semana' && _data.labels) syncSemanasFromData(_data.labels, 'chk-semanas', 'dd-semanas-label', onPeriodCheckChange);
+    if (ag === 'dia' && _data.labels) syncDiasFromData(_data.labels, 'chk-dias', 'dd-dias-label', onPeriodCheckChange);
     fillPlatoOptions(_data.platos || []);
     document.getElementById('last-update').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
     render();
@@ -1561,9 +1645,9 @@ function bootDashboard() {
     return;
   }
   loadMeta();
-  initPvPanel('pv-panel', onPvChange);
+  initPvPanel('pv-panel', 'dd-pv-label', onPvChange);
   onYearChange();
-  initDiasSemPanel('chk-dias-sem', onPeriodCheckChange);
+  initDiasSemPanel('chk-dias-sem', 'dd-dias-sem-label', onPeriodCheckChange);
   if (typeof initComprasMeses === 'function') initComprasMeses();
   cargar();
 }

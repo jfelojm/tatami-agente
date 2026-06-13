@@ -80,7 +80,7 @@
   /* ——— Compras ——— */
   window.initComprasMeses = function () {
     const y = document.getElementById('cmp-anio').value;
-    initMesesPanel(y, 'cmp-meses', cargarCompras);
+    initMesesPanel(y, 'cmp-meses', 'dd-cmp-meses-label', cargarCompras);
   };
 
   window.getComprasRange = function () {
