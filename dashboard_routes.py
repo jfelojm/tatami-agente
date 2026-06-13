@@ -13,13 +13,44 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from supabase import create_client
 
+from dashboard_services.compras import build_resumen_compras
+from dashboard_services.confianza import build_confianza_inventario
+from dashboard_services.inventario_vivo import build_inventario_vivo
+from dashboard_services.meta import meta_dashboard
+from dashboard_services.rentabilidad import build_rentabilidad_from_catalog
+from dashboard_services.roturas import build_roturas_historico
+from dashboard_services.sheets_data import leer_bd_mp_sistema, leer_bd_prov
+from dashboard_services.ventas_socios import build_resumen_socios
 from matching_productos import cargar_bd_productos
 from ventas_smartmenu import estado_documento_excluye_neto_operativo
 
 router = APIRouter()
 
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "tatami2026")
-_DASHBOARD_HTML = Path(__file__).resolve().parent / "dashboard.html"
+_DASH_DIR = Path(__file__).resolve().parent
+_DASHBOARD_HTML = _DASH_DIR / "dashboard.html"
+
+
+def _escape_script(js: str) -> str:
+    return js.replace("</script>", "<\\/script>")
+
+
+def _inline_dashboard_js(html: str) -> str:
+    """Incrusta JS si aún hay tags externos (dev local con archivos .js separados)."""
+    if "/dashboard-filters.js" not in html and "/dashboard-app.js" not in html:
+        return html
+    pairs = (
+        ("dashboard_filters.js", "/dashboard-filters.js"),
+        ("dashboard_app.js", "/dashboard-app.js"),
+    )
+    for filename, src_tag in pairs:
+        js_path = _DASH_DIR / filename
+        src = f'<script src="{src_tag}"></script>'
+        if src not in html or not js_path.is_file():
+            continue
+        js = _escape_script(js_path.read_text(encoding="utf-8"))
+        html = html.replace(src, f"<script>\n{js}\n</script>")
+    return html
 _cache_catalogo: dict | None = None
 
 
@@ -81,6 +112,7 @@ def _cargar_catalogo() -> dict:
             "nombre": _col(p, "nombre_producto") or cod,
             "cod_smart_menu": cod,
             "variedad_smart_menu": var,
+            "cod_receta": _col(p, "cod_receta", "Cod_receta"),
         }
         by_cod_var[(cod, var)] = meta
         by_cod[cod].append(meta)
@@ -238,7 +270,7 @@ def _query_hist_ventas(
     offset = 0
     while True:
         q = sb.table("hist_ventas").select(
-            "fecha,cod_smart_menu,variedad_smart_menu,nombre_producto,"
+            "fecha,cod_smart_menu,variedad_smart_menu,nombre_producto,cod_receta,"
             "cantidad_vendida,subtotal,descuento_valor,estado_documento"
         )
         if desde:
@@ -306,7 +338,29 @@ def dashboard(token: str = ""):
             detail="dashboard.html no existe aún. Crear el archivo en tatami-agente/.",
         )
     html = _DASHBOARD_HTML.read_text(encoding="utf-8")
-    return HTMLResponse(content=html.replace("__TOKEN__", token))
+    html = html.replace("__TOKEN__", token)
+    html = _inline_dashboard_js(html)
+    return HTMLResponse(content=html)
+
+
+@router.get("/dashboard-app.js")
+def dashboard_app_js():
+    js_path = Path(__file__).resolve().parent / "dashboard_app.js"
+    if not js_path.is_file():
+        raise HTTPException(status_code=404, detail="dashboard_app.js no encontrado")
+    from fastapi.responses import PlainTextResponse
+
+    return PlainTextResponse(js_path.read_text(encoding="utf-8"), media_type="application/javascript")
+
+
+@router.get("/dashboard-filters.js")
+def dashboard_filters_js():
+    js_path = Path(__file__).resolve().parent / "dashboard_filters.js"
+    if not js_path.is_file():
+        raise HTTPException(status_code=404, detail="dashboard_filters.js no encontrado")
+    from fastapi.responses import PlainTextResponse
+
+    return PlainTextResponse(js_path.read_text(encoding="utf-8"), media_type="application/javascript")
 
 
 @router.get("/api/dashboard/ventas")
@@ -316,10 +370,11 @@ def ventas(
     hasta: str | None = Query(default=None),
     agrup: str = Query(default="mes"),
     dia_semana: int | None = Query(default=None, ge=1, le=7),
-    punto_venta: str | None = Query(default=None),
+    punto_venta: list[str] | None = Query(default=None),
     categoria: str | None = Query(default=None),
     plato: str | None = Query(default=None),
     orden: str = Query(default="desc"),
+    incluir_socios: bool = Query(default=False),
 ):
     _check_token(token)
     sb = _get_sb()
@@ -331,7 +386,16 @@ def ventas(
         raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta")
     rows = _query_hist_ventas(sb, desde=desde, hasta=hasta)
 
-    pv_filtro = _norm_punto_venta(punto_venta or "") if punto_venta else ""
+    pv_filtros: set[str] | None = None
+    if punto_venta:
+        pv_filtros = set()
+        for raw in punto_venta:
+            for part in raw.split(","):
+                pv_norm = _norm_punto_venta(part.strip())
+                if pv_norm:
+                    pv_filtros.add(pv_norm)
+        if not pv_filtros:
+            pv_filtros = None
     cat_filtro = _norm_key(categoria) if categoria else ""
 
     resumen: dict[str, dict[str, float]] = defaultdict(
@@ -363,7 +427,7 @@ def ventas(
         cat = meta["cat"]
         nombre = meta["nombre"]
 
-        if pv_filtro and pv != pv_filtro:
+        if pv_filtros and pv not in pv_filtros:
             continue
         if cat_filtro and _norm_key(cat) != cat_filtro:
             continue
@@ -538,7 +602,7 @@ def ventas(
                 plato_nombre = p["nombre"]
                 break
 
-    return {
+    result = {
         "labels": labels,
         "cocina": [round(resumen[k]["COCINA"], 2) for k in labels],
         "barra": [round(resumen[k]["BARRA"], 2) for k in labels],
@@ -562,3 +626,224 @@ def ventas(
         if plato
         else None,
     }
+    if incluir_socios and desde and hasta and not plato:
+        result["socios"] = build_resumen_socios(
+            query_fn=lambda d, h: _query_hist_ventas(sb, desde=d, hasta=h),
+            catalogo=catalogo,
+            resolver=_resolver_producto,
+            neto_fn=_neto_linea,
+            dia_semana_fn=_dia_semana_iso,
+            desde=date.fromisoformat(desde),
+            hasta=date.fromisoformat(hasta),
+        )
+    return result
+
+
+def _query_mov_inventario(sb, *, desde: str | None, hasta: str | None) -> list[dict]:
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        q = sb.table("mov_inventario").select(
+            "fecha,tipo_mov,cod_mp_sistema,nombre_mp,cantidad_mov,"
+            "costo_unitario,costo_total,num_documento,cod_bodega_origen,cod_bodega_destino,observaciones"
+        )
+        if desde:
+            q = q.gte("fecha", desde)
+        if hasta:
+            q = q.lte("fecha", hasta + "T23:59:59")
+        chunk = q.range(offset, offset + 999).execute().data or []
+        rows.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+    return rows
+
+
+def _query_facturas_procesadas(sb, *, desde: str | None, hasta: str | None) -> list[dict]:
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        q = sb.table("facturas_procesadas").select(
+            "num_factura,ruc_proveedor,fecha_factura,estado,meta"
+        )
+        if desde:
+            q = q.gte("fecha_factura", desde)
+        if hasta:
+            q = q.lte("fecha_factura", hasta)
+        chunk = q.range(offset, offset + 999).execute().data or []
+        rows.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+    out = []
+    for r in rows:
+        meta = r.get("meta") or {}
+        if isinstance(meta, dict):
+            razon = meta.get("razon_social") or meta.get("proveedor") or ""
+        else:
+            razon = ""
+        out.append({**r, "razon_social": razon})
+    return out
+
+
+def _query_conteo_ciclos(sb, limit: int = 50) -> list[dict]:
+    return (
+        sb.table("conteo_ciclo")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+        .data
+        or []
+    )
+
+
+@router.get("/api/dashboard/meta")
+def dashboard_meta(token: str = ""):
+    _check_token(token)
+    return meta_dashboard(_get_sb())
+
+
+@router.get("/api/dashboard/ventas/socios")
+def ventas_socios(
+    token: str = "",
+    desde: str | None = Query(default=None),
+    hasta: str | None = Query(default=None),
+):
+    _check_token(token)
+    sb = _get_sb()
+    catalogo = _cargar_catalogo()
+    desde_d = _sanitize_fecha(desde)
+    hasta_d = _sanitize_fecha(hasta)
+    if not desde_d or not hasta_d:
+        raise HTTPException(status_code=400, detail="desde y hasta son obligatorios")
+    if desde_d > hasta_d:
+        raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta")
+
+    def query_fn(d: str, h: str) -> list[dict]:
+        return _query_hist_ventas(sb, desde=d, hasta=h)
+
+    return build_resumen_socios(
+        query_fn=query_fn,
+        catalogo=catalogo,
+        resolver=_resolver_producto,
+        neto_fn=_neto_linea,
+        dia_semana_fn=_dia_semana_iso,
+        desde=date.fromisoformat(desde_d),
+        hasta=date.fromisoformat(hasta_d),
+    )
+
+
+@router.get("/api/dashboard/compras")
+def dashboard_compras(
+    token: str = "",
+    desde: str | None = Query(default=None),
+    hasta: str | None = Query(default=None),
+    agrup: str = Query(default="mes"),
+    area: str | None = Query(default=None),
+):
+    _check_token(token)
+    sb = _get_sb()
+    desde = _sanitize_fecha(desde)
+    hasta = _sanitize_fecha(hasta)
+    if not desde or not hasta:
+        raise HTTPException(status_code=400, detail="desde y hasta son obligatorios")
+    try:
+        rows_mp = leer_bd_mp_sistema()
+        rows_prov = leer_bd_prov()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"No se pudo leer Sheets: {e}") from e
+    return build_resumen_compras(
+        query_mov_fn=lambda d, h: _query_mov_inventario(sb, desde=d, hasta=h),
+        query_facturas_fn=lambda d, h: _query_facturas_procesadas(sb, desde=d, hasta=h),
+        rows_mp=rows_mp,
+        rows_prov=rows_prov,
+        desde=date.fromisoformat(desde),
+        hasta=date.fromisoformat(hasta),
+        agrup=agrup,
+        area=(area or "").upper() or None,
+    )
+
+
+@router.get("/api/dashboard/inventario/vivo")
+def dashboard_inventario_vivo(
+    token: str = "",
+    responsabilidad: str | None = Query(default=None),
+    cod_bodega: str | None = Query(default=None),
+    dias_periodo: int = Query(default=1, ge=1, le=366),
+):
+    _check_token(token)
+    try:
+        rows_mp = leer_bd_mp_sistema()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"No se pudo leer BD_MP_SISTEMA: {e}") from e
+    return build_inventario_vivo(
+        rows_mp,
+        responsabilidad=responsabilidad,
+        cod_bodega=cod_bodega,
+        dias_periodo=dias_periodo,
+    )
+
+
+@router.get("/api/dashboard/rentabilidad")
+def dashboard_rentabilidad(
+    token: str = "",
+    desde: str | None = Query(default=None),
+    hasta: str | None = Query(default=None),
+    agrup: str = Query(default="mes"),
+):
+    _check_token(token)
+    sb = _get_sb()
+    catalogo = _cargar_catalogo()
+    desde = _sanitize_fecha(desde)
+    hasta = _sanitize_fecha(hasta)
+    if not desde or not hasta:
+        raise HTTPException(status_code=400, detail="desde y hasta son obligatorios")
+    ventas = _query_hist_ventas(sb, desde=desde, hasta=hasta)
+    entradas = [
+        m for m in _query_mov_inventario(sb, desde=desde, hasta=hasta)
+        if (m.get("tipo_mov") or "") == "ENTRADA"
+    ]
+    return build_rentabilidad_from_catalog(
+        rows_ventas=ventas,
+        rows_entrada=entradas,
+        catalogo=catalogo,
+        resolver=_resolver_producto,
+        neto_fn=_neto_linea,
+        desde=date.fromisoformat(desde),
+        hasta=date.fromisoformat(hasta),
+        agrup=agrup,
+    )
+
+
+@router.get("/api/dashboard/roturas")
+def dashboard_roturas(
+    token: str = "",
+    desde: str | None = Query(default=None),
+    hasta: str | None = Query(default=None),
+    agrup: str = Query(default="mes"),
+    bodega: str | None = Query(default=None),
+):
+    _check_token(token)
+    sb = _get_sb()
+    desde = _sanitize_fecha(desde)
+    hasta = _sanitize_fecha(hasta)
+    if not desde or not hasta:
+        raise HTTPException(status_code=400, detail="desde y hasta son obligatorios")
+    movs = _query_mov_inventario(sb, desde=desde, hasta=hasta)
+    return build_roturas_historico(
+        movs, desde=date.fromisoformat(desde), hasta=date.fromisoformat(hasta), agrup=agrup, bodega=bodega
+    )
+
+
+@router.get("/api/dashboard/confianza")
+def dashboard_confianza(token: str = ""):
+    _check_token(token)
+    sb = _get_sb()
+    ciclos = _query_conteo_ciclos(sb)
+    try:
+        inv = build_inventario_vivo(leer_bd_mp_sistema())
+        neg = inv["resumen"].get("NEGATIVO", 0)
+    except Exception:
+        neg = 0
+    return build_confianza_inventario(ciclos=ciclos, detalles=[], stock_negativos=neg)

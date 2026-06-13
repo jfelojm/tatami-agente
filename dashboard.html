@@ -52,6 +52,34 @@ tr:hover td{background:#f5f4f0}
 .badge-b{background:#e6f1fb;color:#0c447c}
 .badge-c{background:#e1f5ee;color:#085041}
 .badge-o{background:#f1efe8;color:#444441}
+.portal-nav{display:flex;gap:6px;flex-wrap:wrap;margin-left:16px}
+.portal-nav a,.portal-nav span{font-size:11px;padding:4px 10px;border-radius:6px;text-decoration:none;border:0.5px solid #d3d1c7;color:#888780}
+.portal-nav a.on,.portal-nav span.on{background:#e6f1fb;color:#0c447c;border-color:#185fa5;font-weight:500}
+.portal-nav span[data-dash]{cursor:pointer;user-select:none}
+.portal-nav span[data-dash]:hover{background:#f5f4f0}
+.filter-panel{background:#faf9f6;border:0.5px solid #d3d1c7;border-radius:8px;padding:8px 10px;margin-top:6px;width:100%}
+.filter-panel-title{font-size:11px;color:#888780;margin-bottom:6px;font-weight:500}
+.chk-grid{display:flex;flex-wrap:wrap;gap:4px 10px}
+.chk-item{font-size:12px;color:#444441;cursor:pointer;display:inline-flex;align-items:center;gap:4px;user-select:none}
+.chk-item input{accent-color:#185fa5}
+.collapse-head{font-size:12px;font-weight:500;padding:8px 10px;cursor:pointer;background:#f5f4f0;border-radius:6px;margin-bottom:4px;user-select:none}
+.collapse-head::before{content:'▶ ';font-size:10px;color:#888780}
+.collapse-head.open::before{content:'▼ '}
+.collapse-body{display:none;padding:4px 0 8px 12px}
+.collapse-body.open{display:block}
+.cw-sm{position:relative;width:100%;height:200px}
+.cw-pie{position:relative;width:100%;max-width:360px;height:220px;margin:0 auto}
+.dash-panel.hid{display:none}
+.meta-banner{font-size:11px;color:#666660;background:#f1efe8;border:0.5px solid #d3d1c7;border-radius:8px;padding:8px 12px;margin-bottom:10px}
+.delta-up{color:#1D9E75;font-size:11px}
+.delta-down{color:#a32d2d;font-size:11px}
+.delta-flat{color:#888780;font-size:11px}
+.socios-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
+@media(max-width:800px){.socios-grid{grid-template-columns:1fr}}
+.btn-export{font-size:11px;padding:4px 10px;border-radius:6px;border:0.5px solid #185fa5;background:#e6f1fb;color:#0c447c;cursor:pointer;height:26px}
+.panel-operativo,.panel-socios{display:block}
+.panel-operativo.hid,.panel-socios.hid{display:none}
+.dash-panel.hid{display:none}
 </style>
 </head>
 <body>
@@ -59,38 +87,74 @@ tr:hover td{background:#f5f4f0}
 <div class="topbar">
   <div>
     <div class="topbar-title">Tatami Bao Bar</div>
-    <div class="topbar-sub">Dashboard de ventas</div>
+    <div class="topbar-sub">Portal de dashboards</div>
   </div>
+  <nav class="portal-nav" id="portal-nav">
+    <span class="on" data-dash="ventas" onclick="setDashboard('ventas')">Ventas</span>
+    <span data-dash="compras" onclick="setDashboard('compras')">Compras</span>
+    <span data-dash="rentabilidad" onclick="setDashboard('rentabilidad')">Rentabilidad</span>
+    <span data-dash="inventario" onclick="setDashboard('inventario')">Inventario</span>
+    <span data-dash="roturas" onclick="setDashboard('roturas')">Roturas</span>
+    <span data-dash="confianza" onclick="setDashboard('confianza')">Confianza</span>
+  </nav>
   <div style="margin-left:auto;font-size:11px;color:#b4b2a9" id="last-update"></div>
 </div>
 
 <div class="db">
 <div id="error-msg" class="error hid"></div>
+<div id="meta-banner" class="meta-banner hid"></div>
 
-<div class="filter-bar">
+<div id="filters-global" class="filter-bar hid">
   <div class="fr">
+    <span class="fl">Período</span>
+    <select id="ga" onchange="cargarDashboard()"><option>2024</option><option>2025</option><option selected>2026</option></select>
+    <select id="gm" onchange="cargarDashboard()">
+      <option value="01">Ene</option><option value="02">Feb</option><option value="03">Mar</option>
+      <option value="04">Abr</option><option value="05">May</option><option value="06" selected>Jun</option>
+      <option value="07">Jul</option><option value="08">Ago</option><option value="09">Sep</option>
+      <option value="10">Oct</option><option value="11">Nov</option><option value="12">Dic</option>
+    </select>
+    <span class="fl">Agrupar</span>
+    <select id="gagrup" onchange="cargarDashboard()">
+      <option value="mes" selected>Mes</option>
+      <option value="semana">Semana</option>
+      <option value="anio">Año</option>
+    </select>
+  </div>
+</div>
+
+<div id="dash-ventas">
+<div id="filters-ventas" class="filter-bar">
+  <div class="fr">
+    <span class="fl">Audiencia</span>
+    <div class="bg">
+      <button type="button" class="mb on" id="btn-socios" onclick="setAudience('socios',this)">Socios</button>
+      <button type="button" class="mb" id="btn-operativo" onclick="setAudience('operativo',this)">Operativo</button>
+    </div>
     <span class="fl">Modo</span>
     <div class="bg">
       <button class="mb on" onclick="setMode('r',this)">Vista rápida</button>
       <button class="mb" onclick="setMode('p',this)">Rango personalizado</button>
     </div>
+    <span id="wrap-pv">
     <span class="fl">Punto de venta</span>
-    <select id="sa" onchange="cargar()">
-      <option value="g">Global</option>
-      <option value="BARRA">Barra</option>
-      <option value="COCINA">Cocina</option>
-      <option value="OTRO">Otro</option>
-    </select>
+    <div class="filter-panel" style="max-width:320px">
+      <div class="filter-panel-title">Seleccionar puntos de venta</div>
+      <div class="chk-grid" id="pv-panel"></div>
+    </div>
+    </span>
+    <span id="filtros-operativo" class="hid">
     <span class="fl">Plato</span>
     <select id="sp" onchange="cargar()"><option value="">Todos</option></select>
     <span class="fl">Orden</span>
-    <select id="so" onchange="drawT();drawChart()">
+    <select id="so" onchange="onOrdenChange()">
       <option value="desc">Mayor→menor</option>
       <option value="asc">Menor→mayor</option>
     </select>
+    </span>
   </div>
 
-  <div class="fr">
+  <div class="fr hid" id="fr-tabla">
     <span class="fl">Tabla</span>
     <div class="bg">
       <button class="mb on" onclick="setView('tree',this)">Jerárquica</button>
@@ -108,8 +172,24 @@ tr:hover td{background:#f5f4f0}
       <button class="mb" onclick="setAg('semana',this)">Semana</button>
       <button class="mb" onclick="setAg('dia',this)">Día</button>
     </div>
-    <select id="ra" onchange="cargar()"><option>2024</option><option>2025</option><option selected>2026</option></select>
-    <select id="rm" onchange="cargar()">
+    <select id="ra" onchange="onYearChange();cargar()"><option>2024</option><option>2025</option><option selected>2026</option></select>
+    <div id="panel-periodo-mes" class="filter-panel">
+      <div class="filter-panel-title">Meses a incluir</div>
+      <div class="chk-grid" id="chk-meses"></div>
+    </div>
+    <div id="panel-periodo-semana" class="filter-panel hid">
+      <div class="filter-panel-title">Semanas a incluir</div>
+      <div class="chk-grid" id="chk-semanas"></div>
+    </div>
+    <div id="panel-periodo-dia" class="filter-panel hid">
+      <div class="filter-panel-title">Días a incluir</div>
+      <div class="chk-grid" id="chk-dias"></div>
+    </div>
+    <div id="panel-dias-sem" class="filter-panel hid">
+      <div class="filter-panel-title">Días de la semana</div>
+      <div class="chk-grid" id="chk-dias-sem"></div>
+    </div>
+    <select id="rm" class="hid" onchange="cargar()">
       <option value="01">Ene</option><option value="02">Feb</option><option value="03">Mar</option>
       <option value="04">Abr</option><option value="05">May</option><option value="06" selected>Jun</option>
       <option value="07">Jul</option><option value="08">Ago</option><option value="09">Sep</option>
@@ -161,6 +241,36 @@ tr:hover td{background:#f5f4f0}
   </div>
 </div>
 
+<div id="panel-socios" class="panel-socios">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+    <div class="st" id="socios-title" style="margin:0">Resumen para socios</div>
+    <button type="button" class="btn-export" onclick="exportSociosCsv()">Exportar CSV</button>
+  </div>
+  <div class="metrics" id="socios-metrics"><div class="loading">Cargando...</div></div>
+  <div class="socios-grid">
+    <div class="sec">
+      <div class="st">Mix Barra / Cocina</div>
+      <div id="socios-mix"></div>
+    </div>
+    <div class="sec">
+      <div class="st">Ventas por día de semana</div>
+      <div class="cw" style="height:180px"><canvas id="cv-dow"></canvas></div>
+    </div>
+  </div>
+  <div class="socios-grid">
+    <div class="sec">
+      <div class="st">Top categorías</div>
+      <div style="overflow-x:auto"><table><thead><tr><th>Categoría</th><th class="r">Ventas $</th><th class="r">%</th></tr></thead><tbody id="socios-cats"></tbody></table></div>
+    </div>
+    <div class="sec">
+      <div class="st">Top platos / bebidas</div>
+      <div style="overflow-x:auto"><table><thead><tr><th>Producto</th><th class="r">Uds</th><th class="r">Ventas $</th></tr></thead><tbody id="socios-platos"></tbody></table></div>
+    </div>
+  </div>
+  <div class="sec" id="socios-calidad"></div>
+</div>
+
+<div id="panel-operativo" class="panel-operativo hid">
 <div class="metrics" id="metrics"><div class="loading">Cargando...</div></div>
 
 <div class="sec">
@@ -183,18 +293,610 @@ tr:hover td{background:#f5f4f0}
     </tr></thead>
     <tbody id="tb"><tr><td colspan="5" class="loading">Cargando...</td></tr></tbody></table>
   </div>
+  </div>
+</div>
+</div>
+
+<div id="dash-compras" class="dash-panel hid">
+  <div class="filter-bar">
+    <div class="fr">
+      <span class="fl">Año</span>
+      <select id="cmp-anio" onchange="initComprasMeses();cargarCompras()"><option>2025</option><option selected>2026</option></select>
+      <span class="fl">Área inventario</span>
+      <div class="bg">
+        <button type="button" class="mb on" onclick="setCmpArea('',this)">Todas</button>
+        <button type="button" class="mb" onclick="setCmpArea('COCINA',this)">Cocina</button>
+        <button type="button" class="mb" onclick="setCmpArea('BARRA',this)">Barra</button>
+      </div>
+      <span class="fl">Agrupar</span>
+      <select id="cmp-agrup" onchange="cargarCompras()"><option value="mes" selected>Mes</option><option value="semana">Semana</option><option value="anio">Año</option></select>
+    </div>
+    <div class="filter-panel">
+      <div class="filter-panel-title">Meses a incluir (o todo el año si están todos marcados)</div>
+      <div class="chk-grid" id="cmp-meses"></div>
+    </div>
+  </div>
+  <div class="metrics" id="compras-metrics"><div class="loading">Cargando...</div></div>
+  <div class="socios-grid">
+    <div class="sec"><div class="st">Histórico de compras</div><div class="cw"><canvas id="cv-compras"></canvas></div></div>
+    <div class="sec"><div class="st">Participación por proveedor</div><div class="cw-pie"><canvas id="cv-compras-pie"></canvas></div></div>
+  </div>
+  <div class="sec"><div class="st">Compras por proveedor (inventario)</div>
+    <table><thead><tr><th>Proveedor</th><th class="r">Facturas</th><th class="r">Total $</th><th class="r">%</th></tr></thead><tbody id="compras-tb"></tbody></table>
+  </div>
+</div>
+
+<div id="dash-rentabilidad" class="dash-panel hid">
+  <div id="rent-panel-socios" class="panel-socios">
+    <div class="metrics" id="rent-socios-metrics"><div class="loading">Cargando...</div></div>
+    <div class="socios-grid">
+      <div class="sec"><div class="st">Margen por punto de venta</div><div class="cw-pie"><canvas id="cv-rent-pv"></canvas></div></div>
+      <div class="sec"><div class="st">Evolución del margen</div><div class="cw"><canvas id="cv-rent-socios"></canvas></div></div>
+    </div>
+  </div>
+  <div id="rent-panel-operativo" class="panel-operativo hid">
+    <div class="metrics" id="rent-metrics"><div class="loading">Cargando...</div></div>
+    <div class="sec"><div class="st" id="rent-ct">Margen bruto en el tiempo</div>
+      <div class="cw"><canvas id="cv-rent"></canvas></div>
+    </div>
+    <div class="sec"><div class="st">Rentabilidad por plato</div>
+      <table><thead><tr><th>Plato</th><th class="r">Ventas $</th><th class="r">Margen %</th><th class="r">Margen $</th></tr></thead><tbody id="rent-tb"></tbody></table>
+    </div>
+  </div>
+</div>
+
+<div id="dash-inventario" class="dash-panel hid">
+  <div class="filter-bar">
+    <div class="fr">
+      <span class="fl">Responsabilidad</span>
+      <div class="bg">
+        <button type="button" class="mb on" onclick="setInvResp('',this)">Todas</button>
+        <button type="button" class="mb" onclick="setInvResp('Cocina',this)">Cocina</button>
+        <button type="button" class="mb" onclick="setInvResp('Barra',this)">Barra</button>
+      </div>
+      <span class="fl">Bodega</span>
+      <select id="inv-bodega" onchange="cargarInventario()">
+        <option value="">Todas</option>
+        <option value="BOD-001">Cocina</option>
+        <option value="BOD-002">Barra</option>
+        <option value="BOD-003">Consignación</option>
+        <option value="BOD-005">Bodega externa</option>
+      </select>
+      <span class="fl">Consolidar período</span>
+      <select id="inv-dias" onchange="cargarInventario()">
+        <option value="1">Hoy</option>
+        <option value="7">7 días</option>
+        <option value="30" selected>30 días</option>
+        <option value="90">90 días</option>
+      </select>
+    </div>
+  </div>
+  <div class="metrics" id="inv-metrics"><div class="loading">Cargando...</div></div>
+  <div class="sec"><div class="st">Inventario — árbol desplegable</div><div id="inv-tree"></div></div>
+</div>
+
+<div id="dash-roturas" class="dash-panel hid">
+  <div class="metrics" id="rot-metrics"><div class="loading">Cargando...</div></div>
+  <div class="sec"><div class="st">Top MPs por rotura (ajustes negativos)</div>
+    <table><thead><tr><th>MP</th><th class="r">Cant.</th><th class="r">Valor $</th></tr></thead><tbody id="rot-tb"></tbody></table>
+  </div>
+</div>
+
+<div id="dash-confianza" class="dash-panel hid">
+  <div class="metrics" id="conf-metrics"><div class="loading">Cargando...</div></div>
+  <div class="sec"><div class="st">Confianza por bodega</div>
+    <table><thead><tr><th>Bodega</th><th class="r">Score</th><th class="r">Días últ. conteo</th><th class="r">Precisión Δ</th></tr></thead><tbody id="conf-tb"></tbody></table>
+  </div>
 </div>
 </div>
 
 <script>
-const TOKEN = '__TOKEN__';
+/* Filtros compartidos: paneles checkbox, períodos, gráficos */
+(function (w) {
+  const MESES = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+  const DIAS_SEM = [
+    { v: 1, n: 'Lun' }, { v: 2, n: 'Mar' }, { v: 3, n: 'Mié' },
+    { v: 4, n: 'Jue' }, { v: 5, n: 'Vie' }, { v: 6, n: 'Sáb' }, { v: 7, n: 'Dom' },
+  ];
+
+  w.monthEnd = function (year, monthStr) {
+    const y = parseInt(year, 10);
+    const m = parseInt(monthStr, 10);
+    return String(new Date(y, m, 0).getDate()).padStart(2, '0');
+  };
+
+  w.buildCheckboxPanel = function (container, items, { allByDefault = true, onChange } = {}) {
+    if (!container) return;
+    container.innerHTML = items.map(it => {
+      const id = container.id + '-cb-' + String(it.v).replace(/[^a-z0-9]/gi, '_');
+      const chk = allByDefault ? ' checked' : '';
+      return `<label class="chk-item" for="${id}"><input type="checkbox" id="${id}" value="${it.v}"${chk}> ${it.n}</label>`;
+    }).join('');
+    container.querySelectorAll('input').forEach(inp => {
+      inp.addEventListener('change', () => { if (onChange) onChange(); });
+    });
+  };
+
+  w.getCheckedValues = function (container) {
+    if (!container) return [];
+    return [...container.querySelectorAll('input:checked')].map(i => i.value);
+  };
+
+  w.initMesesPanel = function (year, containerId, onChange) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    const items = [];
+    for (let m = 1; m <= 12; m++) {
+      const mm = String(m).padStart(2, '0');
+      items.push({ v: `${year}-${mm}`, n: MESES[m] });
+    }
+    w.buildCheckboxPanel(c, items, { allByDefault: true, onChange });
+  };
+
+  w.initDiasSemPanel = function (containerId, onChange) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    w.buildCheckboxPanel(c, DIAS_SEM.map(d => ({ v: String(d.v), n: d.n })), { allByDefault: true, onChange });
+  };
+
+  w.initPvPanel = function (containerId, onChange) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    const items = [
+      { v: 'BARRA', n: 'Barra' }, { v: 'COCINA', n: 'Cocina' }, { v: 'OTRO', n: 'Otro' },
+    ];
+    w.buildCheckboxPanel(c, items, { allByDefault: true, onChange });
+  };
+
+  w.syncSemanasFromData = function (labels, containerId, onChange) {
+    const c = document.getElementById(containerId);
+    if (!c || !labels) return;
+    const items = labels.map(l => ({ v: l, n: l.replace('-W', ' S') }));
+    w.buildCheckboxPanel(c, items, { allByDefault: true, onChange });
+  };
+
+  w.syncDiasFromData = function (labels, containerId, onChange) {
+    const c = document.getElementById(containerId);
+    if (!c || !labels) return;
+    const items = labels.map(l => ({ v: l, n: l.slice(8) + '/' + l.slice(5, 7) }));
+    w.buildCheckboxPanel(c, items, { allByDefault: true, onChange });
+  };
+
+  w.pvIncludesCheck = function (containerId, key) {
+    const sel = w.getCheckedValues(document.getElementById(containerId));
+    return sel.length === 0 || sel.includes(key);
+  };
+
+  w.filterLabelsData = function (labels, datasets, selectedKeys) {
+    if (!labels || !selectedKeys || selectedKeys.length === 0) return { labels, datasets };
+    const idx = labels.map((l, i) => selectedKeys.includes(l) ? i : -1).filter(i => i >= 0);
+    const nl = idx.map(i => labels[i]);
+    const nd = datasets.map(ds => ({ ...ds, data: idx.map(i => ds.data[i]) }));
+    return { labels: nl, datasets: nd };
+  };
+
+  w.rangeFromMeses = function (checked, year) {
+    if (!checked.length) {
+      return { desde: `${year}-01-01`, hasta: `${year}-12-31` };
+    }
+    const sorted = [...checked].sort();
+    const first = sorted[0];
+    const last = sorted[sorted.length - 1];
+    const lm = last.split('-')[1];
+    const ly = last.split('-')[0];
+    return { desde: `${first}-01`, hasta: `${ly}-${lm}-${w.monthEnd(ly, lm)}` };
+  };
+
+  w.drawPieChart = function (canvasId, chartRef, labels, values, colors) {
+    const el = document.getElementById(canvasId);
+    if (!el) return chartRef;
+    if (chartRef && chartRef.destroy) chartRef.destroy();
+    const pal = colors || ['#378ADD', '#1D9E75', '#BA7517', '#85B7EB', '#5DCAA5', '#888780', '#a32d2d', '#0c447c'];
+    return new Chart(el, {
+      type: 'pie',
+      data: {
+        labels,
+        datasets: [{ data: values, backgroundColor: labels.map((_, i) => pal[i % pal.length]) }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } },
+          tooltip: { callbacks: { label: ctx => `${ctx.label}: $${ctx.parsed.toLocaleString('es-EC')}` } },
+        },
+      },
+    });
+  };
+
+  w.drawBarLineChart = function (canvasId, chartRef, labels, barDatasets, lineData, lineLabel) {
+    const el = document.getElementById(canvasId);
+    if (!el) return chartRef;
+    if (chartRef && chartRef.destroy) chartRef.destroy();
+    const datasets = [...barDatasets];
+    if (lineData) {
+      datasets.push({
+        type: 'line', label: lineLabel || 'Total', data: lineData,
+        borderColor: '#BA7517', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 3, tension: 0.3, order: 1,
+      });
+    }
+    return new Chart(el, {
+      data: { labels, datasets },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } } },
+        scales: {
+          x: { stacked: !!barDatasets[0]?.stack, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+          y: { stacked: !!barDatasets[0]?.stack, ticks: { callback: v => '$' + Number(v).toLocaleString() } },
+        },
+      },
+    });
+  };
+
+  w.toggleCollapse = function (headEl) {
+    const body = headEl.nextElementSibling;
+    if (body) {
+      body.classList.toggle('open');
+      headEl.classList.toggle('open');
+    }
+  };
+
+  w.MESES = MESES;
+})(window);
+
+</script>
+<script>
+/* Portal multi-dashboard Tatami — complemento de dashboard.html */
+(function () {
+  const DASH_IDS = ['ventas', 'compras', 'rentabilidad', 'inventario', 'roturas', 'confianza'];
+  window.currentDash = window.currentDash || 'ventas';
+  window.invResp = window.invResp || '';
+  window.cmpArea = window.cmpArea || '';
+
+  let chCompras = null;
+  let chComprasPie = null;
+  let chRent = null;
+  let chRentPv = null;
+  let chRentSocios = null;
+
+  window.setDashboard = function (id) {
+    if (!DASH_IDS.includes(id)) return;
+    window.currentDash = id;
+    document.querySelectorAll('#portal-nav [data-dash]').forEach(el => {
+      el.classList.toggle('on', el.dataset.dash === id);
+    });
+    const showVentasFilters = id === 'ventas' || id === 'rentabilidad';
+    document.getElementById('dash-ventas').classList.toggle('hid', id !== 'ventas');
+    document.getElementById('filters-ventas').classList.toggle('hid', !showVentasFilters);
+    ['dash-compras', 'dash-rentabilidad', 'dash-inventario', 'dash-roturas', 'dash-confianza'].forEach(did => {
+      const el = document.getElementById(did);
+      if (el) el.classList.toggle('hid', id !== did.replace('dash-', ''));
+    });
+    document.getElementById('filters-global').classList.toggle('hid', showVentasFilters || id === 'compras' || id === 'inventario');
+    if (id === 'rentabilidad') {
+      const a = window.audience || 'socios';
+      document.getElementById('rent-panel-socios').classList.toggle('hid', a !== 'socios');
+      document.getElementById('rent-panel-operativo').classList.toggle('hid', a !== 'operativo');
+    }
+    if (typeof window.cargarDashboard === 'function') window.cargarDashboard();
+  };
+
+  window.getGlobalRange = function () {
+    const ga = document.getElementById('ga');
+    const gm = document.getElementById('gm');
+    if (ga && gm) {
+      const anio = ga.value;
+      const mes = gm.value;
+      const finMes = monthEnd(anio, mes);
+      const agrup = (document.getElementById('gagrup') || {}).value || 'mes';
+      if (agrup === 'anio') return { desde: anio + '-01-01', hasta: anio + '-12-31' };
+      return { desde: anio + '-' + mes + '-01', hasta: anio + '-' + mes + '-' + finMes };
+    }
+    if (typeof window.getSociosRange === 'function') return window.getSociosRange();
+    return { desde: '2026-01-01', hasta: '2026-12-31' };
+  };
+
+  window.cargarDashboard = async function () {
+    const err = document.getElementById('error-msg');
+    err.classList.add('hid');
+    try {
+      if (window.currentDash === 'ventas') {
+        if (typeof window.cargar === 'function') await window.cargar();
+        return;
+      }
+      if (window.currentDash === 'compras') return window.cargarCompras();
+      if (window.currentDash === 'rentabilidad') return window.cargarRentabilidadFull();
+      if (window.currentDash === 'inventario') return window.cargarInventario();
+      if (window.currentDash === 'roturas') return window.cargarRoturas();
+      if (window.currentDash === 'confianza') return window.cargarConfianza();
+    } catch (e) {
+      err.textContent = 'Error: ' + e.message;
+      err.classList.remove('hid');
+    }
+  };
+
+  function deltaHtml(d) {
+    if (d == null) return '<span class="delta-flat">—</span>';
+    const cls = d > 0 ? 'delta-up' : d < 0 ? 'delta-down' : 'delta-flat';
+    return `<span class="${cls}">${d > 0 ? '+' : ''}${d}%</span>`;
+  }
+
+  function card(label, value, sub) {
+    return `<div class="mc"><div class="ml">${label}</div><div class="mv">${value}</div><div class="ms">${sub}</div></div>`;
+  }
+
+  /* ——— Compras ——— */
+  window.initComprasMeses = function () {
+    const y = document.getElementById('cmp-anio').value;
+    initMesesPanel(y, 'cmp-meses', cargarCompras);
+  };
+
+  window.getComprasRange = function () {
+    const y = document.getElementById('cmp-anio').value;
+    const meses = getCheckedValues(document.getElementById('cmp-meses'));
+    return rangeFromMeses(meses.length ? meses : [`${y}-01`, `${y}-12`], y);
+  };
+
+  window.setCmpArea = function (area, btn) {
+    window.cmpArea = area;
+    btn.parentElement.querySelectorAll('.mb').forEach(x => x.classList.remove('on'));
+    btn.classList.add('on');
+    cargarCompras();
+  };
+
+  window.cargarCompras = async function () {
+    document.getElementById('compras-metrics').innerHTML = '<div class="loading">Cargando...</div>';
+    const r = getComprasRange();
+    const agrup = document.getElementById('cmp-agrup').value;
+    const q = new URLSearchParams({ token: window.TOKEN, ...r, agrup });
+    if (window.cmpArea) q.set('area', window.cmpArea);
+    const res = await fetch(`${window.BASE}/api/dashboard/compras?${q}`);
+    if (!res.ok) throw new Error((await res.json()).detail || res.status);
+    const d = await res.json();
+    const a = d.actual;
+    const cmp = d.comparativo_anterior.metricas;
+    const areaLbl = window.cmpArea === 'COCINA' ? 'Cocina' : window.cmpArea === 'BARRA' ? 'Barra' : 'Todas';
+    document.getElementById('compras-metrics').innerHTML = [
+      card('Compras inventario', '$' + a.vta.toLocaleString('es-EC'), `${areaLbl} · vs ant. ${deltaHtml(cmp.vta.delta_pct)}`),
+      card('Cocina', '$' + (a.por_area.COCINA || 0).toLocaleString('es-EC'), 'Bodegas cocina + externa'),
+      card('Barra', '$' + (a.por_area.BARRA || 0).toLocaleString('es-EC'), 'Barra + consignación'),
+      card('Proveedores', String(a.proveedores.length), `Acum. año $${d.acumulado_anio.vta.toLocaleString('es-EC')}`),
+    ].join('');
+
+    const labels = a.labels || [];
+    const serie = a.serie || [];
+    chCompras = drawBarLineChart('cv-compras', chCompras, labels, [
+      { type: 'bar', label: 'Compras $', data: serie, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5 },
+    ], serie, 'Total');
+
+    const provs = a.top_proveedores || [];
+    chComprasPie = drawPieChart(
+      'cv-compras-pie', chComprasPie,
+      provs.map(p => p.nombre),
+      provs.map(p => p.vta),
+    );
+
+    let tb = '';
+    (a.proveedores || []).forEach(p => {
+      tb += `<tr><td>${esc(p.nombre)}</td><td class="r">${p.facturas}</td><td class="r">$${p.vta.toLocaleString('es-EC')}</td><td class="r">${p.pct}%</td></tr>`;
+    });
+    document.getElementById('compras-tb').innerHTML = tb || '<tr><td colspan="4">Sin datos</td></tr>';
+    document.getElementById('last-update').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  /* ——— Rentabilidad (mismos filtros que ventas) ——— */
+  window.cargarRentabilidadFull = async function () {
+    const err = document.getElementById('error-msg');
+    err.classList.add('hid');
+    const r = typeof window.getRanges === 'function' ? window.getRanges() : getGlobalRange();
+    window._periodFilter = r._filterLabels || null;
+    delete r._filterLabels;
+    const q = new URLSearchParams({ token: window.TOKEN, ...r, agrup: r.agrup || 'mes' });
+    const target = window.audience === 'socios' ? 'rent-socios-metrics' : 'rent-metrics';
+    document.getElementById(target).innerHTML = '<div class="loading">Cargando...</div>';
+    try {
+      const res = await fetch(`${window.BASE}/api/dashboard/rentabilidad?${q}`);
+      if (!res.ok) throw new Error((await res.json()).detail || res.status);
+      window._rentData = await res.json();
+      renderRentabilidad();
+      document.getElementById('last-update').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
+    } catch (e) {
+      err.textContent = 'Error rentabilidad: ' + e.message;
+      err.classList.remove('hid');
+    }
+  };
+
+  window.renderRentabilidad = function () {
+    const d = window._rentData;
+    if (!d) return;
+    const s = d.resumen;
+    const pvInc = typeof window.pvIncludes === 'function' ? window.pvIncludes : () => true;
+
+    if (window.audience === 'socios') {
+      document.getElementById('rent-socios-metrics').innerHTML = [
+        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), d.nota_costo || ''),
+        card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
+        card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
+        card('Costo MP período', '$' + s.costo_real.toLocaleString('es-EC'), 'Promedio compras ENTRADA'),
+      ].join('');
+
+      const mpv = d.margen_pv || {};
+      const dmpv = d.desglose_pv || {};
+      const pvLabels = [];
+      const pvVals = [];
+      const colors = { BARRA: '#378ADD', COCINA: '#1D9E75', OTRO: '#888780' };
+      ['BARRA', 'COCINA', 'OTRO'].forEach(k => {
+        if (!pvInc(k)) return;
+        pvLabels.push(k === 'BARRA' ? 'Barra' : k === 'COCINA' ? 'Cocina' : 'Otro');
+        pvVals.push(mpv[k] || 0);
+      });
+      chRentPv = drawPieChart('cv-rent-pv', chRentPv, pvLabels, pvVals, Object.values(colors));
+
+      let labels = d.labels || [];
+      let margen = d.margen || [];
+      const pf = window._periodFilter;
+      if (pf && pf.length) {
+        const idx = labels.map((l, i) => pf.includes(l) ? i : -1).filter(i => i >= 0);
+        labels = idx.map(i => labels[i]);
+        margen = idx.map(i => margen[i]);
+      }
+      chRentSocios = drawBarLineChart('cv-rent-socios', chRentSocios, labels, [
+        { type: 'bar', label: 'Margen $', data: margen, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5 },
+      ], margen, 'Margen');
+      return;
+    }
+
+    document.getElementById('rent-metrics').innerHTML = [
+      card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
+      card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
+      card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
+      card('Costo real', '$' + s.costo_real.toLocaleString('es-EC'), d.nota_costo || ''),
+    ].join('');
+
+    let labels = d.labels || [];
+    let barra = d.barra || [];
+    let cocina = d.cocina || [];
+    let otro = d.otro || [];
+    let margen = d.margen || [];
+    const pf = window._periodFilter;
+    if (pf && pf.length) {
+      const idx = labels.map((l, i) => pf.includes(l) ? i : -1).filter(i => i >= 0);
+      labels = idx.map(i => labels[i]);
+      barra = idx.map(i => barra[i]);
+      cocina = idx.map(i => cocina[i]);
+      otro = idx.map(i => otro[i]);
+      margen = idx.map(i => margen[i]);
+    }
+
+    const datasets = [];
+    if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: barra, backgroundColor: '#85B7EB', stack: 'm' });
+    if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: cocina, backgroundColor: '#5DCAA5', stack: 'm' });
+    if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: otro, backgroundColor: '#d3d1c7', stack: 'm' });
+    chRent = drawBarLineChart('cv-rent', chRent, labels, datasets, margen, 'Margen total');
+
+    let tb = '';
+    (d.platos || []).filter(p => pvInc(p.pv)).slice(0, 40).forEach(p => {
+      tb += `<tr><td>${esc(p.nombre)}<div style="font-size:11px;color:#888780">${esc(p.cat)} · ${p.pv}</div></td><td class="r">$${p.vta.toLocaleString('es-EC')}</td><td class="r">${p.margen_real_pct}%</td><td class="r">$${p.margen_real.toLocaleString('es-EC')}</td></tr>`;
+    });
+    document.getElementById('rent-tb').innerHTML = tb || '<tr><td colspan="4">Sin datos</td></tr>';
+    document.getElementById('rent-ct').textContent = 'Margen bruto · ' + (typeof getTitle === 'function' ? getTitle() : '');
+  };
+
+  window.cargarRentabilidad = window.cargarRentabilidadFull;
+
+  /* ——— Inventario ——— */
+  window.setInvResp = function (resp, btn) {
+    window.invResp = resp;
+    btn.parentElement.querySelectorAll('.mb').forEach(x => x.classList.remove('on'));
+    btn.classList.add('on');
+    const sel = document.getElementById('inv-bodega');
+    if (sel) {
+      if (resp === 'Cocina') sel.value = '';
+      else if (resp === 'Barra') sel.value = '';
+    }
+    cargarInventario();
+  };
+
+  window.cargarInventario = async function () {
+    document.getElementById('inv-metrics').innerHTML = '<div class="loading">Cargando...</div>';
+    document.getElementById('inv-tree').innerHTML = '<div class="loading">Cargando...</div>';
+    const q = new URLSearchParams({ token: window.TOKEN });
+    const resp = window.invResp;
+    const bod = document.getElementById('inv-bodega').value;
+    const dias = document.getElementById('inv-dias').value;
+    q.set('dias_periodo', dias);
+    if (resp) q.set('responsabilidad', resp);
+    if (bod) q.set('cod_bodega', bod);
+    const res = await fetch(`${window.BASE}/api/dashboard/inventario/vivo?${q}`);
+    if (!res.ok) throw new Error((await res.json()).detail || res.status);
+    const d = await res.json();
+    const cons = d.consolidado || {};
+    const resumen = d.resumen || {};
+    document.getElementById('inv-metrics').innerHTML = [
+      card('Items', String(d.total_items), `${dias} días consolidados`),
+      card('Costo oportunidad', '$' + (cons.costo_oportunidad || 0).toLocaleString('es-EC'), 'Stock sobre PAR × costo'),
+      card('Pérdida venta est.', '$' + (cons.perdida_venta || 0).toLocaleString('es-EC'), 'Quiebre / bajo PAR × consumo'),
+      card('Crítico + quiebre', String((resumen.CRITICO || 0) + (resumen.QUIEBRE || 0) + (resumen.NEGATIVO || 0)), `Bajo PAR: ${resumen.BAJO_PAR || 0}`),
+    ].join('');
+    document.getElementById('inv-tree').innerHTML = renderInvTree(d.arbol || []);
+    document.getElementById('last-update').textContent = 'En vivo · ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
+  };
+
+  function renderInvTree(arbol) {
+    if (!arbol.length) return '<div style="padding:12px;color:#888780">Sin items para los filtros seleccionados</div>';
+    let html = '';
+    arbol.forEach(resp => {
+      html += `<div class="collapse-head" onclick="toggleCollapse(this)">${esc(resp.nombre)}</div><div class="collapse-body">`;
+      (resp.bodegas || []).forEach(bod => {
+        html += `<div class="collapse-head" onclick="toggleCollapse(this)" style="margin-left:8px">${esc(bod.nombre)}</div><div class="collapse-body">`;
+        (bod.categorias || []).forEach(cat => {
+          html += `<div class="collapse-head" onclick="toggleCollapse(this)" style="margin-left:16px">${esc(cat.nombre)}</div><div class="collapse-body"><table><thead><tr><th>MP</th><th class="r">Stock</th><th class="r">PAR</th><th class="r">Estado</th><th class="r">Oport. $</th><th class="r">Pérdida $</th></tr></thead><tbody>`;
+          (cat.items || []).forEach(it => {
+            html += `<tr><td>${esc(it.nombre_mp)}</td><td class="r">${it.stock}</td><td class="r">${it.par_level}</td><td class="r"><span class="badge">${it.estado}</span></td><td class="r">$${(it.oportunidad_periodo || 0).toLocaleString('es-EC')}</td><td class="r">$${(it.perdida_periodo || 0).toLocaleString('es-EC')}</td></tr>`;
+          });
+          html += '</tbody></table></div>';
+        });
+        html += '</div>';
+      });
+      html += '</div>';
+    });
+    return html;
+  }
+
+  window.cargarRoturas = async function () {
+    const r = window.getGlobalRange();
+    const q = new URLSearchParams({ token: window.TOKEN, ...r, agrup: 'mes' });
+    const res = await fetch(`${window.BASE}/api/dashboard/roturas?${q}`);
+    if (!res.ok) throw new Error((await res.json()).detail || res.status);
+    const d = await res.json();
+    document.getElementById('rot-metrics').innerHTML = [
+      card('Rotura contable', '$' + d.total_rotura.toLocaleString('es-EC'), d.lineas_ajuste + ' ajustes'),
+      card('Período', d.periodo.desde + ' → ' + d.periodo.hasta, d.nota || ''),
+    ].join('');
+    let tb = '';
+    (d.top_mps || []).forEach(m => {
+      tb += `<tr><td>${esc(m.nombre_mp)}</td><td class="r">${Math.round(m.uds)}</td><td class="r">$${m.vta.toLocaleString('es-EC')}</td></tr>`;
+    });
+    document.getElementById('rot-tb').innerHTML = tb || '<tr><td colspan="3">Sin ajustes negativos</td></tr>';
+  };
+
+  window.cargarConfianza = async function () {
+    const res = await fetch(`${window.BASE}/api/dashboard/confianza?token=${window.TOKEN}`);
+    if (!res.ok) throw new Error((await res.json()).detail || res.status);
+    const d = await res.json();
+    document.getElementById('conf-metrics').innerHTML = [
+      card('Score global', d.score_global + '/100', 'Confianza inventario'),
+    ].join('');
+    let tb = '';
+    Object.values(d.bodegas || {}).forEach(b => {
+      tb += `<tr><td>${esc(b.nombre)}</td><td class="r">${b.score}</td><td class="r">${b.dias_ultimo_conteo != null ? b.dias_ultimo_conteo + ' d' : '—'}</td><td class="r">${b.precision_delta_pct}%</td></tr>`;
+    });
+    document.getElementById('conf-tb').innerHTML = tb || '<tr><td colspan="4">Sin datos</td></tr>';
+  };
+
+  function esc(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+})();
+
+</script>
+<script>
+const _urlToken = new URLSearchParams(window.location.search).get('token');
+const TOKEN = (_urlToken && _urlToken !== '__TOKEN__') ? _urlToken : '__TOKEN__';
+window.TOKEN = TOKEN;
 const BASE = window.location.origin;
+window.BASE = BASE;
 let ch = null;
+let chDow = null;
 let mode = 'r';
 let ag = 'mes';
 let rng = 'mes';
 let view = 'tree';
+let audience = 'socios';
 let _data = null;
+let _socios = null;
+let _rentData = null;
+let _meta = null;
 let _rows = [];
 let _tv = 1;
 
@@ -226,6 +928,146 @@ fillDays('pd-d');
 fillDays('ph-d');
 document.getElementById('ph-d').value = '31';
 
+function setAudience(a, btn) {
+  audience = a;
+  btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  document.getElementById('panel-socios').classList.toggle('hid', a !== 'socios');
+  document.getElementById('panel-operativo').classList.toggle('hid', a !== 'operativo');
+  document.getElementById('fr-tabla').classList.toggle('hid', a === 'socios');
+  const fo = document.getElementById('filtros-operativo');
+  if (fo) fo.classList.toggle('hid', a === 'socios');
+  if (window.currentDash === 'rentabilidad') {
+    document.getElementById('rent-panel-socios').classList.toggle('hid', a !== 'socios');
+    document.getElementById('rent-panel-operativo').classList.toggle('hid', a !== 'operativo');
+  }
+  cargar();
+}
+
+function onOrdenChange() {
+  if (audience === 'operativo') { drawT(); drawChart(); }
+}
+
+function deltaHtml(d) {
+  if (d == null) return '<span class="delta-flat">—</span>';
+  const cls = d > 0 ? 'delta-up' : d < 0 ? 'delta-down' : 'delta-flat';
+  const sign = d > 0 ? '+' : '';
+  return `<span class="${cls}">${sign}${d}%</span>`;
+}
+
+async function loadMeta() {
+  try {
+    const res = await fetch(`${BASE}/api/dashboard/meta?token=${TOKEN}`);
+    if (!res.ok) return;
+    _meta = await res.json();
+    const el = document.getElementById('meta-banner');
+    const v = _meta.ventas_hasta || '—';
+    const m = _meta.movimientos_hasta || '—';
+    el.textContent = `Datos de ventas hasta ${v} · Movimientos inventario hasta ${m}`;
+    el.classList.remove('hid');
+  } catch (_) {}
+}
+
+function renderSocios() {
+  try {
+  const s = _socios;
+  if (!s || !s.actual) return;
+  const a = s.actual;
+  const cmp = s.comparativo_anterior.metricas;
+  const cya = s.comparativo_anio.metricas;
+  const ytd = s.acumulado_anio;
+  document.getElementById('socios-title').textContent =
+    `Resumen ${s.periodo.desde} → ${s.periodo.hasta}`;
+
+  document.getElementById('socios-metrics').innerHTML = [
+    cardSocios('Ventas netas', '$' + a.vta.toLocaleString('es-EC', {minimumFractionDigits:2}), `vs ant. ${deltaHtml(cmp.vta.delta_pct)} · vs año ${deltaHtml(cya.vta.delta_pct)}`),
+    cardSocios('Unidades', Math.round(a.uds).toLocaleString(), `vs ant. ${deltaHtml(cmp.uds.delta_pct)}`),
+    cardSocios('Ticket promedio', '$' + a.ticket.toFixed(2), `vs ant. ${deltaHtml(cmp.ticket.delta_pct)}`),
+    cardSocios('Fin de semana', a.finde_pct + '%', 'Vie + Sáb + Dom del período'),
+    cardSocios('Acumulado ' + s.periodo.hasta.slice(0,4), '$' + ytd.vta.toLocaleString('es-EC', {maximumFractionDigits:0}), `${Math.round(ytd.uds).toLocaleString()} uds · ticket $${ytd.ticket.toFixed(2)}`),
+    cardSocios('Descuentos', '$' + a.descuentos.toLocaleString('es-EC', {maximumFractionDigits:0}), `${a.pct_otro}% líneas sin catálogo (OTRO)`),
+  ].join('');
+
+  const mix = a.mix_pv;
+  document.getElementById('socios-mix').innerHTML = ['BARRA','COCINA','OTRO'].map(k => {
+    const m = mix[k];
+    const colors = {BARRA:'#378ADD',COCINA:'#1D9E75',OTRO:'#888780'};
+    const labels = {BARRA:'Barra',COCINA:'Cocina',OTRO:'Otro'};
+    return `<div style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${labels[k]}</span><span>$${m.vta.toLocaleString('es-EC')} · ${m.pct}%</span></div><div class="bb" style="width:100%;height:8px;margin-top:4px"><div class="bf" style="width:${Math.min(m.pct,100)}%;background:${colors[k]};height:8px"></div></div></div>`;
+  }).join('');
+
+  let catHtml = '';
+  (a.top_categorias || []).forEach(c => {
+    catHtml += `<tr><td>${c.nombre}</td><td class="r">$${c.vta.toLocaleString('es-EC')}</td><td class="r">${c.pct}%</td></tr>`;
+  });
+  document.getElementById('socios-cats').innerHTML = catHtml || '<tr><td colspan="3">Sin datos</td></tr>';
+
+  let platHtml = '';
+  (a.top_platos || []).forEach(p => {
+    platHtml += `<tr><td>${p.nombre}<div style="font-size:11px;color:#888780">${p.cat} · ${p.pv}</div></td><td class="r">${Math.round(p.uds).toLocaleString()}</td><td class="r">$${p.vta.toLocaleString('es-EC')}</td></tr>`;
+  });
+  document.getElementById('socios-platos').innerHTML = platHtml || '<tr><td colspan="3">Sin datos</td></tr>';
+
+  document.getElementById('socios-calidad').innerHTML =
+    `<div class="st">Calidad del dato</div>
+     <div style="font-size:13px;line-height:1.8">
+       Líneas analizadas: <strong>${a.lineas.toLocaleString()}</strong> ·
+       Sin catálogo (OTRO): <strong>${a.lineas_otro}</strong> (${a.pct_otro}%) ·
+       Descuentos aplicados: <strong>$${a.descuentos.toLocaleString('es-EC')}</strong>
+     </div>`;
+
+  drawDowChart(a.por_dia_semana || []);
+  } catch (e) {
+    console.error('renderSocios', e);
+    document.getElementById('error-msg').textContent = 'Error al renderizar Socios: ' + e.message;
+    document.getElementById('error-msg').classList.remove('hid');
+  }
+}
+
+function cardSocios(label, value, sub) {
+  return `<div class="mc"><div class="ml">${label}</div><div class="mv">${value}</div><div class="ms">${sub}</div></div>`;
+}
+
+function drawDowChart(rows) {
+  const labels = rows.map(r => r.nombre);
+  const data = rows.map(r => r.vta);
+  if (chDow) chDow.destroy();
+  chDow = new Chart(document.getElementById('cv-dow'), {
+    type: 'bar',
+    data: { labels, datasets: [{ data, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5 }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '$' + ctx.parsed.y.toLocaleString('es-EC') } } },
+      scales: { y: { ticks: { callback: v => '$' + v.toLocaleString() } } }
+    }
+  });
+}
+
+function exportSociosCsv() {
+  if (!_socios) return;
+  const a = _socios.actual;
+  const lines = [
+    'Dashboard Ventas — Vista Socios',
+    `Periodo,${_socios.periodo.desde},${_socios.periodo.hasta}`,
+    `Ventas netas,${a.vta}`,
+    `Unidades,${a.uds}`,
+    `Ticket,${a.ticket}`,
+    '',
+    'Top categorías,,',
+    'Categoría,Venta $,%',
+    ...(a.top_categorias || []).map(c => `${c.nombre},${c.vta},${c.pct}`),
+    '',
+    'Top platos,,',
+    'Producto,Uds,Venta $',
+    ...(a.top_platos || []).map(p => `"${p.nombre}",${p.uds},${p.vta}`),
+  ];
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const aEl = document.createElement('a');
+  aEl.href = URL.createObjectURL(blob);
+  aEl.download = `tatami_ventas_socios_${_socios.periodo.hasta}.csv`;
+  aEl.click();
+}
+
 function setMode(m, btn) {
   mode = m;
   btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
@@ -238,28 +1080,65 @@ function setAg(a, btn) {
   ag = a;
   btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
   btn.classList.add('on');
-  h('ra', a !== 'anio');
-  h('rm', ['mes', 'semana', 'dia'].includes(a));
-  h('rs', a === 'semana');
-  h('rd', a === 'dia');
+  h('ra', true);
+  h('rm', a === 'semana' || a === 'dia');
+  h('panel-periodo-mes', a === 'mes' || a === 'anio');
+  h('panel-periodo-semana', a === 'semana');
+  h('panel-periodo-dia', a === 'dia');
+  h('panel-dias-sem', a === 'dia');
+  if (a === 'mes' || a === 'anio') onYearChange();
   cargar();
 }
-function setRng(a, btn) {
-  rng = a;
-  btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
-  btn.classList.add('on');
-  cargar();
+
+function onYearChange() {
+  initMesesPanel(document.getElementById('ra').value, 'chk-meses', () => { if (_data) applyPeriodFilter(); else cargar(); });
 }
-function setView(v, btn) {
-  view = v;
-  btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
-  btn.classList.add('on');
-  if (_data) buildRows(_data, document.getElementById('sa').value);
-  drawT();
+
+function onPeriodCheckChange() {
+  if (_data || _rentData) applyPeriodFilter();
+  else cargar();
 }
-function h(id, show) {
-  const e = document.getElementById(id);
-  if (e) e.classList.toggle('hid', !show);
+
+function onPvChange() {
+  if (window.currentDash === 'rentabilidad' && _rentData) { window.renderRentabilidad(); return; }
+  if (_data) render();
+  else cargar();
+}
+
+function pvIncludes(key) {
+  return pvIncludesCheck('pv-panel', key);
+}
+
+function isPvGlobal() {
+  const sel = getCheckedValues(document.getElementById('pv-panel'));
+  return sel.length === 0 || sel.length >= 3;
+}
+
+function getSelectedPeriodRange() {
+  const anio = document.getElementById('ra').value;
+  if (ag === 'mes' || ag === 'anio') {
+    const meses = getCheckedValues(document.getElementById('chk-meses'));
+    return rangeFromMeses(meses.length ? meses : [`${anio}-01`, `${anio}-12`], anio);
+  }
+  if (ag === 'semana') {
+    const sems = getCheckedValues(document.getElementById('chk-semanas'));
+    if (!sems.length && _data) return getRangesLegacy().desde ? getRangesLegacy() : { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'semana' };
+    return { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'semana', _filterLabels: sems };
+  }
+  const dias = getCheckedValues(document.getElementById('chk-dias'));
+  const mes = document.getElementById('rm').value;
+  const finMes = monthEnd(anio, mes);
+  return { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'dia', _filterLabels: dias };
+}
+
+function getRangesLegacy() {
+  const anio = document.getElementById('ra').value;
+  const mes = document.getElementById('rm').value;
+  const finMes = monthEnd(anio, mes);
+  if (ag === 'anio') return { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'anio' };
+  if (ag === 'mes') return rangeFromMeses(getCheckedValues(document.getElementById('chk-meses')), anio);
+  if (ag === 'semana') return { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'semana' };
+  return { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'dia' };
 }
 
 function getRanges() {
@@ -270,25 +1149,54 @@ function getRanges() {
     const hd = document.getElementById('ph-d').value;
     const hm = document.getElementById('ph-m').value;
     const ha = document.getElementById('ph-a').value;
-    const params = {
-      desde: safeDate(da, dm, dd),
-      hasta: safeDate(ha, hm, hd),
-      agrup: rng,
-    };
+    const params = { desde: safeDate(da, dm, dd), hasta: safeDate(ha, hm, hd), agrup: rng };
     const ds = document.getElementById('rd2').value;
     if (ds !== '0') params.dia_semana = ds;
     return params;
   }
-  const anio = document.getElementById('ra').value;
-  const mes = document.getElementById('rm').value;
-  const finMes = monthEnd(anio, mes);
-  if (ag === 'anio') return { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'anio' };
-  if (ag === 'mes') return { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'mes' };
-  if (ag === 'semana') return { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'semana' };
-  const ds = document.getElementById('rd').value;
-  const out = { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'dia' };
-  if (ds !== '0') out.dia_semana = ds;
+  const r = getSelectedPeriodRange();
+  const out = { desde: r.desde, hasta: r.hasta, agrup: r.agrup || ag };
+  if (r._filterLabels) out._filterLabels = r._filterLabels;
   return out;
+}
+
+function applyPeriodFilter() {
+  window._periodFilter = getRanges()._filterLabels || null;
+  if (window.currentDash === 'rentabilidad' && _rentData) { window.renderRentabilidad(); return; }
+  if (_data) { render(); return; }
+  cargar();
+}
+
+function getSociosRange() {
+  if (mode === 'p') {
+    const dd = document.getElementById('pd-d').value;
+    const dm = document.getElementById('pd-m').value;
+    const da = document.getElementById('pd-a').value;
+    const hd = document.getElementById('ph-d').value;
+    const hm = document.getElementById('ph-m').value;
+    const ha = document.getElementById('ph-a').value;
+    return { desde: safeDate(da, dm, dd), hasta: safeDate(ha, hm, hd) };
+  }
+  const r = getSelectedPeriodRange();
+  return { desde: r.desde, hasta: r.hasta };
+}
+
+function setRng(a, btn) {
+  rng = a;
+  btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  cargar();
+}
+function setView(v, btn) {
+  view = v;
+  btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  if (_data) buildRows(_data);
+  drawT();
+}
+function h(id, show) {
+  const e = document.getElementById(id);
+  if (e) e.classList.toggle('hid', !show);
 }
 
 function getTitle() {
@@ -314,19 +1222,50 @@ function getTitle() {
 
 function buildUrl() {
   const p = getRanges();
-  const area = document.getElementById('sa').value;
+  delete p._filterLabels;
   const plato = document.getElementById('sp').value;
   const orden = document.getElementById('so').value;
   const q = new URLSearchParams({ token: TOKEN, orden, ...p });
-  if (area !== 'g') q.set('punto_venta', area);
   if (plato) q.set('plato', plato);
   return `${BASE}/api/dashboard/ventas?${q}`;
 }
 
 async function cargar() {
+  document.getElementById('error-msg').classList.add('hid');
+  if (window.currentDash === 'rentabilidad') {
+    if (typeof window.cargarRentabilidadFull === 'function') return window.cargarRentabilidadFull();
+  }
+  if (audience === 'socios') {
+    document.getElementById('socios-metrics').innerHTML = '<div class="loading">Cargando...</div>';
+    try {
+      const r = getSociosRange();
+      const q = new URLSearchParams({ token: TOKEN, ...r, incluir_socios: '1', agrup: 'mes', orden: 'desc' });
+      let res = await fetch(`${BASE}/api/dashboard/ventas?${q}`);
+      if (!res.ok) {
+        q.delete('incluir_socios');
+        q.delete('agrup');
+        q.delete('orden');
+        res = await fetch(`${BASE}/api/dashboard/ventas/socios?${q}`);
+      }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Error ${res.status}`);
+      }
+      const data = await res.json();
+      _socios = data.socios || data;
+      if (!_socios || !_socios.actual) throw new Error('Sin datos socios — despliegue pendiente en servidor');
+      document.getElementById('last-update').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
+      renderSocios();
+    } catch (e) {
+      console.error(e);
+      document.getElementById('error-msg').textContent = 'Error al cargar vista Socios: ' + e.message;
+      document.getElementById('error-msg').classList.remove('hid');
+      document.getElementById('socios-metrics').innerHTML = '<div class="loading">No se pudo cargar. Pruebe vista Operativo o recargue (Ctrl+F5).</div>';
+    }
+    return;
+  }
   document.getElementById('metrics').innerHTML = '<div class="loading">Cargando...</div>';
   document.getElementById('tb').innerHTML = '<tr><td colspan="5" class="loading">Cargando...</td></tr>';
-  document.getElementById('error-msg').classList.add('hid');
   try {
     const res = await fetch(buildUrl());
     if (!res.ok) {
@@ -338,6 +1277,9 @@ async function cargar() {
       throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
     }
     _data = await res.json();
+    window._periodFilter = getRanges()._filterLabels || null;
+    if (ag === 'semana' && _data.labels) syncSemanasFromData(_data.labels, 'chk-semanas', onPeriodCheckChange);
+    if (ag === 'dia' && _data.labels) syncDiasFromData(_data.labels, 'chk-dias', onPeriodCheckChange);
     fillPlatoOptions(_data.platos || []);
     document.getElementById('last-update').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
     render();
@@ -365,28 +1307,54 @@ function fillPlatoOptions(platos) {
 function render() {
   if (!_data) return;
   const d = _data;
-  const area = document.getElementById('sa').value;
   let tvta = 0, tuds = 0;
-  if (area === 'g' || area === 'BARRA') { tvta += d.total_barra || 0; tuds += (d.desglose?.BARRA?.uds || 0); }
-  if (area === 'g' || area === 'COCINA') { tvta += d.total_cocina || 0; tuds += (d.desglose?.COCINA?.uds || 0); }
-  if (area === 'g' || area === 'OTRO') { tvta += d.total_otro || 0; tuds += (d.desglose?.OTRO?.uds || 0); }
-  if (area !== 'g') {
-    tvta = (d.desglose?.[area]?.vta) || tvta;
-    tuds = (d.desglose?.[area]?.uds) || tuds;
-  }
+  PV_KEYS.forEach(k => {
+    if (pvIncludes(k)) {
+      tvta += (d.desglose?.[k]?.vta) || 0;
+      tuds += (d.desglose?.[k]?.uds) || 0;
+    }
+  });
   _tv = tvta || 1;
 
-  document.getElementById('metrics').innerHTML = `
-    <div class="mc"><div class="ml">Ventas totales</div><div class="mv">$${tvta.toLocaleString('es-EC',{minimumFractionDigits:2,maximumFractionDigits:2})}</div><div class="ms">período seleccionado</div></div>
-    <div class="mc"><div class="ml">Unidades vendidas</div><div class="mv">${Math.round(tuds).toLocaleString()}</div><div class="ms">platos + bebidas</div></div>
-    <div class="mc"><div class="ml">Ticket promedio</div><div class="mv">$${tuds>0?(tvta/tuds).toFixed(2):'0.00'}</div><div class="ms">por ítem</div></div>
-    <div class="mc"><div class="ml">Barra</div><div class="mv">$${(d.total_barra||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${tvta>0?Math.round((d.total_barra||0)/tvta*100):0}% del total</div></div>
-    <div class="mc"><div class="ml">Cocina</div><div class="mv">$${(d.total_cocina||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${tvta>0?Math.round((d.total_cocina||0)/tvta*100):0}% del total</div></div>`;
+  const pct = (v) => tvta > 0 ? Math.round(v / tvta * 100) : 0;
+  const cards = [
+    `<div class="mc"><div class="ml">Ventas totales</div><div class="mv">$${tvta.toLocaleString('es-EC',{minimumFractionDigits:2,maximumFractionDigits:2})}</div><div class="ms">período seleccionado</div></div>`,
+    `<div class="mc"><div class="ml">Unidades vendidas</div><div class="mv">${Math.round(tuds).toLocaleString()}</div><div class="ms">platos + bebidas</div></div>`,
+    `<div class="mc"><div class="ml">Ticket promedio</div><div class="mv">$${tuds>0?(tvta/tuds).toFixed(2):'0.00'}</div><div class="ms">por ítem</div></div>`,
+  ];
+  if (pvIncludes('BARRA')) {
+    cards.push(`<div class="mc"><div class="ml">Barra</div><div class="mv">$${(d.desglose?.BARRA?.vta||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${pct(d.desglose?.BARRA?.vta||0)}% del filtro</div></div>`);
+  }
+  if (pvIncludes('COCINA')) {
+    cards.push(`<div class="mc"><div class="ml">Cocina</div><div class="mv">$${(d.desglose?.COCINA?.vta||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${pct(d.desglose?.COCINA?.vta||0)}% del filtro</div></div>`);
+  }
+  if (pvIncludes('OTRO')) {
+    cards.push(`<div class="mc"><div class="ml">Otro</div><div class="mv">$${(d.desglose?.OTRO?.vta||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${pct(d.desglose?.OTRO?.vta||0)}% del filtro</div></div>`);
+  }
+  document.getElementById('metrics').innerHTML = cards.join('');
 
   document.getElementById('ct').textContent = getTitle();
-  buildRows(d, area);
+  buildRows(d);
   drawChart();
   drawT();
+}
+
+function chartIndices(labels) {
+  let idx = labels.map((_, i) => i);
+  const pf = window._periodFilter;
+  if (pf && pf.length) idx = idx.filter(i => pf.includes(labels[i]));
+  if (ag === 'dia') {
+    const ds = getCheckedValues(document.getElementById('chk-dias-sem'));
+    if (ds.length && ds.length < 7) {
+      const set = new Set(ds.map(Number));
+      idx = idx.filter(i => {
+        const d = new Date(labels[i] + 'T12:00:00');
+        const iso = d.getDay() === 0 ? 7 : d.getDay();
+        return set.has(iso);
+      });
+    }
+  }
+  return idx;
 }
 
 function drawChart() {
@@ -395,9 +1363,19 @@ function drawChart() {
     if (ch) { ch.destroy(); ch = null; }
     return;
   }
-  const area = document.getElementById('sa').value;
+  const idx = chartIndices(d.labels);
+  const labels = idx.map(i => d.labels[i]);
+  const pick = arr => idx.map(i => (arr || [])[i] ?? 0);
   const plato = document.getElementById('sp').value;
   const legend = document.getElementById('chart-legend');
+  const showBarra = pvIncludes('BARRA');
+  const showCocina = pvIncludes('COCINA');
+  const showOtro = pvIncludes('OTRO');
+  const legendParts = [];
+  if (showBarra) legendParts.push(`<span><span class="ls" style="background:#85B7EB"></span>Barra</span>`);
+  if (showCocina) legendParts.push(`<span><span class="ls" style="background:#5DCAA5"></span>Cocina</span>`);
+  if (showOtro) legendParts.push(`<span><span class="ls" style="background:#d3d1c7"></span>Otro</span>`);
+  legendParts.push(`<span><span class="ls" style="background:#BA7517;height:3px;width:14px;border-radius:2px"></span>Total</span>`);
 
   if (plato && d.plato_trend && d.plato_trend.labels.length) {
     legend.innerHTML = `<span><span class="ls" style="background:#85B7EB"></span>Ventas $</span><span><span class="ls" style="background:#BA7517;height:3px;width:14px;border-radius:2px"></span>Unidades</span>`;
@@ -423,22 +1401,19 @@ function drawChart() {
     return;
   }
 
-  legend.innerHTML = `<span><span class="ls" style="background:#85B7EB"></span>Barra</span><span><span class="ls" style="background:#5DCAA5"></span>Cocina</span><span><span class="ls" style="background:#BA7517;height:3px;width:14px;border-radius:2px"></span>Total</span>`;
-  const barraD = area === 'COCINA' ? d.labels.map(() => 0) : d.barra;
-  const cocinaD = area === 'BARRA' ? d.labels.map(() => 0) : d.cocina;
-  const otroD = (area === 'g') ? (d.otro || d.labels.map(() => 0)) : d.labels.map(() => 0);
+  legend.innerHTML = legendParts.join('');
+  const barraD = showBarra ? pick(d.barra) : labels.map(() => 0);
+  const cocinaD = showCocina ? pick(d.cocina) : labels.map(() => 0);
+  const otroD = showOtro ? pick(d.otro) : labels.map(() => 0);
+  const datasets = [];
+  if (showBarra) datasets.push({ type:'bar', label:'Barra', data:barraD, backgroundColor:'#85B7EB', borderColor:'#378ADD', borderWidth:0.5, order:2 });
+  if (showCocina) datasets.push({ type:'bar', label:'Cocina', data:cocinaD, backgroundColor:'#5DCAA5', borderColor:'#1D9E75', borderWidth:0.5, order:2 });
+  if (showOtro) datasets.push({ type:'bar', label:'Otro', data:otroD, backgroundColor:'#d3d1c7', borderColor:'#888780', borderWidth:0.5, order:2 });
   const totD = barraD.map((v,i)=>v+cocinaD[i]+(otroD[i]||0));
+  datasets.push({ type:'line', label:'Total', data:totD, borderColor:'#BA7517', backgroundColor:'transparent', borderWidth:2, pointRadius:3, tension:0.3, order:1 });
   if (ch) ch.destroy();
   ch = new Chart(document.getElementById('cv'), {
-    data:{
-      labels:d.labels,
-      datasets:[
-        { type:'bar', label:'Barra', data:barraD, backgroundColor:'#85B7EB', borderColor:'#378ADD', borderWidth:0.5, order:2 },
-        { type:'bar', label:'Cocina', data:cocinaD, backgroundColor:'#5DCAA5', borderColor:'#1D9E75', borderWidth:0.5, order:2 },
-        { type:'bar', label:'Otro', data:otroD, backgroundColor:'#d3d1c7', borderColor:'#888780', borderWidth:0.5, order:2 },
-        { type:'line', label:'Total', data:totD, borderColor:'#BA7517', backgroundColor:'transparent', borderWidth:2, pointRadius:3, tension:0.3, order:1 }
-      ]
-    },
+    data:{ labels, datasets },
     options:{
       responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: ctx => `${ctx.dataset.label}: $${ctx.parsed.y.toLocaleString('es-EC')}` } } },
@@ -450,7 +1425,7 @@ function drawChart() {
   });
 }
 
-function buildRows(d, area) {
+function buildRows(d) {
   const ord = document.getElementById('so').value;
   const rev = ord !== 'asc';
   const sortFn = (a,b) => rev ? (b.v||b.vta||0)-(a.v||a.vta||0) : (a.v||a.vta||0)-(b.v||b.vta||0);
@@ -459,7 +1434,11 @@ function buildRows(d, area) {
   if (view === 'cat') {
     document.getElementById('table-title').textContent = 'Ventas por categoría';
     document.getElementById('th-name').textContent = 'Categoría';
-    (d.categorias || []).slice().sort(sortFn).forEach(c => {
+    (d.categorias || []).slice().filter(c => {
+      if (isPvGlobal()) return true;
+      const pvs = c.puntos_venta || [];
+      return pvs.some(pv => pvIncludes(pv));
+    }).sort(sortFn).forEach(c => {
       _rows.push({ kind:'cat', n:c.nombre, v:c.vta, u:c.uds, color:'#378ADD' });
     });
     return;
@@ -467,7 +1446,7 @@ function buildRows(d, area) {
   if (view === 'prod') {
     document.getElementById('table-title').textContent = 'Ventas por producto → variedad';
     document.getElementById('th-name').textContent = 'Producto / Variedad';
-    (d.productos || []).slice().sort(sortFn).forEach(p => {
+    (d.productos || []).slice().filter(p => pvIncludes(p.pv)).sort(sortFn).forEach(p => {
       _rows.push({
         kind:'producto', n:p.nombre_display || p.nombre, sub:`${p.cat} · ${p.pv}`,
         v:p.vta, u:p.uds, color:p.pv==='BARRA'?'#378ADD':p.pv==='COCINA'?'#1D9E75':'#888780',
@@ -479,7 +1458,7 @@ function buildRows(d, area) {
   if (view === 'plat') {
     document.getElementById('table-title').textContent = 'Ventas por variedad';
     document.getElementById('th-name').textContent = 'Plato / Variedad';
-    (d.platos || []).slice().sort(sortFn).forEach(p => {
+    (d.platos || []).slice().filter(p => pvIncludes(p.pv)).sort(sortFn).forEach(p => {
       _rows.push({
         kind:'plat',
         n:p.nombre_display || p.nombre,
@@ -499,7 +1478,7 @@ function buildRows(d, area) {
     ['OTRO','Otro','#888780']
   ];
   pvs.forEach(([key,label,color]) => {
-    if (area !== 'g' && area !== key) return;
+    if (!pvIncludes(key)) return;
     const block = d.desglose?.[key];
     if (!block || (block.vta||0) <= 0) return;
     const pvRow = { kind:'pv', key, n:label, v:block.vta, u:block.uds, color, open:false, cats:[] };
@@ -574,7 +1553,21 @@ function tCat(pi,ci){ _rows[pi].cats[ci].open = !_rows[pi].cats[ci].open; drawT(
 function tItem(pi,ci,ii){ _rows[pi].cats[ci].items[ii].open = !_rows[pi].cats[ci].items[ii].open; drawT(); }
 function tProdRoot(i){ _rows[i].open = !_rows[i].open; drawT(); }
 
-cargar();
+function bootDashboard() {
+  if (typeof getCheckedValues !== 'function' || typeof initMesesPanel !== 'function') {
+    document.getElementById('error-msg').textContent =
+      'Error: no se cargaron los scripts del dashboard. Recargue con Ctrl+F5 o contacte soporte.';
+    document.getElementById('error-msg').classList.remove('hid');
+    return;
+  }
+  loadMeta();
+  initPvPanel('pv-panel', onPvChange);
+  onYearChange();
+  initDiasSemPanel('chk-dias-sem', onPeriodCheckChange);
+  if (typeof initComprasMeses === 'function') initComprasMeses();
+  cargar();
+}
+bootDashboard();
 </script>
 </body>
 </html>
