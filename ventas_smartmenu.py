@@ -3,6 +3,7 @@ import argparse
 import re
 import sys
 import time
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -386,10 +387,19 @@ def construir_lineas_hist_ventas(header: dict, detalles: list[dict]) -> list[dic
 
 
 # ── DESCARGA VENTAS DESDE SMART MENU (DHTMLX XML) ─────────────
-def descargar_ventas_grid(fecha: str) -> list[list[str]]:
+@dataclass(frozen=True)
+class GridVentasFetch:
+    rows: list[list[str]]
+    disponible: bool
+    motivo: str = "ok"
+
+
+def descargar_ventas_grid_con_meta(fecha: str) -> GridVentasFetch:
     """
     Grid comprasloadVentas.php: incluye ventas activas, anuladas y notas (NO AUTORIZADO en UI) en la misma respuesta.
     Columna 9: ANULADO, NO AUTORIZADO, etc. (ver _estado_documento_desde_texto_grid).
+
+    disponible=False cuando no se pudo consultar el grid (red, timeout, respuesta inválida).
     """
     fecha_inicial, fecha_final = _smartmenu_dt_range(fecha)
     url = f"{SMART_MENU_URL}/comprasloadVentas.php"
@@ -421,13 +431,13 @@ def descargar_ventas_grid(fecha: str) -> list[list[str]]:
         resp.raise_for_status()
     except requests.exceptions.ConnectionError:
         print("  WARN: Smart Menu no accesible (servidor apagado o fuera de red)")
-        return []
+        return GridVentasFetch([], False, "connection_error")
     except requests.exceptions.Timeout:
         print("  WARN: Timeout consultando Smart Menu")
-        return []
+        return GridVentasFetch([], False, "timeout")
     except Exception as e:
         print(f"  ERROR consultando Smart Menu: {e}")
-        return []
+        return GridVentasFetch([], False, "http_error")
 
     ct = (resp.headers.get("content-type") or "").lower()
     body = resp.text or ""
@@ -435,7 +445,7 @@ def descargar_ventas_grid(fecha: str) -> list[list[str]]:
         snippet = body[:400].replace("\r", " ").replace("\n", " ")
         print(f"  INFO: content-type={ct}")
         print(f"  INFO: Body snippet: {snippet}")
-        return []
+        return GridVentasFetch([], False, "invalid_response")
 
     try:
         rows = _parse_dhtmlx_xml(body)
@@ -443,9 +453,13 @@ def descargar_ventas_grid(fecha: str) -> list[list[str]]:
         snippet = body[:400].replace("\r", " ").replace("\n", " ")
         print(f"  ERROR parseando XML: {e}")
         print(f"  INFO: Body snippet: {snippet}")
-        return []
+        return GridVentasFetch([], False, "parse_error")
 
-    return rows
+    return GridVentasFetch(rows, True, "ok")
+
+
+def descargar_ventas_grid(fecha: str) -> list[list[str]]:
+    return descargar_ventas_grid_con_meta(fecha).rows
 
 
 # ── DESCARGA VENTAS DESDE SMART MENU ─────────────────────────

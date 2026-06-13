@@ -3,6 +3,9 @@ Inventario físico cíclico — operaciones contra Supabase + BD_MP_SISTEMA (She
 
 Flujo: crear-ciclo → snapshot → registrar-envio → aprobar → contabilizar → (opcional) recalcular_stock_sheets.
 
+El stock de referencia y el delta de ajuste usan la suma de mov_inventario (build_stock_calculado),
+no stock_actual de Sheets, para evitar desfases como MP 166 en conteo 29-may-2026.
+
 Requiere variables de entorno como el resto del agente: SUPABASE_URL, SUPABASE_KEY,
 GOOGLE_CREDENTIALS_PATH, SPREADSHEET_ID.
 """
@@ -23,8 +26,23 @@ from google.oauth2.service_account import Credentials
 from supabase import create_client
 
 from config_sheets import delta_abs_tol_conteo
+from recalcular_stock_sheets import _clave_stock, build_stock_calculado
 
 load_dotenv(override=True)
+
+
+def stock_mov_mp_bodega(
+    stock_map: dict[tuple[str, str], float],
+    cod_mp: str,
+    cod_bodega: str,
+) -> float:
+    """Saldo en mov_inventario para (mp, bodega); 0 si no hay movimientos."""
+    return float(stock_map.get(_clave_stock(cod_mp, cod_bodega), 0.0))
+
+
+def delta_conteo_vs_mov(conteo_fisico: float, stock_mov: float) -> float:
+    """Delta de ajuste: conteo físico menos saldo oficial (suma mov_inventario)."""
+    return round(conteo_fisico - stock_mov, 6)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -177,9 +195,11 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
         _err("SNAPSHOT_EMPTY", f"Sin filas en BD_MP_SISTEMA para cod_bodega={cod_bodega}")
 
     now = datetime.now(timezone.utc).isoformat()
+    stock_map = build_stock_calculado()
     lineas: list[dict] = []
     for i, r in enumerate(mps, start=1):
         cod_mp = (r.get("cod_mp_sistema") or "").strip()
+        stock_mov = stock_mov_mp_bodega(stock_map, cod_mp, cod_bodega)
         lineas.append(
             {
                 "ciclo_id": ciclo_id,
@@ -188,7 +208,7 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
                 "cod_bodega": cod_bodega,
                 "nombre_mp": (r.get("nombre_mp") or "").strip() or None,
                 "unidad_base": (r.get("unidad_base") or "").strip() or None,
-                "stock_sistema_snapshot": round(_sheet_float(r.get("stock_actual")), 6),
+                "stock_sistema_snapshot": round(stock_mov, 6),
                 "costo_unitario_ref_snapshot": round(_sheet_float(r.get("costo_unitario_ref")), 8)
                 if r.get("costo_unitario_ref")
                 else None,
@@ -427,6 +447,7 @@ def registrar_envio_desde_payload(
         raise ConteoRegistrarError("DB_INSERT", "No se pudo insertar conteo_envio", http_status=500)
     envio_id = envio["id"]
 
+    stock_map = build_stock_calculado()
     detalles: list[dict] = []
     updates_linea: list[tuple[str, float, str | None]] = []
 
@@ -437,11 +458,11 @@ def registrar_envio_desde_payload(
         )
         base = linea_by_key[key]
         cod_mp_db = (base.get("cod_mp_sistema") or "").strip()
-        stock_snap = float(base["stock_sistema_snapshot"])
+        stock_mov = stock_mov_mp_bodega(stock_map, cod_mp_db, key[1])
         costo_snap = base.get("costo_unitario_ref_snapshot")
         costo_snap_f = float(costo_snap) if costo_snap is not None else None
         conteo_f = float(L["conteo_fisico"])
-        delta = conteo_f - stock_snap
+        delta = delta_conteo_vs_mov(conteo_f, stock_mov)
         valor_delta = delta * costo_snap_f if costo_snap_f is not None else None
 
         detalles.append(
@@ -452,7 +473,7 @@ def registrar_envio_desde_payload(
                 "cod_bodega": key[1],
                 "nombre_mp": base.get("nombre_mp"),
                 "unidad_base": base.get("unidad_base"),
-                "stock_sistema_snapshot": stock_snap,
+                "stock_sistema_snapshot": round(stock_mov, 6),
                 "costo_unitario_ref_snapshot": costo_snap_f,
                 "conteo_fisico": conteo_f,
                 "delta_calculado": round(delta, 6),
@@ -893,9 +914,11 @@ def snapshot_ciclo_api(ciclo_id: str, *, reemplazar: bool = False) -> dict:
         )
 
     now = datetime.now(timezone.utc).isoformat()
+    stock_map = build_stock_calculado()
     lineas: list[dict] = []
     for i, r in enumerate(mps, start=1):
         cod_mp = (r.get("cod_mp_sistema") or "").strip()
+        stock_mov = stock_mov_mp_bodega(stock_map, cod_mp, cod_bodega)
         lineas.append(
             {
                 "ciclo_id": ciclo_id,
@@ -904,7 +927,7 @@ def snapshot_ciclo_api(ciclo_id: str, *, reemplazar: bool = False) -> dict:
                 "cod_bodega": cod_bodega,
                 "nombre_mp": (r.get("nombre_mp") or "").strip() or None,
                 "unidad_base": (r.get("unidad_base") or "").strip() or None,
-                "stock_sistema_snapshot": round(_sheet_float(r.get("stock_actual")), 6),
+                "stock_sistema_snapshot": round(stock_mov, 6),
                 "costo_unitario_ref_snapshot": round(
                     _sheet_float(r.get("costo_unitario_ref")), 8
                 )

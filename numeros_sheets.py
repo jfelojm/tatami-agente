@@ -141,18 +141,22 @@ def precio_ref_a_unidad_base(precio: float, fac: float) -> float:
     if fac <= 1:
         return round(precio, 6)
 
-    # Botella/lata desde XML: precio (USD/u) × fac (ml/gr) ≈ 8–400 USD; precio en banda ml/gr.
+    # Botella/lata desde XML: precio (USD/u) × fac (ml/gr) ≈ 8–500 USD; precio en banda ml/gr.
     implied_pack = precio * fac
     if (
         precio < 1.0
-        and 8.0 <= implied_pack <= 400.0
+        and 8.0 <= implied_pack <= 500.0
         and 0.0005 <= precio <= 0.25
         and fac >= 300
     ):
         return round(precio, 6)
 
-    # Whisky/vinos ml: unitario suele 0,04–0,20 USD/ml con fac 330–1000 (Gold ~0,10 > 0,08).
+    # Whisky/vinos ml estándar: 0,04–0,25 USD/ml con fac 330–1000
     if fac >= 300 and 0.0005 <= precio <= 0.25:
+        return round(precio, 6)
+
+    # Licores premium ml (Blue Label ~0,54): botella ~50–500 USD, no re-dividir
+    if fac >= 300 and 0.25 < precio <= 0.65 and 50.0 <= implied_pack <= 500.0:
         return round(precio, 6)
 
     # Gaseosas/latas: precio_ref ya es USD por botella (XML pack ÷ 12/24); factor = uni del pack.

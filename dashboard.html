@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tatami — Dashboard de Ventas</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f5f4f0;color:#2c2c2a;font-size:14px}
+.topbar{background:#fff;border-bottom:0.5px solid #d3d1c7;padding:10px 16px;display:flex;align-items:center;gap:10px}
+.topbar-title{font-size:15px;font-weight:500;color:#2c2c2a}
+.topbar-sub{font-size:12px;color:#888780}
+.db{padding:12px 16px;max-width:1200px;margin:0 auto}
+.filter-bar{background:#fff;border-radius:10px;border:0.5px solid #d3d1c7;padding:10px 12px;margin-bottom:12px}
+.fr{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin-bottom:5px}
+.fr:last-child{margin-bottom:0}
+.fl{font-size:11px;color:#888780;white-space:nowrap}
+select{font-size:12px;padding:3px 4px;border-radius:6px;border:0.5px solid #b4b2a9;background:#fff;color:#2c2c2a;height:26px;max-width:220px}
+.bg{display:flex;gap:3px;flex-wrap:wrap}
+.mb{font-size:11px;padding:3px 8px;border-radius:6px;border:0.5px solid #b4b2a9;background:#fff;color:#888780;cursor:pointer;height:26px;line-height:1;white-space:nowrap}
+.mb.on{background:#e6f1fb;color:#0c447c;border-color:#185fa5}
+.hid{display:none}
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:12px}
+.mc{background:#fff;border-radius:8px;border:0.5px solid #d3d1c7;padding:12px 14px}
+.ml{font-size:11px;color:#888780;margin-bottom:4px}
+.mv{font-size:21px;font-weight:500;color:#2c2c2a}
+.ms{font-size:11px;color:#b4b2a9;margin-top:2px}
+.sec{background:#fff;border:0.5px solid #d3d1c7;border-radius:10px;padding:14px;margin-bottom:12px}
+.st{font-size:13px;font-weight:500;margin-bottom:10px;color:#2c2c2a}
+.cw{position:relative;width:100%;height:250px}
+.leg{display:flex;gap:14px;font-size:12px;color:#888780;margin-bottom:8px;flex-wrap:wrap}
+.ls{width:10px;height:10px;border-radius:2px;display:inline-block;margin-right:4px;vertical-align:middle}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-size:11px;font-weight:500;color:#888780;text-align:left;padding:6px 8px;border-bottom:0.5px solid #d3d1c7}
+th.r,td.r{text-align:right}
+td{padding:7px 8px;border-bottom:0.5px solid #d3d1c7;color:#2c2c2a}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:#f5f4f0}
+.tog{cursor:pointer;user-select:none}
+.tog td:first-child::before{content:'▶ ';font-size:10px;color:#b4b2a9}
+.tog.open td:first-child::before{content:'▼ ';color:#888780}
+.sub td{background:#f5f4f0;font-size:12px}
+.sub td:first-child{padding-left:22px;color:#888780}
+.sub2 td{background:#eceae4;font-size:12px}
+.sub2 td:first-child{padding-left:38px;color:#666660}
+.bb{display:inline-block;width:70px;height:6px;background:#d3d1c7;border-radius:3px;vertical-align:middle}
+.bf{height:6px;border-radius:3px}
+.loading{text-align:center;padding:40px;color:#888780;font-size:13px}
+.error{text-align:center;padding:20px;color:#a32d2d;font-size:13px;background:#fcebeb;border-radius:8px;margin-bottom:12px}
+.badge{font-size:10px;padding:2px 6px;border-radius:4px;font-weight:500}
+.badge-b{background:#e6f1fb;color:#0c447c}
+.badge-c{background:#e1f5ee;color:#085041}
+.badge-o{background:#f1efe8;color:#444441}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div>
+    <div class="topbar-title">Tatami Bao Bar</div>
+    <div class="topbar-sub">Dashboard de ventas</div>
+  </div>
+  <div style="margin-left:auto;font-size:11px;color:#b4b2a9" id="last-update"></div>
+</div>
+
+<div class="db">
+<div id="error-msg" class="error hid"></div>
+
+<div class="filter-bar">
+  <div class="fr">
+    <span class="fl">Modo</span>
+    <div class="bg">
+      <button class="mb on" onclick="setMode('r',this)">Vista rápida</button>
+      <button class="mb" onclick="setMode('p',this)">Rango personalizado</button>
+    </div>
+    <span class="fl">Punto de venta</span>
+    <select id="sa" onchange="cargar()">
+      <option value="g">Global</option>
+      <option value="BARRA">Barra</option>
+      <option value="COCINA">Cocina</option>
+      <option value="OTRO">Otro</option>
+    </select>
+    <span class="fl">Plato</span>
+    <select id="sp" onchange="cargar()"><option value="">Todos</option></select>
+    <span class="fl">Orden</span>
+    <select id="so" onchange="drawT();drawChart()">
+      <option value="desc">Mayor→menor</option>
+      <option value="asc">Menor→mayor</option>
+    </select>
+  </div>
+
+  <div class="fr">
+    <span class="fl">Tabla</span>
+    <div class="bg">
+      <button class="mb on" onclick="setView('tree',this)">Jerárquica</button>
+      <button class="mb" onclick="setView('prod',this)">Productos</button>
+      <button class="mb" onclick="setView('cat',this)">Categorías</button>
+      <button class="mb" onclick="setView('plat',this)">Variedades</button>
+    </div>
+  </div>
+
+  <div id="pr" class="fr">
+    <span class="fl">Agrupar</span>
+    <div class="bg">
+      <button class="mb" onclick="setAg('anio',this)">Año</button>
+      <button class="mb on" onclick="setAg('mes',this)">Mes</button>
+      <button class="mb" onclick="setAg('semana',this)">Semana</button>
+      <button class="mb" onclick="setAg('dia',this)">Día</button>
+    </div>
+    <select id="ra" onchange="cargar()"><option>2024</option><option>2025</option><option selected>2026</option></select>
+    <select id="rm" onchange="cargar()">
+      <option value="01">Ene</option><option value="02">Feb</option><option value="03">Mar</option>
+      <option value="04">Abr</option><option value="05">May</option><option value="06" selected>Jun</option>
+      <option value="07">Jul</option><option value="08">Ago</option><option value="09">Sep</option>
+      <option value="10">Oct</option><option value="11">Nov</option><option value="12">Dic</option>
+    </select>
+    <select id="rs" class="hid" onchange="cargar()">
+      <option value="1">S1</option><option value="2">S2</option><option value="3">S3</option><option value="4" selected>S4</option>
+    </select>
+    <select id="rd" class="hid" onchange="cargar()">
+      <option value="0">Todos los días</option>
+      <option value="1">Solo lunes</option><option value="2">Solo martes</option>
+      <option value="3">Solo miércoles</option><option value="4">Solo jueves</option>
+      <option value="5">Solo viernes</option><option value="6">Solo sábado</option>
+      <option value="7">Solo domingo</option>
+    </select>
+  </div>
+
+  <div id="pp" class="fr hid">
+    <span class="fl">Desde</span>
+    <select id="pd-d" onchange="cargar()"></select>
+    <select id="pd-m" onchange="cargar()">
+      <option value="01">Ene</option><option value="02">Feb</option><option value="03">Mar</option>
+      <option value="04">Abr</option><option value="05">May</option><option value="06" selected>Jun</option>
+      <option value="07">Jul</option><option value="08">Ago</option><option value="09">Sep</option>
+      <option value="10">Oct</option><option value="11">Nov</option><option value="12">Dic</option>
+    </select>
+    <select id="pd-a" onchange="cargar()"><option>2025</option><option selected>2026</option></select>
+    <span class="fl">Hasta</span>
+    <select id="ph-d" onchange="cargar()"></select>
+    <select id="ph-m" onchange="cargar()">
+      <option value="01">Ene</option><option value="02">Feb</option><option value="03">Mar</option>
+      <option value="04">Abr</option><option value="05">May</option><option value="06" selected>Jun</option>
+      <option value="07">Jul</option><option value="08">Ago</option><option value="09">Sep</option>
+      <option value="10">Oct</option><option value="11">Nov</option><option value="12">Dic</option>
+    </select>
+    <select id="ph-a" onchange="cargar()"><option>2025</option><option selected>2026</option></select>
+    <span class="fl">Ver por</span>
+    <div class="bg">
+      <button class="mb" onclick="setRng('dia',this)">Días</button>
+      <button class="mb" onclick="setRng('semana',this)">Semanas</button>
+      <button class="mb on" onclick="setRng('mes',this)">Meses</button>
+    </div>
+    <select id="rd2" onchange="cargar()">
+      <option value="0">Todos los días</option>
+      <option value="5">Solo viernes</option>
+      <option value="6">Solo sábado</option>
+      <option value="7">Solo domingo</option>
+    </select>
+  </div>
+</div>
+
+<div class="metrics" id="metrics"><div class="loading">Cargando...</div></div>
+
+<div class="sec">
+  <div class="st" id="ct">Tendencia de ventas</div>
+  <div class="leg" id="chart-legend">
+    <span><span class="ls" style="background:#85B7EB"></span>Barra</span>
+    <span><span class="ls" style="background:#5DCAA5"></span>Cocina</span>
+    <span><span class="ls" style="background:#BA7517;height:3px;width:14px;border-radius:2px"></span>Total</span>
+  </div>
+  <div class="cw"><canvas id="cv"></canvas></div>
+</div>
+
+<div class="sec">
+  <div class="st" id="table-title">Desglose por punto de venta → categoría → plato</div>
+  <div style="overflow-x:auto">
+    <table><thead><tr>
+      <th id="th-name">Punto de venta / Categoría / Plato</th>
+      <th class="r">Uds</th><th class="r">Ventas $</th><th class="r">%</th>
+      <th style="min-width:80px">Part.</th>
+    </tr></thead>
+    <tbody id="tb"><tr><td colspan="5" class="loading">Cargando...</td></tr></tbody></table>
+  </div>
+</div>
+</div>
+
+<script>
+const TOKEN = '__TOKEN__';
+const BASE = window.location.origin;
+let ch = null;
+let mode = 'r';
+let ag = 'mes';
+let rng = 'mes';
+let view = 'tree';
+let _data = null;
+let _rows = [];
+let _tv = 1;
+
+function monthEnd(year, monthStr) {
+  const y = parseInt(year, 10);
+  const m = parseInt(monthStr, 10);
+  return String(new Date(y, m, 0).getDate()).padStart(2, '0');
+}
+
+function safeDate(year, monthStr, dayStr) {
+  const max = parseInt(monthEnd(year, monthStr), 10);
+  const day = Math.min(Math.max(parseInt(dayStr, 10) || 1, 1), max);
+  return `${year}-${monthStr}-${String(day).padStart(2, '0')}`;
+}
+
+function fillDays(selId) {
+  const s = document.getElementById(selId);
+  const v = s.value;
+  s.innerHTML = '';
+  for (let i = 1; i <= 31; i++) {
+    const o = document.createElement('option');
+    o.value = String(i).padStart(2, '0');
+    o.textContent = i;
+    s.appendChild(o);
+  }
+  s.value = v || '01';
+}
+fillDays('pd-d');
+fillDays('ph-d');
+document.getElementById('ph-d').value = '31';
+
+function setMode(m, btn) {
+  mode = m;
+  btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  document.getElementById('pr').classList.toggle('hid', m !== 'r');
+  document.getElementById('pp').classList.toggle('hid', m !== 'p');
+  cargar();
+}
+function setAg(a, btn) {
+  ag = a;
+  btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  h('ra', a !== 'anio');
+  h('rm', ['mes', 'semana', 'dia'].includes(a));
+  h('rs', a === 'semana');
+  h('rd', a === 'dia');
+  cargar();
+}
+function setRng(a, btn) {
+  rng = a;
+  btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  cargar();
+}
+function setView(v, btn) {
+  view = v;
+  btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  if (_data) buildRows(_data, document.getElementById('sa').value);
+  drawT();
+}
+function h(id, show) {
+  const e = document.getElementById(id);
+  if (e) e.classList.toggle('hid', !show);
+}
+
+function getRanges() {
+  if (mode === 'p') {
+    const dd = document.getElementById('pd-d').value;
+    const dm = document.getElementById('pd-m').value;
+    const da = document.getElementById('pd-a').value;
+    const hd = document.getElementById('ph-d').value;
+    const hm = document.getElementById('ph-m').value;
+    const ha = document.getElementById('ph-a').value;
+    const params = {
+      desde: safeDate(da, dm, dd),
+      hasta: safeDate(ha, hm, hd),
+      agrup: rng,
+    };
+    const ds = document.getElementById('rd2').value;
+    if (ds !== '0') params.dia_semana = ds;
+    return params;
+  }
+  const anio = document.getElementById('ra').value;
+  const mes = document.getElementById('rm').value;
+  const finMes = monthEnd(anio, mes);
+  if (ag === 'anio') return { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'anio' };
+  if (ag === 'mes') return { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'mes' };
+  if (ag === 'semana') return { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'semana' };
+  const ds = document.getElementById('rd').value;
+  const out = { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'dia' };
+  if (ds !== '0') out.dia_semana = ds;
+  return out;
+}
+
+function getTitle() {
+  const meses = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+  const platoSel = document.getElementById('sp');
+  const platoTxt = platoSel.value ? ` — ${platoSel.options[platoSel.selectedIndex].text}` : '';
+  if (mode === 'p') {
+    const dd = document.getElementById('pd-d').value;
+    const dm = meses[parseInt(document.getElementById('pd-m').value)];
+    const da = document.getElementById('pd-a').value;
+    const hd = document.getElementById('ph-d').value;
+    const hm = meses[parseInt(document.getElementById('ph-m').value)];
+    const ha = document.getElementById('ph-a').value;
+    return `${dd} ${dm} ${da} → ${hd} ${hm} ${ha}${platoTxt}`;
+  }
+  const anio = document.getElementById('ra').value;
+  const mes = meses[parseInt(document.getElementById('rm').value)];
+  if (ag === 'anio') return `Tendencia anual ${anio}${platoTxt}`;
+  if (ag === 'mes') return `Ventas mensuales ${anio}${platoTxt}`;
+  if (ag === 'semana') return `Semanas de ${mes} ${anio}${platoTxt}`;
+  return `Días de ${mes} ${anio}${platoTxt}`;
+}
+
+function buildUrl() {
+  const p = getRanges();
+  const area = document.getElementById('sa').value;
+  const plato = document.getElementById('sp').value;
+  const orden = document.getElementById('so').value;
+  const q = new URLSearchParams({ token: TOKEN, orden, ...p });
+  if (area !== 'g') q.set('punto_venta', area);
+  if (plato) q.set('plato', plato);
+  return `${BASE}/api/dashboard/ventas?${q}`;
+}
+
+async function cargar() {
+  document.getElementById('metrics').innerHTML = '<div class="loading">Cargando...</div>';
+  document.getElementById('tb').innerHTML = '<tr><td colspan="5" class="loading">Cargando...</td></tr>';
+  document.getElementById('error-msg').classList.add('hid');
+  try {
+    const res = await fetch(buildUrl());
+    if (!res.ok) {
+      let detail = `Error ${res.status}`;
+      try {
+        const err = await res.json();
+        detail = err.detail || detail;
+      } catch (_) {}
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+    _data = await res.json();
+    fillPlatoOptions(_data.platos || []);
+    document.getElementById('last-update').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
+    render();
+  } catch (e) {
+    document.getElementById('error-msg').textContent = 'Error al cargar datos: ' + e.message;
+    document.getElementById('error-msg').classList.remove('hid');
+    document.getElementById('metrics').innerHTML = '';
+    document.getElementById('tb').innerHTML = '';
+  }
+}
+
+function fillPlatoOptions(platos) {
+  const sel = document.getElementById('sp');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">Todos</option>';
+  platos.slice(0, 400).forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.id || `${p.cod_smart_menu}|${p.variedad_smart_menu}`;
+    o.textContent = p.nombre_display || p.nombre;
+    sel.appendChild(o);
+  });
+  if ([...sel.options].some(o => o.value === current)) sel.value = current;
+}
+
+function render() {
+  if (!_data) return;
+  const d = _data;
+  const area = document.getElementById('sa').value;
+  let tvta = 0, tuds = 0;
+  if (area === 'g' || area === 'BARRA') { tvta += d.total_barra || 0; tuds += (d.desglose?.BARRA?.uds || 0); }
+  if (area === 'g' || area === 'COCINA') { tvta += d.total_cocina || 0; tuds += (d.desglose?.COCINA?.uds || 0); }
+  if (area === 'g' || area === 'OTRO') { tvta += d.total_otro || 0; tuds += (d.desglose?.OTRO?.uds || 0); }
+  if (area !== 'g') {
+    tvta = (d.desglose?.[area]?.vta) || tvta;
+    tuds = (d.desglose?.[area]?.uds) || tuds;
+  }
+  _tv = tvta || 1;
+
+  document.getElementById('metrics').innerHTML = `
+    <div class="mc"><div class="ml">Ventas totales</div><div class="mv">$${tvta.toLocaleString('es-EC',{minimumFractionDigits:2,maximumFractionDigits:2})}</div><div class="ms">período seleccionado</div></div>
+    <div class="mc"><div class="ml">Unidades vendidas</div><div class="mv">${Math.round(tuds).toLocaleString()}</div><div class="ms">platos + bebidas</div></div>
+    <div class="mc"><div class="ml">Ticket promedio</div><div class="mv">$${tuds>0?(tvta/tuds).toFixed(2):'0.00'}</div><div class="ms">por ítem</div></div>
+    <div class="mc"><div class="ml">Barra</div><div class="mv">$${(d.total_barra||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${tvta>0?Math.round((d.total_barra||0)/tvta*100):0}% del total</div></div>
+    <div class="mc"><div class="ml">Cocina</div><div class="mv">$${(d.total_cocina||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${tvta>0?Math.round((d.total_cocina||0)/tvta*100):0}% del total</div></div>`;
+
+  document.getElementById('ct').textContent = getTitle();
+  buildRows(d, area);
+  drawChart();
+  drawT();
+}
+
+function drawChart() {
+  const d = _data;
+  if (!d || !d.labels || !d.labels.length) {
+    if (ch) { ch.destroy(); ch = null; }
+    return;
+  }
+  const area = document.getElementById('sa').value;
+  const plato = document.getElementById('sp').value;
+  const legend = document.getElementById('chart-legend');
+
+  if (plato && d.plato_trend && d.plato_trend.labels.length) {
+    legend.innerHTML = `<span><span class="ls" style="background:#85B7EB"></span>Ventas $</span><span><span class="ls" style="background:#BA7517;height:3px;width:14px;border-radius:2px"></span>Unidades</span>`;
+    if (ch) ch.destroy();
+    ch = new Chart(document.getElementById('cv'), {
+      data: {
+        labels: d.plato_trend.labels,
+        datasets: [
+          { type:'bar', label:'Ventas $', data:d.plato_trend.vta, backgroundColor:'#85B7EB', borderColor:'#378ADD', borderWidth:0.5, yAxisID:'y' },
+          { type:'line', label:'Unidades', data:d.plato_trend.uds, borderColor:'#BA7517', backgroundColor:'transparent', borderWidth:2, pointRadius:3, tension:0.3, yAxisID:'y1' }
+        ]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: ctx => ctx.dataset.label + ': ' + (ctx.datasetIndex===0 ? '$'+ctx.parsed.y.toLocaleString('es-EC') : ctx.parsed.y) } } },
+        scales:{
+          x:{ grid:{color:'rgba(128,128,128,0.08)'}, ticks:{color:'#888780',font:{size:11},maxRotation:45,autoSkip:true,maxTicksLimit:12} },
+          y:{ position:'left', grid:{color:'rgba(128,128,128,0.08)'}, ticks:{color:'#888780', callback:v=>'$'+v.toLocaleString()} },
+          y1:{ position:'right', grid:{drawOnChartArea:false}, ticks:{color:'#BA7517'} }
+        }
+      }
+    });
+    return;
+  }
+
+  legend.innerHTML = `<span><span class="ls" style="background:#85B7EB"></span>Barra</span><span><span class="ls" style="background:#5DCAA5"></span>Cocina</span><span><span class="ls" style="background:#BA7517;height:3px;width:14px;border-radius:2px"></span>Total</span>`;
+  const barraD = area === 'COCINA' ? d.labels.map(() => 0) : d.barra;
+  const cocinaD = area === 'BARRA' ? d.labels.map(() => 0) : d.cocina;
+  const otroD = (area === 'g') ? (d.otro || d.labels.map(() => 0)) : d.labels.map(() => 0);
+  const totD = barraD.map((v,i)=>v+cocinaD[i]+(otroD[i]||0));
+  if (ch) ch.destroy();
+  ch = new Chart(document.getElementById('cv'), {
+    data:{
+      labels:d.labels,
+      datasets:[
+        { type:'bar', label:'Barra', data:barraD, backgroundColor:'#85B7EB', borderColor:'#378ADD', borderWidth:0.5, order:2 },
+        { type:'bar', label:'Cocina', data:cocinaD, backgroundColor:'#5DCAA5', borderColor:'#1D9E75', borderWidth:0.5, order:2 },
+        { type:'bar', label:'Otro', data:otroD, backgroundColor:'#d3d1c7', borderColor:'#888780', borderWidth:0.5, order:2 },
+        { type:'line', label:'Total', data:totD, borderColor:'#BA7517', backgroundColor:'transparent', borderWidth:2, pointRadius:3, tension:0.3, order:1 }
+      ]
+    },
+    options:{
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: ctx => `${ctx.dataset.label}: $${ctx.parsed.y.toLocaleString('es-EC')}` } } },
+      scales:{
+        x:{ stacked:true, grid:{color:'rgba(128,128,128,0.08)'}, ticks:{color:'#888780',font:{size:11},maxRotation:45,autoSkip:true,maxTicksLimit:12} },
+        y:{ stacked:true, grid:{color:'rgba(128,128,128,0.08)'}, ticks:{color:'#888780', callback:v=>'$'+v.toLocaleString()} }
+      }
+    }
+  });
+}
+
+function buildRows(d, area) {
+  const ord = document.getElementById('so').value;
+  const rev = ord !== 'asc';
+  const sortFn = (a,b) => rev ? (b.v||b.vta||0)-(a.v||a.vta||0) : (a.v||a.vta||0)-(b.v||b.vta||0);
+  _rows = [];
+
+  if (view === 'cat') {
+    document.getElementById('table-title').textContent = 'Ventas por categoría';
+    document.getElementById('th-name').textContent = 'Categoría';
+    (d.categorias || []).slice().sort(sortFn).forEach(c => {
+      _rows.push({ kind:'cat', n:c.nombre, v:c.vta, u:c.uds, color:'#378ADD' });
+    });
+    return;
+  }
+  if (view === 'prod') {
+    document.getElementById('table-title').textContent = 'Ventas por producto → variedad';
+    document.getElementById('th-name').textContent = 'Producto / Variedad';
+    (d.productos || []).slice().sort(sortFn).forEach(p => {
+      _rows.push({
+        kind:'producto', n:p.nombre_display || p.nombre, sub:`${p.cat} · ${p.pv}`,
+        v:p.vta, u:p.uds, color:p.pv==='BARRA'?'#378ADD':p.pv==='COCINA'?'#1D9E75':'#888780',
+        open:false, variedades:(p.variedades||[]).slice().sort(sortFn)
+      });
+    });
+    return;
+  }
+  if (view === 'plat') {
+    document.getElementById('table-title').textContent = 'Ventas por variedad';
+    document.getElementById('th-name').textContent = 'Plato / Variedad';
+    (d.platos || []).slice().sort(sortFn).forEach(p => {
+      _rows.push({
+        kind:'plat',
+        n:p.nombre_display || p.nombre,
+        sub:`${p.cat} · ${p.pv}${p.variedad_smart_menu ? '' : ''}`,
+        v:p.vta, u:p.uds,
+        color:p.pv==='BARRA'?'#378ADD':p.pv==='COCINA'?'#1D9E75':'#888780'
+      });
+    });
+    return;
+  }
+
+  document.getElementById('table-title').textContent = 'Desglose por punto de venta → categoría → producto → variedad';
+  document.getElementById('th-name').textContent = 'Punto de venta / Categoría / Producto / Variedad';
+  const pvs = [
+    ['BARRA','Barra','#378ADD'],
+    ['COCINA','Cocina','#1D9E75'],
+    ['OTRO','Otro','#888780']
+  ];
+  pvs.forEach(([key,label,color]) => {
+    if (area !== 'g' && area !== key) return;
+    const block = d.desglose?.[key];
+    if (!block || (block.vta||0) <= 0) return;
+    const pvRow = { kind:'pv', key, n:label, v:block.vta, u:block.uds, color, open:false, cats:[] };
+    (block.categorias||[]).slice().sort(sortFn).forEach(cat => {
+      pvRow.cats.push({
+        kind:'cat', n:cat.nombre, v:cat.vta, u:cat.uds, color, open:false,
+        items:(cat.productos||cat.platos||[]).map(x => ({...x, open:false}))
+      });
+    });
+    _rows.push(pvRow);
+  });
+  _rows.sort(sortFn);
+}
+
+function rowHtml(name, sub, v, u, color, cls, onclick) {
+  const p = _tv > 0 ? Math.round(v / _tv * 100) : 0;
+  const subHtml = sub ? `<div style="font-size:11px;color:#888780">${sub}</div>` : '';
+  return `<tr class="${cls}" ${onclick ? `onclick="${onclick}"` : ''}>
+    <td style="font-weight:${cls.startsWith('tog') && !cls.includes('sub') ? '500' : '400'}">${name}${subHtml}</td>
+    <td class="r">${Math.round(u).toLocaleString()}</td>
+    <td class="r">$${v.toLocaleString('es-EC',{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+    <td class="r">${p}%</td>
+    <td><div class="bb"><div class="bf" style="width:${Math.min(p,100)}%;background:${color}"></div></div></td>
+  </tr>`;
+}
+
+function drawT() {
+  let html = '';
+  if (view === 'cat' || view === 'plat') {
+    _rows.forEach(r => {
+      html += rowHtml(r.n, r.sub || '', r.v, r.u, r.color, view === 'cat' ? '' : 'sub', null);
+    });
+  } else if (view === 'prod') {
+    _rows.forEach((prod, pi) => {
+      html += rowHtml(prod.n, prod.sub || '', prod.v, prod.u, prod.color, `tog${prod.open?' open':''}`, `tProdRoot(${pi})`);
+      if (prod.open) {
+        (prod.variedades || []).forEach(v => {
+          html += rowHtml(v.nombre_display || v.variedad, '', v.vta, v.uds, prod.color, 'sub2', null);
+        });
+      }
+    });
+  } else {
+    _rows.forEach((pv, pi) => {
+      html += rowHtml(pv.n, '', pv.v, pv.u, pv.color, `tog${pv.open?' open':''}`, `tPv(${pi})`);
+      if (pv.open) {
+        pv.cats.forEach((cat, ci) => {
+          html += rowHtml(cat.n, '', cat.v, cat.u, pv.color, `tog sub${cat.open?' open':''}`, `tCat(${pi},${ci})`);
+          if (cat.open) {
+            (cat.items || []).forEach((item, ii) => {
+              if (item.tipo === 'producto' && (item.variedades||[]).length > 1) {
+                html += rowHtml(item.nombre_display || item.nombre, `${item.variedades.length} variedades`, item.vta, item.uds, pv.color, `tog sub2${item.open?' open':''}`, `tItem(${pi},${ci},${ii})`);
+                if (item.open) {
+                  item.variedades.forEach(v => {
+                    html += rowHtml(v.nombre_display || v.variedad, '', v.vta, v.uds, pv.color, 'sub2', null);
+                  });
+                }
+              } else {
+                const p = item.tipo === 'plato' ? item : (item.variedades?.[0] || item);
+                html += rowHtml(p.nombre_display || p.nombre, '', p.vta, p.uds, pv.color, 'sub2', null);
+              }
+            });
+          }
+        });
+      }
+    });
+  }
+  document.getElementById('tb').innerHTML = html || '<tr><td colspan="5" style="padding:20px;text-align:center;color:#888780">Sin datos para el período seleccionado</td></tr>';
+}
+
+function tPv(i){ _rows[i].open = !_rows[i].open; drawT(); }
+function tCat(pi,ci){ _rows[pi].cats[ci].open = !_rows[pi].cats[ci].open; drawT(); }
+function tItem(pi,ci,ii){ _rows[pi].cats[ci].items[ii].open = !_rows[pi].cats[ci].items[ii].open; drawT(); }
+function tProdRoot(i){ _rows[i].open = !_rows[i].open; drawT(); }
+
+cargar();
+</script>
+</body>
+</html>

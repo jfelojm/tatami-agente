@@ -30,9 +30,16 @@ def aplica_strip_sufijo_orden_factura(razon_social: str = "", ruc: str = "") -> 
 
 
 def normalizar_cod_proveedor_para_match(cod: str) -> str:
-    """Normaliza cod_proveedor para comparar filas de BD_ITEMS_PROV / pendientes."""
+    """
+    Normaliza cod_proveedor para comparar filas de BD_ITEMS_PROV / pendientes.
+    Quita ceros a la izquierda en códigos numéricos: Sheets a veces guarda
+    "050" como número 50 y el match "050" != "50" dejaba ítems sin match.
+    """
     s = (cod or "").strip().lstrip("'")
-    return re.sub(r"\s+", "", s)
+    s = re.sub(r"\s+", "", s)
+    if s.isdigit():
+        return str(int(s))
+    return s
 
 
 def normalizar_cod_item_para_match(

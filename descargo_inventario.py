@@ -521,6 +521,69 @@ def _fecha_etiqueta_alerta(fecha_filtro: str | None, sin_receta: list[dict]) -> 
     return f"{', '.join(fs[:3])} (+{len(fs) - 3} días más)"
 
 
+def _linea_venta_key(venta: dict) -> tuple:
+    """Clave de línea ticket; incluye variedad porque idplato_sm puede repetirse (ej. gaseosas 25)."""
+    return (
+        str(venta.get("fecha") or ""),
+        str(venta.get("num_documento") or ""),
+        str(venta.get("idplato_sm") or ""),
+        str(venta.get("variedad_smart_menu") or "").strip().upper(),
+    )
+
+
+def _cargar_cod_ventas_en_mov(cod_ventas: list[str]) -> set[str]:
+    """Movimientos SALIDA_VENTA ya registrados para esos cod_venta (sin filtrar por fecha del mov)."""
+    found: set[str] = set()
+    uniq = [c for c in dict.fromkeys(cod_ventas) if c]
+    for i in range(0, len(uniq), 200):
+        chunk = uniq[i : i + 200]
+        res = (
+            supabase.table("mov_inventario")
+            .select("num_documento")
+            .eq("tipo_mov", "SALIDA_VENTA")
+            .eq("origen_documento", "VENTA_SMART_MENU")
+            .in_("num_documento", chunk)
+            .execute()
+        )
+        found.update(
+            r.get("num_documento")
+            for r in (res.data or [])
+            if r.get("num_documento")
+        )
+    return found
+
+
+def _cargar_lineas_ya_descargadas(
+    cod_ventas_con_mov: set[str], fechas: list[str]
+) -> set[tuple]:
+    """
+    Líneas (fecha, num_documento, idplato_sm) que ya tienen mov.
+    Cubre reimportes que generan cod_venta distinto para la misma línea de ticket.
+    """
+    keys: set[tuple] = set()
+    if not cod_ventas_con_mov or not fechas:
+        return keys
+    for f in fechas:
+        offset = 0
+        while True:
+            chunk = (
+                supabase.table("hist_ventas")
+                .select("cod_venta,fecha,num_documento,idplato_sm")
+                .eq("fecha", f)
+                .range(offset, offset + 999)
+                .execute()
+                .data
+                or []
+            )
+            for r in chunk:
+                if r.get("cod_venta") in cod_ventas_con_mov:
+                    keys.add(_linea_venta_key(r))
+            if len(chunk) < 1000:
+                break
+            offset += 1000
+    return keys
+
+
 def procesar_descargo(fecha: str | None = None) -> dict:
     query = (
         supabase.table("hist_ventas")
@@ -541,34 +604,46 @@ def procesar_descargo(fecha: str | None = None) -> dict:
 
     # Cargar documentos ya descargados en mov_inventario para evitar duplicados
     print("  Cargando documentos ya descargados en mov_inventario...")
-    ya_en_mov: set[str] = set()
+    cod_ventas_pend = [v.get("cod_venta") for v in ventas if v.get("cod_venta")]
     fechas_unicas = list({str(v.get("fecha", "")) for v in ventas if v.get("fecha")})
-    for f in fechas_unicas:
-        desde = f"{f}T00:00:00"
-        hasta = f"{f}T23:59:59"
-        offset = 0
-        while True:
-            chunk = (
-                supabase.table("mov_inventario")
-                .select("num_documento")
-                .eq("tipo_mov", "SALIDA_VENTA")
-                .eq("origen_documento", "VENTA_SMART_MENU")
-                .gte("fecha", desde)
-                .lte("fecha", hasta)
-                .range(offset, offset + 999)
-                .execute()
-                .data
-                or []
+    ya_en_mov = _cargar_cod_ventas_en_mov(cod_ventas_pend)
+    lineas_ya_descargadas = _cargar_lineas_ya_descargadas(ya_en_mov, fechas_unicas)
+    print(
+        f"  {len(ya_en_mov)} cod_venta ya en mov_inventario; "
+        f"{len(lineas_ya_descargadas)} líneas de ticket cubiertas (se omitirán)"
+    )
+
+    omit_prefactura: dict[str, str] = {}
+    if fechas_unicas:
+        ventas_contexto: list[dict] = []
+        for f in fechas_unicas:
+            offset = 0
+            while True:
+                chunk = (
+                    supabase.table("hist_ventas")
+                    .select(
+                        "cod_venta,fecha,num_documento,tipo_documento,cod_receta,variedad_smart_menu,"
+                        "cantidad_vendida,nombre_producto"
+                    )
+                    .eq("estado_match", "PROCESADO")
+                    .eq("fecha", f)
+                    .range(offset, offset + 999)
+                    .execute()
+                    .data
+                    or []
+                )
+                ventas_contexto.extend(chunk)
+                if len(chunk) < 1000:
+                    break
+                offset += 1000
+        from ventas_documento_prefactura import FECHA_CONTEO, clasificar_ventas
+
+        omit_prefactura, _ = clasificar_ventas(ventas_contexto, fecha_conteo=FECHA_CONTEO)
+        if omit_prefactura:
+            print(
+                f"  {len(omit_prefactura)} ventas prefactura/bulk post-conteo "
+                f"(>{FECHA_CONTEO}, no descargarán inventario)"
             )
-            ya_en_mov.update(
-                r.get("num_documento")
-                for r in chunk
-                if r.get("num_documento")
-            )
-            if len(chunk) < 1000:
-                break
-            offset += 1000
-    print(f"  {len(ya_en_mov)} documentos ya en mov_inventario (se omitirán)")
 
     mp_sistema = cargar_mp_sistema()
     sin_descargo = _cargar_sin_descargo()
@@ -600,7 +675,7 @@ def procesar_descargo(fecha: str | None = None) -> dict:
             except Exception as e:
                 print(f"  WARN: marcar descargado (descarga_inventario=NO) {cod_venta}: {e}")
             continue
-        if cod_venta in ya_en_mov:
+        if cod_venta in ya_en_mov or _linea_venta_key(venta) in lineas_ya_descargadas:
             try:
                 supabase.table("hist_ventas").update(
                     {"descargado": True, "fecha_descargo": datetime.now().isoformat()}
@@ -623,6 +698,29 @@ def procesar_descargo(fecha: str | None = None) -> dict:
             motivo = (estado_doc or "ACTIVO").strip().upper()
             print(
                 f"  INFO: documento {motivo} — sin descargo inventario ({cod_venta})"
+            )
+            continue
+
+        motivo_pref = omit_prefactura.get(cod_venta or "")
+        _ignorar_pref = (os.getenv("DESCARGO_IGNORAR_PREFACTURA") or "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "si",
+            "sí",
+        )
+        if motivo_pref and not _ignorar_pref:
+            try:
+                supabase.table("hist_ventas").update(
+                    {
+                        "descargado": True,
+                        "fecha_descargo": datetime.now().isoformat(),
+                    }
+                ).eq("cod_venta", cod_venta).execute()
+            except Exception as e:
+                print(f"  WARN: marcar omitida prefactura {cod_venta}: {e}")
+            print(
+                f"  INFO: {motivo_pref} — sin descargo inventario ({cod_venta})"
             )
             continue
 
@@ -795,6 +893,8 @@ def procesar_descargo(fecha: str | None = None) -> dict:
             if cod_receta_hist != (cod_receta or "").strip():
                 upd["cod_receta"] = cod_receta
             supabase.table("hist_ventas").update(upd).eq("cod_venta", cod_venta).execute()
+            ya_en_mov.add(cod_venta)
+            lineas_ya_descargadas.add(_linea_venta_key(venta))
 
     if sin_receta:
         try:

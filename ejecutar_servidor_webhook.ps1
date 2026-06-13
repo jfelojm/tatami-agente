@@ -1,4 +1,4 @@
-﻿# ejecutar_servidor_webhook.ps1
+# ejecutar_servidor_webhook.ps1
 $Root = "C:\Users\Usuario\Desktop\Agente Tatami\tatami-agente"
 Set-Location $Root
 $env:PYTHONIOENCODING = "utf-8"
@@ -11,7 +11,7 @@ $LogFileOut = Join-Path $LogDir "webhook_stdout.log"
 $LogFileErr = Join-Path $LogDir "webhook_stderr.log"
 
 Start-Process -FilePath $Py `
-  -ArgumentList "-m uvicorn whatsapp_webhook:app --host 0.0.0.0 --port 8001" `
+  -ArgumentList "-u","-m","uvicorn","whatsapp_webhook:app","--host","0.0.0.0","--port","8000" `
   -WorkingDirectory $Root `
   -RedirectStandardOutput $LogFileOut `
   -RedirectStandardError $LogFileErr `
@@ -20,6 +20,6 @@ Start-Process -FilePath $Py `
 Start-Sleep -Seconds 3
 
 Start-Process -FilePath "ngrok" `
-  -ArgumentList "http --domain=polish-vindicate-smudgy.ngrok-free.dev 8001" `
+  -ArgumentList "http --domain=polish-vindicate-smudgy.ngrok-free.dev 8000" `
   -WorkingDirectory $Root `
   -WindowStyle Hidden

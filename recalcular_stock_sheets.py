@@ -384,6 +384,8 @@ def recalcular(
         col_costo = None
         print("  WARN: costo_unitario_ref no encontrada — solo stock")
 
+    col_uni = headers.index("unidad_base") if "unidad_base" in headers else None
+
     if nombre_mp_buscar and not cod_mp_filtro:
         res = _resolver_cod_mp_por_nombre_mp(
             values, header_row_idx, headers, col_cod, nombre_mp_buscar
@@ -402,6 +404,7 @@ def recalcular(
         cargar_costo_desde_items_prov,
         cargar_factor_items_prov,
         resolver_costo_ref_escritura,
+        validar_cambio_costo_ref,
     )
 
     prov_canon = cargar_costo_desde_items_prov(sh)
@@ -426,6 +429,7 @@ def recalcular(
         f"costo en hoja (hermano bodega): {len(costo_hoja_mp)}"
     )
     filas_tocadas = 0
+    costos_bloqueados = 0
 
     for i, row in enumerate(data_rows):
         if not any(c.strip() for c in row):
@@ -465,6 +469,11 @@ def recalcular(
 
         if col_costo:
             nk = _cod_mp_norm(cod)
+            unidad = (
+                (row[col_uni] if col_uni is not None and col_uni < len(row) else "")
+                .strip()
+                .lower()
+            )
             costo_mov = costo_ref_unico_mp.get(nk) if nk else None
             if costo_mov is None:
                 costo_mov = costo_ref_mp.get(k)
@@ -472,6 +481,7 @@ def recalcular(
                 costo_mov,
                 prov_canon.get(nk or "", 0.0),
                 factores_prov.get(nk or ""),
+                unidad_base=unidad or "gr",
             )
             if costo_esc is None:
                 costo_esc = costo_fallback_prov.get(nk or k[0])
@@ -487,6 +497,18 @@ def recalcular(
                     )
                 except ValueError:
                     costo_ant = 0.0
+                ok, motivo = validar_cambio_costo_ref(
+                    costo_ant,
+                    costo_esc,
+                    unidad_base=unidad,
+                    cu_prov=prov_canon.get(nk or "", 0.0),
+                )
+                if not ok:
+                    costos_bloqueados += 1
+                    print(
+                        f"    BLOQUEADO {cod} @ {bod}: costo {costo_ant} -> {costo_esc} ({motivo})"
+                    )
+                    continue
                 updates.append({
                     "range": rowcol_to_a1(row_1based, col_costo),
                     "values": [[costo_esc]],
@@ -498,6 +520,8 @@ def recalcular(
         print(f"\n  WARN: ninguna fila para cod_mp={cod_mp_filtro!r}")
 
     print(f"\n    Filas evaluadas: {filas_tocadas} | celdas a actualizar: {len(updates)}")
+    if costos_bloqueados:
+        print(f"    Costos bloqueados por candado: {costos_bloqueados}")
 
     if dry_run:
         print("\n    [DRY RUN] No se escribio nada. Corre con --produccion para aplicar.")

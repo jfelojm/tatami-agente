@@ -72,6 +72,8 @@ def calcular_total_smartmenu(
     hasta_hora: str | None = None,
     sin_iva: bool = True,
     incluir_anulados: bool = False,
+    *,
+    rows: list[list[str]] | None = None,
 ):
     """
     Suma el total por DOCUMENTO desde el grid Smart Menu (comprasloadVentas.php).
@@ -84,7 +86,8 @@ def calcular_total_smartmenu(
 
     Por defecto **no** suma documentos anulados (notas NO AUTORIZADO sí suman: efectivo / sin factura).
     """
-    rows = descargar_ventas_grid(fecha)
+    if rows is None:
+        rows = descargar_ventas_grid(fecha)
     if not rows:
         return {
             "fecha": fecha,

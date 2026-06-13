@@ -54,6 +54,62 @@ def normalizar_cod_bodega(cod: str | None) -> str:
     return (cod or "").strip().upper()
 
 
+# Alias operativos (WhatsApp / voz) → código canónico
+_ALIASES_BODEGA: dict[str, str] = {
+    "COCINA": "BOD-001",
+    "BARRA": "BOD-002",
+    "CONSIGNACION": "BOD-003",
+    "CONSIGNACIÓN": "BOD-003",
+    "LIMPIEZA": "BOD-004",
+    "EXTERNA": "BOD-005",
+    "BODEGA EXTERNA": "BOD-005",
+    "BODEGAISRAEL": "BOD-005",
+    "ISRAEL": "BOD-005",
+    "001": "BOD-001",
+    "002": "BOD-002",
+    "003": "BOD-003",
+    "004": "BOD-004",
+    "005": "BOD-005",
+}
+
+
+def _sin_tildes(s: str) -> str:
+    import unicodedata
+
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"
+    )
+
+
+def resolver_cod_bodega(cod: str | None) -> str:
+    """
+    Código BOD-00X desde entrada usuario: BOD-002, barra, consignación, 002, etc.
+    Si no resuelve, devuelve normalizar_cod_bodega (p. ej. ya es BOD-002).
+    """
+    raw = (cod or "").strip().upper()
+    if not raw:
+        return ""
+    if raw in BODEGAS:
+        return raw
+    compact = raw.replace(" ", "").replace("_", "-")
+    if compact in BODEGAS:
+        return compact
+    if compact.startswith("BOD") and len(compact) >= 6 and compact[3] != "-":
+        # BOD002 → BOD-002
+        digits = compact[3:].lstrip("-")
+        if digits.isdigit():
+            candidato = f"BOD-{digits.zfill(3)}"
+            if candidato in BODEGAS:
+                return candidato
+    alias = _sin_tildes(raw)
+    if alias in _ALIASES_BODEGA:
+        return _ALIASES_BODEGA[alias]
+    alias_compact = _sin_tildes(compact)
+    if alias_compact in _ALIASES_BODEGA:
+        return _ALIASES_BODEGA[alias_compact]
+    return raw
+
+
 def bodega_activa(cod: str | None) -> bool:
     c = normalizar_cod_bodega(cod)
     info = BODEGAS.get(c)
@@ -65,7 +121,7 @@ def bodega_permite_descargo_venta(cod: str | None) -> bool:
 
 
 def traslado_permitido(origen: str, destino: str) -> bool:
-    o, d = normalizar_cod_bodega(origen), normalizar_cod_bodega(destino)
+    o, d = resolver_cod_bodega(origen), resolver_cod_bodega(destino)
     if not o or not d or o == d:
         return False
     if not bodega_activa(o) or not bodega_activa(d):
@@ -101,11 +157,18 @@ def resolver_bodega_entrada_linea(
     confirmada: bool = False,
 ) -> tuple[str | None, str | None]:
     """
-    Bodega destino para ENTRADA de factura.
+    Bodega destino para ENTRADA de factura (XML Drive o factura manual API).
+
+    Regla operativa: BOD-003 (consignación virtual) es solo para ingresos manuales
+    sin factura (traslados / altas operativas). Compras con factura → bodega física
+    del ítem; si el catálogo dice BOD-003 se redirige a BOD-002 (barra propia).
+
     Retorna (cod_bodega, error_code).
     error_code: ITEM_SIN_BODEGA | BODEGA_INVALIDA | REQUIERE_CONFIRMACION
     """
     default = normalizar_cod_bodega(item_prov.get("cod_bodega_destino"))
+    if default == "BOD-003":
+        default = "BOD-002"
     if not default:
         return None, "ITEM_SIN_BODEGA"
     if not bodega_activa(default):

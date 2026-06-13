@@ -61,6 +61,10 @@ def main() -> None:
         [py, "calcular_costo_recetas.py"] + prod,
         "Costos platos (BD_RECETAS)",
     )
+    guardia_args = [py, "guardias_costos_mp.py"]
+    if args.produccion:
+        guardia_args.append("--strict")
+    _run(guardia_args, "Candado final costos MP")
     print("\nDiagnóstico opcional:")
     print("  python exportar_precio_ref_corruptos.py")
     print("  python diagnostico_costos_pipeline.py")

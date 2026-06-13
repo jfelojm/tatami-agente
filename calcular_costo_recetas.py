@@ -5,7 +5,9 @@ Por línea:
   MP:  cantidad × costo_unitario_ref × (1 + merma_pct) × pct_aplicacion
   SUB: cantidad × costo_unitario_estandar (BD_SUBRECETAS) × pct_aplicacion
 
-Salida: hoja BD_RECETAS (1 fila por cod_receta + variedad_smart_menu).
+Salida:
+  - BD_RECETAS_DETALLE: costo_unitario, costo_linea, nota_costo por línea
+  - BD_RECETAS: resumen por plato (costo_plato_estandar, lineas_sin_costo, …)
 
 Uso:
   python calcular_costo_recetas.py
@@ -37,6 +39,8 @@ from subrecetas_detalle import (
     cargar_bd_subrecetas_detalle,
 )
 from recetas_detalle import (
+    COLS_COSTO_RECETA_DETALLE,
+    SHEET_DETALLE,
     SHEET_RESUMEN,
     agrupar_por_plato,
     cargar_bd_recetas_detalle,
@@ -64,6 +68,165 @@ HEADERS_BD_RECETAS = [
 
 COL_COSTO = "costo_plato_estandar"
 COL_FECHA = "costo_calc_at"
+
+
+def _col_letter(n: int) -> str:
+    """1-based column index → A, B, … Z, AA."""
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _fila_dict_detalle(headers: list[str], row: list) -> dict:
+    return {
+        headers[k]: (row[k] if k < len(row) else "").strip()
+        for k in range(len(headers))
+        if headers[k]
+    }
+
+
+def _asegurar_columnas_costo_detalle(
+    ws: gspread.Worksheet, headers: list[str], produccion: bool
+) -> list[str]:
+    missing = [c for c in COLS_COSTO_RECETA_DETALLE if c not in headers]
+    if not missing:
+        return headers
+    if not produccion:
+        print(f"  [DRY RUN] Añadiría columnas en {SHEET_DETALLE}: {missing}")
+        return headers + missing
+    new_headers = headers + missing
+    end = _col_letter(len(new_headers))
+    ws.update(
+        values=[new_headers],
+        range_name=f"A1:{end}1",
+        value_input_option=ValueInputOption.user_entered,
+    )
+    print(f"  Columnas añadidas en {SHEET_DETALLE}: {missing}")
+    return new_headers
+
+
+def escribir_costos_bd_recetas_detalle(
+    sh,
+    costos_mp: dict[tuple[str, str], float],
+    unitarios_sub: dict[str, float],
+    produccion: bool,
+) -> dict:
+    """Escribe costo_unitario, costo_linea y nota_costo por fila ingrediente."""
+    ws = sh.worksheet(SHEET_DETALLE)
+    values = ws.get_all_values()
+    hi = next(
+        (i for i, r in enumerate(values) if any((c or "").strip() == "cod_receta" for c in r)),
+        None,
+    )
+    if hi is None:
+        print(f"  WARN: {SHEET_DETALLE} sin cabecera cod_receta")
+        return {"lineas": 0, "sin_costo": 0}
+
+    headers = [(c or "").strip() for c in values[hi]]
+    headers = _asegurar_columnas_costo_detalle(ws, headers, produccion)
+    ic = {h: i for i, h in enumerate(headers)}
+    for col in COLS_COSTO_RECETA_DETALLE:
+        if col not in ic:
+            ic[col] = len(headers)
+            headers.append(col)
+
+    i_cu = ic["costo_unitario"]
+    i_cl = ic["costo_linea"]
+    i_nota = ic["nota_costo"]
+    col_cu = _col_letter(i_cu + 1)
+    col_cl = _col_letter(i_cl + 1)
+    col_nota = _col_letter(i_nota + 1)
+
+    filas_cu: list[list] = []
+    filas_cl: list[list] = []
+    filas_nota: list[list] = []
+    n_lineas = 0
+    n_sin = 0
+    ejemplos_sin: list[str] = []
+
+    for row in values[hi + 1 :]:
+        if not any((c or "").strip() for c in row):
+            filas_cu.append([""])
+            filas_cl.append([""])
+            filas_nota.append([""])
+            continue
+        if str(row[0]).strip().startswith("["):
+            filas_cu.append([""])
+            filas_cl.append([""])
+            filas_nota.append([""])
+            continue
+        ln = _fila_dict_detalle(headers, row)
+        if not (ln.get("cod_receta") or "").strip():
+            filas_cu.append([""])
+            filas_cl.append([""])
+            filas_nota.append([""])
+            continue
+        if not es_linea_mp(ln) and not es_linea_subreceta(ln):
+            filas_cu.append([""])
+            filas_cl.append([""])
+            filas_nota.append([""])
+            continue
+
+        det = costo_linea_receta(ln, costos_mp, unitarios_sub)
+        n_lineas += 1
+        if not det:
+            filas_cu.append([""])
+            filas_cl.append([""])
+            filas_nota.append([""])
+            continue
+
+        cu = det["costo_unitario"]
+        cl = det["costo_linea"]
+        nota = (det.get("nota") or "").strip()
+        cod = det.get("cod", "?")
+        if cl <= 0 or cu <= 0:
+            n_sin += 1
+            if not nota:
+                tipo = det.get("tipo", "MP")
+                nota = f"{tipo.lower()}_{cod}_sin_costo"
+            if len(ejemplos_sin) < 12:
+                nom = (det.get("nombre") or cod)[:35]
+                ejemplos_sin.append(f"{det.get('tipo')} {cod} {nom} ({nota})")
+
+        filas_cu.append([cu if cu > 0 else ""])
+        filas_cl.append([cl if cl > 0 else ""])
+        filas_nota.append([nota])
+
+    print(f"\n{SHEET_DETALLE}: {n_lineas} líneas MP/SUB")
+    print(f"  Sin costo (costo_linea=0): {n_sin}")
+    if ejemplos_sin:
+        print("  Ejemplos sin costo:")
+        for e in ejemplos_sin:
+            print(f"    - {e}")
+
+    if not filas_cu:
+        return {"lineas": n_lineas, "sin_costo": n_sin}
+
+    last_row = hi + 1 + len(filas_cu)
+    if not produccion:
+        print(f"  [DRY RUN] Actualizaría {col_cu}2:{col_nota}{last_row}")
+        return {"lineas": n_lineas, "sin_costo": n_sin}
+
+    ws.update(
+        values=filas_cu,
+        range_name=f"{col_cu}{hi + 2}:{col_cu}{last_row}",
+        value_input_option=ValueInputOption.user_entered,
+    )
+    ws.update(
+        values=filas_cl,
+        range_name=f"{col_cl}{hi + 2}:{col_cl}{last_row}",
+        value_input_option=ValueInputOption.user_entered,
+    )
+    ws.update(
+        values=filas_nota,
+        range_name=f"{col_nota}{hi + 2}:{col_nota}{last_row}",
+        value_input_option=ValueInputOption.user_entered,
+    )
+    time.sleep(0.5)
+    print(f"  Costos escritos en {SHEET_DETALLE} ({col_cu}–{col_nota}).")
+    return {"lineas": n_lineas, "sin_costo": n_sin}
 
 
 def _norm_sub(cod: str) -> str:
@@ -393,12 +556,13 @@ def main() -> None:
     filas, avisos = calcular_costos_platos(por_plato, costos_mp, unitarios_sub)
 
     if avisos:
-        print(f"\nAvisos ({len(avisos)}):")
+        print(f"\nAvisos platos ({len(avisos)}):")
         for a in avisos[:30]:
             print(f"  - {a}")
         if len(avisos) > 30:
             print(f"  ... y {len(avisos) - 30} más")
 
+    escribir_costos_bd_recetas_detalle(sh, costos_mp, unitarios_sub, args.produccion)
     escribir_bd_recetas(sh, filas, args.produccion)
 
 

@@ -52,6 +52,13 @@ from numeros_sheets import (
 
 _PISO_COSTO_VALIDO = 1e-6
 
+# Candado: rechazar escrituras automáticas con salto >10× o <0.1× sin catálogo
+RATIO_MAX_CAMBIO_COSTO = 10.0
+RATIO_MIN_CAMBIO_COSTO = 0.1
+
+# Rango típico licores/vinos en ml (USD/ml) — no aplicar heurística gr/pack
+_RANGO_CU_ML_LICOR = (0.03, 0.65)
+
 
 
 
@@ -160,41 +167,66 @@ def cargar_factor_items_prov(sh) -> dict[str, float]:
 
 
 
-def _corregir_cupo_pack(cu: float, factor_hint: float | None = None) -> tuple[float, bool]:
-
+def _corregir_cupo_pack(
+    cu: float,
+    factor_hint: float | None = None,
+    *,
+    unidad_base: str = "gr",
+) -> tuple[float, bool]:
     """
-
     Si cu parece precio de kg/caja guardado como USD/gr, divide por factor.
-
-    Retorna (cu_corregido, se_corrigio).
-
+    NO aplicar a licores ml en rango 0.03–0.25 USD/ml (bug histórico ÷1000).
     """
+    u = (unidad_base or "gr").strip().lower()
+    lo, hi = _RANGO_CU_ML_LICOR
+    if u == "ml" and lo <= cu <= hi:
+        return cu, False
 
-    if cu <= 0 or not _parece_precio_pack_sin_dividir(cu):
-
+    if cu <= 0 or not _parece_precio_pack_sin_dividir(cu, unidad_base):
         return cu, False
 
     candidatos = []
-
     if factor_hint and factor_hint > 1:
-
         candidatos.append(factor_hint)
-
     for fac in (1000.0, 700.0, 4000.0, 24.0):
-
         if fac not in candidatos:
-
             candidatos.append(fac)
 
     for fac in candidatos:
-
         c2 = round(cu / fac, 6)
-
         if 0 < c2 < 0.05:
-
+            # Evitar sobre-corrección ~1000× en MPs ml mal clasificados como gr
+            if u == "ml" and cu >= lo and c2 < cu / 50:
+                continue
             return c2, True
 
     return cu, False
+
+
+def validar_cambio_costo_ref(
+    cu_old: float,
+    cu_new: float,
+    *,
+    unidad_base: str = "",
+    cu_prov: float = 0.0,
+    forzar: bool = False,
+) -> tuple[bool, str]:
+    """
+    Candado antes de escribir costo_unitario_ref en BD_MP_SISTEMA.
+    Bloquea saltos >10× o <0.1× salvo que el catálogo confirme el nuevo valor.
+    """
+    if forzar or cu_old <= _PISO_COSTO_VALIDO:
+        return True, "sin_anterior_o_forzado"
+    if cu_new <= _PISO_COSTO_VALIDO:
+        return False, "costo_nuevo_cero"
+    ratio = cu_new / cu_old if cu_old > 0 else 0.0
+    if RATIO_MIN_CAMBIO_COSTO <= ratio <= RATIO_MAX_CAMBIO_COSTO:
+        return True, "ok"
+    if cu_prov >= _PISO_COSTO_VALIDO:
+        rel = abs(cu_new - cu_prov) / max(cu_prov, 1e-9)
+        if rel <= 0.05:
+            return True, "confirmado_catalogo"
+    return False, f"salto_extremo_ratio_{ratio:.2f}"
 
 
 
@@ -338,11 +370,24 @@ def _elegir_costo_mp_final(
     Mediana robusta entre items_prov y BD_MP.
     Pack en precio_ref: precio_ref > 0,05 y BD_MP coherente y mucho menor.
     """
+    lo, hi = _RANGO_CU_ML_LICOR
+    # BD_MP corrupto ~÷1000 vs catálogo ml válido
+    if (
+        cu_prov >= lo
+        and cu_prov <= hi
+        and cu_hoja >= _PISO_COSTO_VALIDO
+        and cu_hoja < cu_prov / 50
+    ):
+        return cu_prov, "bd_mp_div1000_usa_prov"
+
     if (
         cu_prov > 0.05
         and cu_hoja >= _PISO_COSTO_VALIDO
         and cu_hoja < cu_prov / umbral_pack
     ):
+        # Licores ml: cu_prov ya es USD/ml; no descartar por regla pack/gr
+        if lo <= cu_prov <= hi:
+            return cu_prov, "prov_ml_valido_vs_hoja_baja"
         return cu_hoja, "prov_pack_usa_bd_mp"
 
     # Catálogo leído mal (re-dividió precio_ref unitario); BD_MP aún tiene costo de factura/manual.
@@ -392,6 +437,20 @@ def cargar_costos_mp_para_recetas(
 
     avisos: list[str] = []
 
+    # unidad_base por MP desde maestro (para no aplicar heurística gr a licores ml)
+    unidad_mp: dict[str, str] = {}
+    ws_mp = sh.worksheet("BD_MP_SISTEMA")
+    vals_mp = ws_mp.get_all_values()
+    hi_mp = next(i for i, r in enumerate(vals_mp) if "cod_mp_sistema" in r)
+    h_mp = [(c or "").strip() for c in vals_mp[hi_mp]]
+    ic_mp = h_mp.index("cod_mp_sistema")
+    iu_mp = h_mp.index("unidad_base") if "unidad_base" in h_mp else None
+    if iu_mp is not None:
+        for row in vals_mp[hi_mp + 1 :]:
+            cod = norm_mp(row[ic_mp] if ic_mp < len(row) else "")
+            if cod and cod not in unidad_mp:
+                unidad_mp[cod] = (row[iu_mp] if iu_mp < len(row) else "").strip().lower()
+
 
 
     bodegas = sorted({bod for _, bod in hoja_mp})
@@ -431,26 +490,24 @@ def cargar_costos_mp_para_recetas(
 
 
         if cu_prov <= 0 and cu_hoja > 0:
-
-            cu_corr, fixed = _corregir_cupo_pack(cu_hoja, factores.get(mp))
-
-            if fixed:
-
-                cu_final = cu_corr
-
-                avisos.append(
-
-                    f"MP {mp}: BD_MP {cu_hoja:.4f} -> {cu_corr:.6f} USD/gr (÷factor pack)"
-
+            uni = unidad_mp.get(mp, "gr")
+            lo, hi = _RANGO_CU_ML_LICOR
+            if uni == "ml" and lo <= cu_hoja <= hi:
+                cu_final = cu_hoja
+            else:
+                uni_hint = uni or ("ml" if (factores.get(mp) or 0) >= 300 else "gr")
+                cu_corr, fixed = _corregir_cupo_pack(
+                    cu_hoja, factores.get(mp), unidad_base=uni_hint
                 )
-
-            elif _parece_precio_pack_sin_dividir(cu_hoja):
-
-                avisos.append(
-
-                    f"MP {mp}: BD_MP {cu_hoja:.4f} alto sin precio_ref (revisar manual)"
-
-                )
+                if fixed:
+                    cu_final = cu_corr
+                    avisos.append(
+                        f"MP {mp}: BD_MP {cu_hoja:.4f} -> {cu_corr:.6f} USD/{uni_hint} (÷factor pack)"
+                    )
+                elif _parece_precio_pack_sin_dividir(cu_hoja, uni_hint):
+                    avisos.append(
+                        f"MP {mp}: BD_MP {cu_hoja:.4f} alto sin precio_ref (revisar manual)"
+                    )
 
 
 
@@ -477,6 +534,8 @@ def resolver_costo_ref_escritura(
     *,
 
     umbral_pack: float = 5.0,
+
+    unidad_base: str = "gr",
 
 ) -> float | None:
 
@@ -506,7 +565,7 @@ def resolver_costo_ref_escritura(
 
     if mov >= _PISO_COSTO_VALIDO:
 
-        cu_corr, _ = _corregir_cupo_pack(mov, factor_hint)
+        cu_corr, _ = _corregir_cupo_pack(mov, factor_hint, unidad_base=unidad_base)
 
         return round(cu_corr, 6)
 

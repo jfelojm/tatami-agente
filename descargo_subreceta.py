@@ -217,6 +217,12 @@ def procesar_linea_sub_venta(
     if err_bod or not bodega:
         return None, None, f"SUB {cod_sub}: sin cod_bodega en receta (cocina/barra)"
 
+    # Batches de barra: stock vive en BOD-002 aunque la carta diga otra bodega
+    from subrecetas_bodegas_stock import SUBRECETAS_BARRA
+
+    if cod_sub in SUBRECETAS_BARRA:
+        bodega = "BOD-002"
+
     if not bodega_permite_descargo_venta(bodega):
         return None, None, f"SUB {cod_sub}: bodega {bodega} no permitida para venta"
 

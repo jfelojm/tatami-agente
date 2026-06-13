@@ -18,7 +18,7 @@ SHEET_RESUMEN = "BD_RECETAS"
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Orden de columnas en el maestro (fila 1)
-HEADERS_BD_RECETAS_DETALLE = [
+HEADERS_BD_RECETAS_DETALLE_BASE = [
     "nombre_receta",
     "cod_receta",
     "variedad_smart_menu",
@@ -33,6 +33,15 @@ HEADERS_BD_RECETAS_DETALLE = [
     "es_opcional",
     "pct_aplicacion",
 ]
+
+# Calculadas por calcular_costo_recetas.py (vacías al promover desde staging)
+COLS_COSTO_RECETA_DETALLE = [
+    "costo_unitario",
+    "costo_linea",
+    "nota_costo",
+]
+
+HEADERS_BD_RECETAS_DETALLE = HEADERS_BD_RECETAS_DETALLE_BASE + COLS_COSTO_RECETA_DETALLE
 
 
 def es_linea_subreceta(row: dict) -> bool:

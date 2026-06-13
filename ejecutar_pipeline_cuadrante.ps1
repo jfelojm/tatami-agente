@@ -52,7 +52,7 @@ switch ($Slot) {
     "mediodia" {
         $Label = "Cierre completo - ayer ($Ayer)"
         # Sin --fecha: pipeline_diario usa ayer calendario EC
-        $PipelineArgs = @("$Root\pipeline_diario.py", "--modo", "completo")
+        $PipelineArgs = @("$Root\pipeline_diario.py", "--modo", "completo", "--with-costos")
     }
     "tarde" {
         $Label = "Operativo - hoy ($Hoy)"

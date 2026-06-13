@@ -2,7 +2,7 @@ import os
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -13,9 +13,7 @@ SCOPES = [
 
 
 def _get_sheet():
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     gc = gspread.authorize(creds)
     return gc.open_by_key(os.getenv("SPREADSHEET_ID"))
 

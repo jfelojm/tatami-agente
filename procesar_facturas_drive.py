@@ -6,10 +6,11 @@ from xml.etree import ElementTree as ET
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
+
+from google_credentials import google_credentials
 
 try:
     from alertas_tatami import enviar_whatsapp_texto as _enviar_whatsapp_texto
@@ -60,9 +61,7 @@ _sheet_cache = None
 def _get_drive_service():
     global _drive_service_cache
     if _drive_service_cache is None:
-        creds = Credentials.from_service_account_file(
-            os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-        )
+        creds = google_credentials(SCOPES)
         _drive_service_cache = build("drive", "v3", credentials=creds)
     return _drive_service_cache
 
@@ -70,9 +69,7 @@ def _get_drive_service():
 def _get_sheet():
     global _sheet_cache
     if _sheet_cache is None:
-        creds = Credentials.from_service_account_file(
-            os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-        )
+        creds = google_credentials(SCOPES)
         _sheet_cache = gspread.Client(auth=creds).open_by_key(os.getenv("SPREADSHEET_ID"))
     return _sheet_cache
 
@@ -2894,4 +2891,11 @@ if __name__ == "__main__":
         tag += " + REPROCESAR"
     print(f"MODULO FACTURAS - {tag}")
     print("=" * 50)
-    procesar_facturas(dry_run=DRY_RUN, reprocesar=REPROCESAR)
+    resumen = procesar_facturas(dry_run=DRY_RUN, reprocesar=REPROCESAR)
+    if not DRY_RUN:
+        try:
+            from alertas_pipeline import enviar_resumen_facturas
+
+            enviar_resumen_facturas(resumen)
+        except Exception as e:
+            print(f"  WARN: enviar_resumen_facturas: {e}")

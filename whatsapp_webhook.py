@@ -5,14 +5,15 @@ import hmac
 import os
 import json
 import math
+import re
 import time
 import unicodedata
 from collections import OrderedDict, defaultdict, deque
 from datetime import date, timedelta, datetime
+from pathlib import Path
 from dotenv import load_dotenv
 from supabase import create_client
 import gspread
-from google.oauth2.service_account import Credentials
 import anthropic
 import pytz
 import httpx
@@ -37,6 +38,17 @@ from kardex_inventario import get_kardex, formatear_kardex_wa, generar_xlsx
 
 load_dotenv()
 TZ = pytz.timezone("America/Guayaquil")
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+
+
+def _log_webhook_event(line: str) -> None:
+    try:
+        LOG_DIR.mkdir(exist_ok=True)
+        ts = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+        with open(LOG_DIR / "webhook_inbound.log", "a", encoding="utf-8") as f:
+            f.write(f"{ts} {line}\n")
+    except Exception as e:
+        print(f"[Meta webhook] log error: {e}")
 
 def _norm_tel(telefono: str) -> str:
     return (telefono or "").strip().lstrip("+")
@@ -64,6 +76,23 @@ COMANDOS_OPERATIVO = {
 }
 
 MSG_NO_AUTORIZADO = "No tienes acceso a este agente."
+MSG_ERROR_PROCESO = (
+    "Hubo un error procesando tu mensaje. Intenta de nuevo en un momento.\n"
+    "Para batches de barra: PRODUCIR SUB 051 052 BOD-002 (añade CONFIRMAR para aplicar)."
+)
+MSG_TIPO_NO_SOPORTADO = (
+    "Solo procesamos mensajes de texto (y fotos/PDF de facturas).\n"
+    "Para registrar batch de barra escribe exactamente:\n"
+    "PRODUCIR SUB 053 BOD-002\n"
+    "(simula) o añade CONFIRMAR al final para aplicar."
+)
+MSG_PROCESANDO = "Recibí tu mensaje, dame un momento..."
+MSG_BATCH_NO_IDENTIFICADO = (
+    "Entiendo que quieres registrar un batch de barra, pero no identifiqué cuál.\n"
+    "Dime el nombre o el código:\n"
+    "051 Negroni | 052 Tokio Mule | 053 Ron Banana Negroni | 054 Mojito coco\n"
+    "Ejemplo: preparar 1100 ml batch ron banana negroni"
+)
 
 
 def get_rol(telefono: str) -> str | None:
@@ -99,6 +128,10 @@ def autorizado_comando(telefono: str, comando: str) -> bool:
         return any(comando.upper().startswith(c) for c in COMANDOS_OPERATIVO)
     return False
 
+
+def _autorizado_produccion_sub(telefono: str) -> bool:
+    return get_rol(telefono) in ("SOCIO", "OPERATIVO")
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -113,6 +146,8 @@ MSG_DEDUP_MAX = 50_000
 # Cola por número: un mensaje activo + pendientes (Lock + drain)
 _wa_locks: dict[str, asyncio.Lock] = {}
 _wa_pending: dict[str, deque] = defaultdict(deque)
+# Última simulación PRODUCIR SUB por wa_id (para "si confirmo" / "confirmo")
+_pending_prod_sub: dict[str, dict] = {}
 _wa_cola_avisado: set[str] = set()
 MSG_COLA_ESPERA = (
     "Un momento, estoy procesando tu mensaje anterior. Te respondo en seguida."
@@ -131,6 +166,12 @@ _sheet_workbook = None
 
 from conteo_routes import router as conteo_router
 app.include_router(conteo_router, prefix="/api/conteo")
+
+from factura_manual_routes import router as factura_manual_router
+app.include_router(factura_manual_router, prefix="/api/factura_manual")
+
+from dashboard_routes import router as dashboard_router
+app.include_router(dashboard_router)
 
 # ── Helpers ──────────────────────────────────────────────────
 def _to_float(v, default=0.0):
@@ -213,9 +254,9 @@ def conectar_supabase():
 def conectar_sheets():
     global _sheet_workbook
     if _sheet_workbook is None:
-        creds = Credentials.from_service_account_file(
-            os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-        )
+        from google_credentials import google_credentials
+
+        creds = google_credentials(SCOPES)
         _sheet_workbook = gspread.Client(auth=creds).open_by_key(
             os.getenv("SPREADSHEET_ID")
         )
@@ -298,27 +339,279 @@ def leer_hoja_con_headers(sheet_name: str, header_key: str, *, skip_after_header
 
 
 # ── Búsqueda de MP (migrada desde consultas_chat_extendidas) ─
+def _tokens_busqueda_mp(texto: str) -> list[str]:
+    import re
+
+    t = re.sub(r"[''`´]", "", (texto or "").strip().lower())
+    return [w for w in re.split(r"\s+", t) if w]
+
+
 def _buscar_mp_por_nombre_o_codigo(texto: str) -> list[dict]:
     """
     Busca MPs en BD_MP_SISTEMA por nombre (substring) o código exacto.
+    Acepta varias palabras: "buchanan 18" → nombre contiene buchanan y 18.
     Usa leer_bd_mp_sistema() con cache — no re-autentica con Sheets.
     """
+    from inventario_stock_mp import norm_mp
+
     texto_u = (texto or "").strip().lower()
     if len(texto_u) < 2:
         return []
+    tokens = _tokens_busqueda_mp(texto_u)
     rows = leer_bd_mp_sistema()
     hits: list[dict] = []
+    vistos: set[tuple[str, str]] = set()
+
+    def _add(r: dict, *, prio: int) -> None:
+        cod = (r.get("cod_mp_sistema") or "").strip()
+        bod = (r.get("cod_bodega") or "").strip()
+        key = (norm_mp(cod), bod)
+        if not cod or key in vistos:
+            return
+        vistos.add(key)
+        hits.append({**r, "_prio": prio})
+
     for r in rows:
         cod = (r.get("cod_mp_sistema") or "").strip()
         nom = (r.get("nombre_mp") or "").strip()
         if not cod:
             continue
-        if texto_u == cod.lower():
-            hits.insert(0, r)
+        cod_l = cod.lower()
+        nom_l = nom.lower()
+        if texto_u == cod_l or norm_mp(cod_l) == norm_mp(texto_u):
+            _add(r, prio=0)
             continue
-        if texto_u in nom.lower():
-            hits.append(r)
+        if len(tokens) >= 2:
+            if all(tok in nom_l or tok == cod_l for tok in tokens):
+                _add(r, prio=1)
+            continue
+        if texto_u in nom_l:
+            _add(r, prio=2)
+
+    hits.sort(key=lambda x: (x.get("_prio", 9), x.get("nombre_mp", "")))
+    for h in hits:
+        h.pop("_prio", None)
     return hits
+
+
+def _filas_mp_maestro(rows: list[dict], cod_mp: str) -> list[dict]:
+    from inventario_stock_mp import norm_mp
+
+    target = norm_mp(cod_mp)
+    if not target:
+        return []
+    return [
+        r
+        for r in rows
+        if norm_mp(r.get("cod_mp_sistema")) == target
+    ]
+
+
+def _limpiar_cod_mp_usuario(cod: str) -> str:
+    c = (cod or "").strip()
+    upper = c.upper()
+    if upper.startswith("MP-"):
+        return c[3:].strip()
+    if upper.startswith("MP") and len(c) > 2 and c[2] in "- ":
+        return c[3:].strip()
+    return c
+
+
+def _cods_mp_unicos(hits: list[dict]) -> list[str]:
+    from inventario_stock_mp import norm_mp
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for h in hits:
+        c = norm_mp(h.get("cod_mp_sistema"))
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return sorted(out)
+
+
+def _opciones_mp_desde_hits(
+    hits: list[dict],
+    *,
+    bodega_filtro: str = "",
+) -> list[dict]:
+    """Lista de MPs únicos con stock por bodega, para preguntar al usuario."""
+    from bodegas_config import nombre_bodega, resolver_cod_bodega
+    from inventario_stock_mp import agrupar_stock_par_por_mp
+
+    g = agrupar_stock_par_por_mp(hits)
+    bod_f = resolver_cod_bodega(bodega_filtro) if bodega_filtro else ""
+    opciones: list[dict] = []
+    items = sorted(
+        g.items(),
+        key=lambda x: (
+            -(x[1]["por_bodega"].get(bod_f, 0) if bod_f else x[1]["stock_total"]),
+            x[1]["nombre_mp"],
+        ),
+    )
+    for i, (cod, info) in enumerate(items, 1):
+        ub = (info.get("unidad_base") or "").strip()
+        desg = ", ".join(
+            f"{nombre_bodega(b)} {round(v, 2)} {ub}".strip()
+            for b, v in sorted(info.get("por_bodega", {}).items())
+        )
+        nom = (info.get("nombre_mp") or cod).strip()
+        opciones.append(
+            {
+                "indice": i,
+                "cod_mp_sistema": cod,
+                "nombre_mp": nom,
+                "stock_por_bodega": info.get("por_bodega", {}),
+                "stock_total": info.get("stock_total", 0),
+                "unidad_base": ub,
+                "texto_usuario": f"{nom} — {desg or 'sin stock'}",
+            }
+        )
+    return opciones
+
+
+def _elegir_mp_automatico(hits: list[dict], bodega_origen: str = "") -> str | None:
+    """Un solo MP claro, o único con stock en bodega origen."""
+    from bodegas_config import resolver_cod_bodega
+    from inventario_stock_mp import agrupar_stock_par_por_mp
+
+    g = agrupar_stock_par_por_mp(hits)
+    cods = list(g.keys())
+    if len(cods) == 1:
+        return cods[0]
+    if not bodega_origen:
+        return None
+    origen = resolver_cod_bodega(bodega_origen)
+    if not origen:
+        return None
+    con_stock = [
+        c
+        for c in cods
+        if float(g[c].get("por_bodega", {}).get(origen, 0) or 0) > 0
+    ]
+    if len(con_stock) == 1:
+        return con_stock[0]
+    return None
+
+
+def _resolver_mp_por_nombre(
+    rows: list[dict],
+    *,
+    nombre_mp: str = "",
+    cod_mp: str = "",
+    bodega_origen: str = "",
+) -> dict:
+    """
+    Resuelve materia prima por nombre (prioridad) o código solo si existe en maestro.
+    Nunca confía en códigos inventados.
+
+    Retorna:
+      {"ok": True, "cod_mp", "nombre_mp"}
+      {"ok": False, "requiere_eleccion": True, "opciones", "mensaje"}
+      {"ok": False, "error": "..."}
+    """
+    from inventario_stock_mp import norm_mp
+
+    nom = (nombre_mp or "").strip()
+    cod_raw = _limpiar_cod_mp_usuario(cod_mp) if cod_mp else ""
+    cod_confiable = (
+        norm_mp(cod_raw) if cod_raw and _filas_mp_maestro(rows, cod_raw) else ""
+    )
+
+    if cod_confiable:
+        nombre = ""
+        for r in _filas_mp_maestro(rows, cod_confiable):
+            nombre = (r.get("nombre_mp") or "").strip()
+            if nombre:
+                break
+        return {
+            "ok": True,
+            "cod_mp": cod_confiable,
+            "nombre_mp": nombre or cod_confiable,
+        }
+
+    texto = nom or cod_raw
+    if not texto or len(texto) < 2:
+        return {
+            "ok": False,
+            "error": "¿Qué producto? Dime el nombre (ej. Buchanan's 18, papa, hielo).",
+        }
+
+    hits = _buscar_mp_por_nombre_o_codigo(texto)
+    if not hits:
+        return {
+            "ok": False,
+            "error": (
+                f"No encontré '{texto}' en inventario. "
+                "Prueba otro nombre o revisa cómo está en el maestro."
+            ),
+        }
+
+    elegido = _elegir_mp_automatico(hits, bodega_origen)
+    if elegido:
+        info = _opciones_mp_desde_hits(hits, bodega_filtro=bodega_origen)
+        nom_ok = next(
+            (o["nombre_mp"] for o in info if o["cod_mp_sistema"] == elegido),
+            elegido,
+        )
+        return {"ok": True, "cod_mp": elegido, "nombre_mp": nom_ok}
+
+    opciones = _opciones_mp_desde_hits(hits, bodega_filtro=bodega_origen)
+    if len(opciones) == 1:
+        o = opciones[0]
+        return {
+            "ok": True,
+            "cod_mp": o["cod_mp_sistema"],
+            "nombre_mp": o["nombre_mp"],
+        }
+
+    lineas = [f"{o['indice']}. {o['texto_usuario']}" for o in opciones]
+    return {
+        "ok": False,
+        "requiere_eleccion": True,
+        "opciones": opciones,
+        "mensaje": (
+            "Hay varios productos parecidos. Pregunta al usuario cuál es "
+            "(por nombre, sin pedir códigos MP):\n" + "\n".join(lineas)
+        ),
+    }
+
+
+def _hint_fila_maestro_traslado(
+    rows: list[dict], cod_mp: str, bodega: str, *, rol: str
+) -> str:
+    """Texto extra cuando falta fila MP×bodega en BD_MP_SISTEMA."""
+    from bodegas_config import nombre_bodega, normalizar_cod_bodega
+
+    filas = _filas_mp_maestro(rows, cod_mp)
+    if not filas:
+        return (
+            f" No hay ninguna fila de MP {cod_mp} en el maestro. "
+            "Verifica el código (ej. Buchanan's 18 = MP 566)."
+        )
+    por_bod: dict[str, float] = {}
+    nombre = ""
+    for r in filas:
+        bod = normalizar_cod_bodega(r.get("cod_bodega"))
+        if not bod:
+            continue
+        try:
+            stk = float(r.get("stock_actual") or 0)
+        except (TypeError, ValueError):
+            stk = 0.0
+        por_bod[bod] = por_bod.get(bod, 0.0) + stk
+        if not nombre:
+            nombre = (r.get("nombre_mp") or "").strip()
+    desglose = ", ".join(
+        f"{nombre_bodega(b)}={round(s, 2)}" for b, s in sorted(por_bod.items())
+    )
+    nom_txt = nombre or f"MP {cod_mp}"
+    return (
+        f" {nom_txt} sí está en inventario, pero no en "
+        f"{nombre_bodega(bodega)} como {rol}. Stock por bodega: {desglose}. "
+        "Si hay varios productos parecidos, pregunta al usuario cuál es "
+        "(por nombre, no por código)."
+    )
 
 
 # ── Consumo teórico (migrado desde consultas_chat_extendidas) ─
@@ -1880,28 +2173,44 @@ def tool_plato_top_semana():
 # ── TOOL 6 — buscar bodega ──────────────────────────────────
 def tool_buscar_bodega(args):
     from bodegas_config import nombre_bodega, normalizar_cod_bodega
+    from inventario_stock_mp import norm_mp
 
-    nombre = args.get("nombre_mp", "").strip().lower()
-    rows = leer_bd_mp_sistema()
+    nombre = (args.get("nombre_mp") or "").strip()
+    matching = _buscar_mp_por_nombre_o_codigo(nombre)
+    if not matching:
+        return {"encontrado": False, "mensaje": f"No encontre '{nombre}' en el sistema."}
+
+    opciones = _opciones_mp_desde_hits(matching)
+    if len(opciones) > 1:
+        lineas = [f"{o['indice']}. {o['texto_usuario']}" for o in opciones]
+        return {
+            "encontrado": True,
+            "requiere_eleccion": True,
+            "mensaje": (
+                "Varios productos parecidos. Pregunta al usuario cuál necesita:\n"
+                + "\n".join(lineas)
+            ),
+            "opciones": opciones,
+        }
+
     resultados = []
-    for r in rows:
-        if nombre in str(r.get("nombre_mp", "")).strip().lower():
-            try:
-                stock = _to_float(r.get("stock_actual", "0") or "0")
-            except Exception:
-                stock = 0
-            bod = normalizar_cod_bodega(r.get("cod_bodega", ""))
-            resultados.append({
-                "cod_mp": str(r.get("cod_mp_sistema", "")).strip(),
-                "nombre_mp": str(r.get("nombre_mp", "")).strip(),
-                "cod_bodega": bod,
-                "nombre_bodega": nombre_bodega(bod),
-                "bodega": bod,
-                "stock_actual": round(stock, 2),
-                "unidad_base": str(r.get("unidad_base", "")).strip(),
-            })
-    if not resultados:
-        return {"encontrado": False, "mensaje": f"No encontre '{args.get('nombre_mp')}' en el sistema."}
+    for r in matching:
+        try:
+            stock = _to_float(r.get("stock_actual", "0") or "0")
+        except Exception:
+            stock = 0
+        bod = normalizar_cod_bodega(r.get("cod_bodega", ""))
+        cod = str(r.get("cod_mp_sistema", "")).strip()
+        resultados.append({
+            "cod_mp": cod,
+            "cod_mp_sistema": norm_mp(cod),
+            "nombre_mp": str(r.get("nombre_mp", "")).strip(),
+            "cod_bodega": bod,
+            "nombre_bodega": nombre_bodega(bod),
+            "bodega": bod,
+            "stock_actual": round(stock, 2),
+            "unidad_base": str(r.get("unidad_base", "")).strip(),
+        })
     por_mp: dict[str, float] = {}
     for x in resultados:
         por_mp[x["cod_mp"]] = por_mp.get(x["cod_mp"], 0.0) + x["stock_actual"]
@@ -1912,35 +2221,54 @@ def tool_buscar_bodega(args):
 # ── TOOL 7 — trasladar MP ───────────────────────────────────
 def tool_trasladar_mp(args):
     from bodegas_config import (
-        normalizar_cod_bodega,
         nombre_bodega,
+        normalizar_cod_bodega,
+        resolver_cod_bodega,
         traslado_permitido,
     )
+    from inventario_stock_mp import norm_mp
 
-    cod_mp = args.get("cod_mp_sistema", "").strip()
-    bodega_origen = normalizar_cod_bodega(args.get("bodega_origen", ""))
-    bodega_destino = normalizar_cod_bodega(args.get("bodega_destino", ""))
+    bodega_origen = resolver_cod_bodega(args.get("bodega_origen", ""))
+    bodega_destino = resolver_cod_bodega(args.get("bodega_destino", ""))
     cantidad = float(args.get("cantidad", 0))
     confirmado = args.get("confirmado", False)
+
+    rows = leer_bd_mp_sistema()
+    res_mp = _resolver_mp_por_nombre(
+        rows,
+        nombre_mp=args.get("nombre_mp", ""),
+        cod_mp=args.get("cod_mp_sistema", ""),
+        bodega_origen=args.get("bodega_origen", ""),
+    )
+    if not res_mp.get("ok"):
+        if res_mp.get("requiere_eleccion"):
+            return {
+                "requiere_eleccion": True,
+                "opciones": res_mp.get("opciones", []),
+                "mensaje": res_mp.get("mensaje", ""),
+            }
+        return {"error": res_mp.get("error", "No se pudo identificar el producto.")}
+    cod_mp = res_mp["cod_mp"]
+    nombre_mp_resuelto = res_mp.get("nombre_mp", "")
 
     if cantidad <= 0:
         return {"error": "La cantidad debe ser mayor que cero."}
     if not traslado_permitido(bodega_origen, bodega_destino):
         return {
             "error": (
-                f"Traslado no permitido: {nombre_bodega(bodega_origen)} → "
-                f"{nombre_bodega(bodega_destino)}. "
-                "Válidos: cocina↔barra↔externa; consignación↔barra."
+                f"Traslado no permitido: {nombre_bodega(bodega_origen) or bodega_origen} → "
+                f"{nombre_bodega(bodega_destino) or bodega_destino}. "
+                "Válidos: cocina↔barra↔externa; consignación↔barra. "
+                "Usa BOD-002/BOD-003 o nombres barra/consignación."
             )
         }
 
-    rows = leer_bd_mp_sistema()
     unidad_base = "UNI"
     nombre_mp = ""
     stock_origen = None
     costo_ref_origen = 0.0
     for r in rows:
-        if str(r.get("cod_mp_sistema", "")).strip() != cod_mp:
+        if norm_mp(r.get("cod_mp_sistema")) != cod_mp:
             continue
         if normalizar_cod_bodega(r.get("cod_bodega", "")) == bodega_origen:
             unidad_base = str(r.get("unidad_base", "UNI")).strip()
@@ -1956,8 +2284,15 @@ def tool_trasladar_mp(args):
             break
 
     if stock_origen is None:
+        etiqueta = nombre_mp_resuelto or nombre_mp or cod_mp
         return {
-            "error": f"No hay fila en maestro para MP {cod_mp} en {nombre_bodega(bodega_origen)}."
+            "error": (
+                f"{etiqueta} no está registrado en "
+                f"{nombre_bodega(bodega_origen)} (origen del traslado)."
+                + _hint_fila_maestro_traslado(
+                    rows, cod_mp, bodega_origen, rol="origen"
+                )
+            )
         }
 
     if cantidad > stock_origen:
@@ -1973,7 +2308,7 @@ def tool_trasladar_mp(args):
         (
             r
             for r in rows
-            if str(r.get("cod_mp_sistema", "")).strip() == cod_mp
+            if norm_mp(r.get("cod_mp_sistema")) == cod_mp
             and normalizar_cod_bodega(r.get("cod_bodega", "")) == bodega_destino
         ),
         None,
@@ -1983,18 +2318,24 @@ def tool_trasladar_mp(args):
             "error": (
                 f"No existe fila para {cod_mp} en {nombre_bodega(bodega_destino)}. "
                 "Debe crearse primero en BD_MP_SISTEMA."
+                + _hint_fila_maestro_traslado(
+                    rows, cod_mp, bodega_destino, rol="destino"
+                )
             )
         }
 
     if not confirmado:
+        etiqueta = (nombre_mp or nombre_mp_resuelto or cod_mp).strip()
         return {
             "requiere_confirmacion": True,
+            "cod_mp_sistema": cod_mp,
+            "nombre_mp": etiqueta,
             "stock_origen": round(stock_origen, 4),
             "mensaje": (
-                f"Confirmas trasladar {cantidad} {unidad_base} de {cod_mp} "
-                f"({nombre_mp}) de {nombre_bodega(bodega_origen)} "
+                f"Confirmas trasladar {cantidad} {unidad_base} de {etiqueta} "
+                f"de {nombre_bodega(bodega_origen)} "
                 f"a {nombre_bodega(bodega_destino)}? "
-                f"Stock origen actual: {round(stock_origen, 4)}. "
+                f"Stock en origen: {round(stock_origen, 4)} {unidad_base}. "
                 "Responde 'si confirmo el traslado' para ejecutar."
             ),
         }
@@ -2021,7 +2362,8 @@ def tool_trasladar_mp(args):
         "ejecutado": True,
         "cod_mov": res["cod_mov"],
         "mensaje": (
-            f"Traslado registrado: {cantidad} {unidad_base} de {cod_mp} "
+            f"Traslado registrado: {cantidad} {unidad_base} de "
+            f"{(nombre_mp or nombre_mp_resuelto or cod_mp).strip()} "
             f"de {nombre_bodega(bodega_origen)} a {nombre_bodega(bodega_destino)}. "
             "Stock y costo ref recalculados en Sheets."
         ),
@@ -2197,11 +2539,24 @@ def tool_rotacion_baja(args):
 def tool_stock_ingrediente(args):
     from inventario_stock_mp import agrupar_stock_par_por_mp, norm_mp
 
-    nombre = args.get("nombre_mp", "").strip().lower()
-    rows = leer_bd_mp_sistema()
-    matching = [r for r in rows if nombre in str(r.get("nombre_mp", "")).strip().lower()]
+    nombre = args.get("nombre_mp", "").strip()
+    matching = _buscar_mp_por_nombre_o_codigo(nombre)
     if not matching:
-        return {"encontrado": False, "mensaje": f"No encontre '{args.get('nombre_mp')}' en el sistema."}
+        return {"encontrado": False, "mensaje": f"No encontre '{nombre}' en el sistema."}
+
+    opciones = _opciones_mp_desde_hits(matching)
+    if len(opciones) > 1:
+        lineas = [f"{o['indice']}. {o['texto_usuario']}" for o in opciones]
+        return {
+            "encontrado": True,
+            "requiere_eleccion": True,
+            "mensaje": (
+                "Varios productos parecidos. Pregunta al usuario cuál quiere consultar:\n"
+                + "\n".join(lineas)
+            ),
+            "opciones": opciones,
+        }
+
     agrupado = agrupar_stock_par_por_mp(matching)
     resultados = []
     for r in matching:
@@ -2717,7 +3072,7 @@ def tool_produccion_subreceta(args):
 
 
 def _parse_producir_sub_comando(texto: str) -> dict | None:
-    """PRODUCIR SUB 051 052 BOD-002 CONFIRMAR → plan o registro."""
+    """PRODUCIR SUB 051 [1100 ML] BOD-002 CONFIRMAR → plan o registro."""
     raw = (texto or "").strip()
     upper = raw.upper()
     prefix = None
@@ -2733,15 +3088,131 @@ def _parse_producir_sub_comando(texto: str) -> dict | None:
     tokens = [t for t in limpio.split() if t]
     bodega = "BOD-002"
     cods: list[str] = []
+    cantidad: float | None = None
+    _units = {"ML", "GR", "G", "L", "LT", "LITRO", "LITROS", "UNI", "UNIDAD", "UNIDADES", "UND"}
     for tok in tokens:
         tu = tok.upper()
         if tu.startswith("BOD-"):
             bodega = tu
+            continue
+        if tu in _units:
+            continue
+        num = tok.replace(".", "").replace(",", "")
+        if not num.isdigit():
+            continue
+        val = float(tok.replace(",", "."))
+        # Códigos SUB son 3 dígitos (051); cantidades suelen ser >=100 o 4+ dígitos (1100 ml)
+        if len(num) >= 4 or val >= 100:
+            cantidad = val
+        elif not cods:
+            cods.append(num.zfill(3))
+        elif cantidad is None and val < 100:
+            cods.append(num.zfill(3))
         else:
-            num = tok.replace(".", "").replace(",", "")
-            if num.isdigit():
-                cods.append(tok)
-    return {"cods": cods, "bodega": bodega, "confirmar": confirmar}
+            cantidad = val
+    out: dict = {"cods": cods, "bodega": bodega, "confirmar": confirmar}
+    if cantidad is not None:
+        out["cantidad"] = cantidad
+    return out
+
+
+_BATCH_ALIASES: list[tuple[tuple[str, ...], str]] = [
+    (("ron banana", "banana negroni", "run banana", "ron ban"), "053"),
+    (("tokio mule", "tokio"), "052"),
+    (("mojito de coco", "mojito coco", "coconut mojito", "coco mojito"), "054"),
+    (("classic negroni", "batch negroni", "negroni"), "051"),
+]
+
+_BATCH_KEYWORDS = (
+    "batch",
+    "subreceta",
+    "sub receta",
+    "sub-0",
+    "semi",
+    "barra",
+    "prepar",
+    "produc",
+    "registr",
+    "hacer",
+    "necesito",
+    "quiero",
+)
+
+
+def _parse_batch_lenguaje_natural(texto: str) -> dict | None:
+    """Detecta pedidos de batch en lenguaje natural (barra)."""
+    raw = (texto or "").strip()
+    if not raw:
+        return None
+    t = raw.lower()
+    cods: list[str] = []
+    for keywords, cod in _BATCH_ALIASES:
+        if any(k in t for k in keywords):
+            cods.append(cod)
+            break
+    if not cods:
+        m = re.search(r"(?:sub[- ]?)(0?5[1-4])\b", t, re.I)
+        if m:
+            cods.append(m.group(1).zfill(3))
+        else:
+            m2 = re.search(r"\b(0?5[1-4])\b", t)
+            if m2:
+                cods.append(m2.group(1).zfill(3))
+    parece_batch = any(k in t for k in _BATCH_KEYWORDS) or bool(cods)
+    if not parece_batch:
+        return None
+    if not cods:
+        return {"cods": [], "bodega": "BOD-002", "confirmar": False, "ambiguo": True}
+    cantidad: float | None = None
+    mc = re.search(r"(\d[\d.,]*)\s*(?:ml|mililitros?|gr|gramos?|g\b)", t, re.I)
+    if mc:
+        cantidad = float(mc.group(1).replace(",", "."))
+    else:
+        mc2 = re.search(r"\b(\d{4,5})\b", t)
+        if mc2:
+            cantidad = float(mc2.group(1).replace(",", "."))
+    confirmar = any(
+        w in t
+        for w in ("confirmar", "confirmo", "aplicar", "de verdad", "en serio")
+    )
+    return {"cods": cods, "bodega": "BOD-002", "confirmar": confirmar, "cantidad": cantidad}
+
+
+def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
+    if _es_confirmacion_produccion(texto) and wa_id in _pending_prod_sub:
+        return {**_pending_prod_sub[wa_id], "confirmar": True}
+    prod_sub = _parse_producir_sub_comando(texto)
+    if prod_sub is None:
+        prod_sub = _parse_batch_lenguaje_natural(texto)
+    return prod_sub
+
+
+def _es_comando_conteo(texto_upper: str) -> bool:
+    return (
+        texto_upper == "APROBAR TODO"
+        or texto_upper.startswith("APROBAR ")
+        or texto_upper.startswith("RECHAZAR ")
+        or texto_upper.startswith("KARDEX ")
+        or texto_upper.startswith("CSV ")
+    )
+
+
+def _es_confirmacion_produccion(texto: str) -> bool:
+    t = (texto or "").strip().lower().replace("í", "i")
+    if t in (
+        "si",
+        "si confirmo",
+        "confirmo",
+        "confirmar",
+        "ok",
+        "dale",
+        "aplicar",
+        "yes",
+        "listo",
+        "de acuerdo",
+    ):
+        return True
+    return t.startswith("si ") and "confirm" in t
 
 
 def _parse_iniciar_conteo_comando(texto: str) -> str | None:
@@ -2771,11 +3242,11 @@ TOOLS = [
     {"name": "resumen_operativo_hoy", "description": "Resumen compacto: ventas hoy + bajo par + negativos + facturas parciales.", "input_schema": {"type": "object", "properties": {"top": {"type": "integer"}}, "required": []}},
     {"name": "pedidos_hoy", "description": "Pedidos que corresponde hacer hoy segun ventana de cada proveedor.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "plato_top_semana", "description": "Top 10 platos mas vendidos esta semana por cantidad.", "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "buscar_bodega", "description": "En que bodega se encuentra un ingrediente o insumo.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
-    {"name": "trasladar_mp", "description": "Trasladar un insumo de una bodega a otra. Siempre pedir confirmacion antes de ejecutar.", "input_schema": {"type": "object", "properties": {"cod_mp_sistema": {"type": "string"}, "bodega_origen": {"type": "string"}, "bodega_destino": {"type": "string"}, "cantidad": {"type": "number"}, "confirmado": {"type": "boolean"}}, "required": ["cod_mp_sistema","bodega_origen","bodega_destino","cantidad","confirmado"]}},
+    {"name": "buscar_bodega", "description": "En que bodega esta un insumo. Busca por nombre_mp (como lo dice el usuario). Si hay varios parecidos devuelve requiere_eleccion: pregunta al usuario por NOMBRE, sin pedir codigos.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
+    {"name": "trasladar_mp", "description": "Trasladar insumo entre bodegas. Usa nombre_mp (obligatorio salvo que ya resolviste el producto en el turno anterior). NUNCA inventes cod_mp_sistema. Si requiere_eleccion, pregunta al usuario cual producto por nombre. confirmado=false primero, luego true tras confirmacion.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string", "description": "Nombre del producto como lo dice el usuario (ej. Buchanan 18, papa)"}, "cod_mp_sistema": {"type": "string", "description": "Solo si la tool anterior devolvio opciones y ya eligio el usuario; no inventar"}, "bodega_origen": {"type": "string"}, "bodega_destino": {"type": "string"}, "cantidad": {"type": "number"}, "confirmado": {"type": "boolean"}}, "required": ["nombre_mp","bodega_origen","bodega_destino","cantidad","confirmado"]}},
     {"name": "ventas_por_plato", "description": "Ventas al cliente (hist_ventas): total del periodo + ranking SOLO productos en BD_PRODUCTOS (carta) si incluir_productos=true. Para un mes pasado usa mes_nombre (ej. mayo) + anio, o fecha_ini/fecha_fin ISO — NO uses periodo=mes (eso es solo el mes calendario en curso). periodo hoy/semana/mes actual. Devuelve texto_whatsapp: copialo tal cual.", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}, "fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}, "anio": {"type": "integer"}, "mes": {"type": "integer", "description": "1-12"}, "mes_nombre": {"type": "string", "description": "ej. mayo, junio"}, "orden": {"type": "string", "enum": ["usd", "cantidad"]}, "limite": {"type": "integer"}, "incluir_productos": {"type": "boolean", "description": "Si false: responde solo total del periodo y pregunta si quiere detalle de productos."}, "sin_truncar": {"type": "boolean", "description": "Si true: incluye todos los productos (sin '... y N más')."}}, "required": []}},
     {"name": "rotacion_baja", "description": "Productos con nula o baja rotacion en los ultimos N dias.", "input_schema": {"type": "object", "properties": {"dias": {"type": "integer"}, "umbral_unidades": {"type": "number"}}, "required": []}},
-    {"name": "stock_ingrediente", "description": "Cuanto tengo en inventario de un ingrediente especifico.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
+    {"name": "stock_ingrediente", "description": "Stock de un insumo por nombre_mp (como lo dice el usuario). Si varios parecidos: requiere_eleccion y pregunta por nombre, sin codigos MP.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "consumo_ingrediente_recetas", "description": "Consumo teorico de una materia prima segun ventas (hist_ventas estado_match PROCESADO) y gramajes en BD_RECETAS_DETALLE; misma logica que el descargo de inventario; NO es stock en bodega. Devuelve total_consumo_teorico y por_plato (lista completa por nombre_producto de venta). No inventes filas ni subtotales: la suma de consumo_mp en por_plato debe coincidir con total_consumo_teorico. nombre_mp obligatorio. Periodo: semana (default lunes a hoy), mes, hoy; o fecha_ini y fecha_fin ISO.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}, "periodo": {"type": "string", "enum": ["semana", "mes", "hoy"]}, "fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "costo_plato", "description": "Costo teorico en USD de preparar 1 plato vendido (food cost estandar): suma MPs y subrecetas en BD_RECETAS_DETALLE. Por defecto devuelve texto_whatsapp con desglose; si incluir_ingredientes=false responde solo el total y pregunta si quieres ingredientes.", "input_schema": {"type": "object", "properties": {"cod_receta": {"type": "string"}, "nombre_plato": {"type": "string"}, "nombre_receta": {"type": "string"}, "variedad_smart_menu": {"type": "string"}, "variedad": {"type": "string"}, "incluir_ingredientes": {"type": "boolean"}, "top": {"type": "integer", "description": "Cuantos ingredientes principales listar cuando incluir_ingredientes=true (default 25)."}}, "required": []}},
     {"name": "receta_ingredientes", "description": "Ingredientes y costos de un plato vendido (cantidades por 1 unidad + USD por linea y total). Misma logica que costo_plato; usar cuando pidan receta, ingredientes, gramajes o desglose de un plato (ej. TARTA VASCA, BAO). cod_receta o nombre_plato; opcional variedad.", "input_schema": {"type": "object", "properties": {"cod_receta": {"type": "string"}, "nombre_plato": {"type": "string"}, "nombre_receta": {"type": "string"}, "variedad_smart_menu": {"type": "string"}, "variedad": {"type": "string"}}, "required": []}},
@@ -2858,7 +3329,8 @@ Inventario físico / conteo cíclico: para INICIAR un nuevo conteo (crear ciclo 
 Comando directo (sin tool): el usuario puede escribir INICIAR CONTEO BOD-001.
 Producción subrecetas (barra/cocina): tool produccion_subreceta o comando PRODUCIR SUB 051 052 053 054 BOD-002 (simula). Para aplicar de verdad: añadir CONFIRMAR al final del mensaje. Inventario del semi vive en BD_MP_SISTEMA como SUB-051, SUB-052… por bodega (stock 0 hasta producir o contar).
 No uses markdown, asteriscos ni negritas. Solo texto plano.
-Para traslados entre bodegas usa trasladar_mp. Bodegas: BOD-001 cocina, BOD-002 barra, BOD-003 consignacion, BOD-005 externa (BOD-004 limpieza inactiva). Traslados permitidos: cocina<->barra<->externa; consignacion<->barra. SIEMPRE pide confirmacion antes de ejecutar.
+Materias primas e inventario: el personal NO conoce codigos MP. Siempre trabaja por NOMBRE del producto. NUNCA inventes cod_mp_sistema ni uses codigos de factura/catalogo. Si hay varios productos parecidos (ej. varios Buchanan), la tool devuelve requiere_eleccion: pregunta al usuario cual es, listando nombres y stock por bodega. No menciones codigos MP al usuario salvo que el mismo los pida.
+Traslados: trasladar_mp con nombre_mp (ej. Buchanan 18). Bodegas: cocina, barra, consignacion, externa (o BOD-001/002/003/005). Rutas: cocina<->barra<->externa; consignacion<->barra. confirmado=false para preview, luego true si confirma.
 Stock y PAR: el stock es por bodega; el par_level es global por materia prima (suma stock en todas las bodegas para comparar).
 Descargo de ventas solo afecta cocina o barra segun cod_bodega en la receta.
 Cuando la fuente sea hist_ventas aclaralo como aproximado.
@@ -3073,6 +3545,15 @@ async def verificar_webhook(request: Request):
     return PlainTextResponse("Forbidden", status_code=403)
 
 
+async def _responder_wa(wa_id: str, texto: str) -> bool:
+    """Envía respuesta; loguea si falla la API de Meta."""
+    out = _asegurar_texto_whatsapp(texto)
+    ok = await enviar_mensaje_meta(wa_id, out)
+    if not ok:
+        print(f"[Meta] _responder_wa fallo wa_id={wa_id!r} len={len(out)}")
+    return ok
+
+
 async def enviar_mensaje_meta(telefono: str, texto: str) -> bool:
     phone_number_id = (os.getenv("WHATSAPP_PHONE_NUMBER_ID") or "").strip()
     token = (os.getenv("WHATSAPP_ACCESS_TOKEN") or "").strip()
@@ -3167,7 +3648,7 @@ async def encolar_wa_mensaje(wa_id: str, msg: dict) -> None:
             _wa_cola_avisado.add(wa_id)
             await enviar_mensaje_meta(wa_id, MSG_COLA_ESPERA)
         return
-    asyncio.create_task(_wa_runner(wa_id))
+    await _wa_runner(wa_id)
 
 
 async def _wa_runner(wa_id: str) -> None:
@@ -3183,6 +3664,45 @@ async def _wa_runner(wa_id: str) -> None:
                 asyncio.create_task(_wa_runner(wa_id))
 
 
+async def _manejar_produccion_sub(wa_id: str, prod_sub: dict) -> None:
+    if not _autorizado_produccion_sub(wa_id):
+        await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+        return
+    if prod_sub.get("ambiguo") or not prod_sub.get("cods"):
+        await enviar_mensaje_meta(wa_id, MSG_BATCH_NO_IDENTIFICADO)
+        return
+    await enviar_mensaje_meta(wa_id, MSG_PROCESANDO)
+    try:
+        r = await asyncio.to_thread(
+            producir_subreceta_wa,
+            prod_sub["cods"],
+            bodega=prod_sub["bodega"],
+            cantidad=prod_sub.get("cantidad"),
+            registrado_por="WhatsApp",
+            simular=not prod_sub["confirmar"],
+            recalcular=prod_sub["confirmar"],
+        )
+        out = r.get("texto_whatsapp") or str(r)
+        if prod_sub["confirmar"]:
+            _pending_prod_sub.pop(wa_id, None)
+        else:
+            _pending_prod_sub[wa_id] = {
+                "cods": prod_sub["cods"],
+                "bodega": prod_sub["bodega"],
+                "cantidad": prod_sub.get("cantidad"),
+            }
+            if "confirmo" not in out.lower():
+                out += (
+                    "\n\nPara registrar en inventario responde CONFIRMAR "
+                    "o escribe confirmo."
+                )
+    except SubrecetaOperacionError as e:
+        out = f"No se pudo registrar producción: {e.message}"
+    except Exception as e:
+        out = f"Error: {e}"
+    await enviar_mensaje_meta(wa_id, out)
+
+
 async def procesar_mensaje(wa_id: str, msg: dict) -> None:
     """Procesa un mensaje de Meta en background (POST /webhook ya respondió 200)."""
     try:
@@ -3195,14 +3715,25 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
         if mtype == "text":
             texto = (msg.get("text", {}).get("body") or "").strip()
             if not texto:
+                await _responder_wa(
+                    wa_id,
+                    "No recibí texto en el mensaje. Escribe tu consulta o usa "
+                    "PRODUCIR SUB 051 BOD-002 para batch de barra.",
+                )
                 return
             print(f"[Meta] {wa_id}: {texto}")
 
             texto_upper = texto.strip().upper()
 
-            # Comandos de conteo físico
+            # Batch / producción — primero (lenguaje natural o PRODUCIR SUB)
+            prod_sub = _resolver_prod_sub(texto, wa_id)
+            if prod_sub is not None:
+                await _manejar_produccion_sub(wa_id, prod_sub)
+                return
+
+            # Comandos de conteo físico (solo si el mensaje ES un comando de conteo)
             sesion_conteo = get_sesion_activa(wa_id)
-            if sesion_conteo:
+            if sesion_conteo and _es_comando_conteo(texto_upper):
                 if not autorizado_comando(wa_id, texto):
                     await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
                     return
@@ -3345,34 +3876,6 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                         await enviar_mensaje_meta(wa_id, f"Error generando Excel: {e}")
                     return
 
-            # Comando rápido: PRODUCIR SUB 051 052 BOD-002 [CONFIRMAR]
-            prod_sub = _parse_producir_sub_comando(texto)
-            if prod_sub is not None:
-                if not autorizado_comando(wa_id, texto):
-                    await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
-                    return
-                if not prod_sub["cods"]:
-                    out = (
-                        "Uso: PRODUCIR SUB 051 052 053 054 BOD-002\n"
-                        "(simula; añade CONFIRMAR para registrar en inventario)"
-                    )
-                else:
-                    try:
-                        r = producir_subreceta_wa(
-                            prod_sub["cods"],
-                            bodega=prod_sub["bodega"],
-                            registrado_por="WhatsApp",
-                            simular=not prod_sub["confirmar"],
-                            recalcular=prod_sub["confirmar"],
-                        )
-                        out = r.get("texto_whatsapp") or str(r)
-                    except SubrecetaOperacionError as e:
-                        out = f"No se pudo registrar producción: {e.message}"
-                    except Exception as e:
-                        out = f"Error: {e}"
-                await enviar_mensaje_meta(wa_id, out)
-                return
-
             # Comando rápido: INICIAR CONTEO BOD-001
             cod_bod_rapido = _parse_iniciar_conteo_comando(texto)
             if cod_bod_rapido is not None:
@@ -3420,8 +3923,9 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     return
 
             # Agente general
+            await enviar_mensaje_meta(wa_id, MSG_PROCESANDO)
             try:
-                respuesta = llamar_agente(texto, wa_id)
+                respuesta = await asyncio.to_thread(llamar_agente, texto, wa_id)
             except Exception as e:
                 print(f"[Meta] llamar_agente: {e}")
                 respuesta = (
@@ -3456,12 +3960,31 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             ok_send = await enviar_mensaje_meta(wa_id, out)
             if not ok_send:
                 print(f"[Meta] enviar_mensaje_meta fallo (media) wa_id={wa_id!r}")
+            return
+
+        await _responder_wa(wa_id, MSG_TIPO_NO_SOPORTADO)
     except Exception as e:
         print(f"[Meta] procesar_mensaje wa_id={wa_id!r}: {e}")
+        try:
+            await _responder_wa(wa_id, MSG_ERROR_PROCESO)
+        except Exception as e2:
+            print(f"[Meta] no se pudo enviar fallback de error: {e2}")
+
+
+async def _lanzar_procesamiento_wa(wa_id: str, msg: dict) -> None:
+    try:
+        await encolar_wa_mensaje(wa_id, msg)
+    except Exception as e:
+        print(f"[Meta] _lanzar_procesamiento_wa wa_id={wa_id!r}: {e}")
+        _log_webhook_event(f"ERROR procesando {wa_id}: {e}")
+        try:
+            await _responder_wa(wa_id, MSG_ERROR_PROCESO)
+        except Exception:
+            pass
 
 
 @app.post("/webhook")
-async def recibir_webhook_meta(request: Request, background_tasks: BackgroundTasks):
+async def recibir_webhook_meta(request: Request):
     body = await request.body()
     skip_sig = (os.getenv("WHATSAPP_SKIP_SIGNATURE") or "").strip() == "1"
     if not skip_sig:
@@ -3488,12 +4011,29 @@ async def recibir_webhook_meta(request: Request, background_tasks: BackgroundTas
                 value = change.get("value", {}) or {}
                 for msg in value.get("messages", []) or []:
                     msg_id = (msg.get("id") or "").strip()
+                    wa_from = (msg.get("from") or "").strip()
+                    mtype = (msg.get("type") or "").strip()
+                    preview = ""
+                    if mtype == "text":
+                        preview = ((msg.get("text") or {}).get("body") or "")[:120]
+                    _log_webhook_event(
+                        f"IN from={wa_from} type={mtype} id={msg_id} body={preview!r}"
+                    )
                     if msg_id and mensaje_ya_procesado(msg_id):
                         continue
-                    wa_id = (msg.get("from") or "").strip()
+                    wa_id = wa_from
                     if not wa_id:
                         continue
-                    background_tasks.add_task(encolar_wa_mensaje, wa_id, msg)
+                    asyncio.create_task(_lanzar_procesamiento_wa(wa_id, msg))
+                for st in value.get("statuses", []) or []:
+                    if (st.get("status") or "") != "failed":
+                        continue
+                    err = ((st.get("errors") or [{}])[0].get("error_data") or {}).get(
+                        "details", ""
+                    )
+                    _log_webhook_event(
+                        f"OUT FAILED to={st.get('recipient_id')} err={err[:200]}"
+                    )
     except Exception as e:
         print(f"[Meta webhook] Error: {e}")
     return {"status": "ok"}

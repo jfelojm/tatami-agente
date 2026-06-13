@@ -119,6 +119,116 @@ def enviar_resumen_facturas(
         print("  WA [OMITIDO] facturas: ALERTA_WA_FELIPE y ALERTA_WA_MOISES vacíos")
 
 
+def enviar_resumen_facturas_sri(
+    resumen: dict[str, Any],
+    *,
+    fatal_error: str | None = None,
+) -> None:
+    """
+    Aviso WhatsApp post-corrida SRI (procesar_facturas_sri.py).
+    Moisés: compacto. Felipe: + detalle de errores e ítems sin match.
+    """
+    mo = (os.getenv("ALERTA_WA_MOISES") or "").strip()
+    fe = (os.getenv("ALERTA_WA_FELIPE") or "").strip()
+    if not mo and not fe:
+        print("  WA [OMITIDO] facturas SRI: ALERTA_WA_FELIPE y ALERTA_WA_MOISES vacíos")
+        return
+
+    corrida = (resumen.get("corrida") or "?").strip()
+    ventana = (resumen.get("ventana") or "").strip()
+    desc = resumen.get("descarga") or {}
+    proc = resumen.get("proceso") or {}
+    cola = resumen.get("cola") or {}
+
+    lineas: list[str] = [f"📋 *Facturas SRI — corrida {corrida}*"]
+    if ventana:
+        lineas.append(f"Ventana: {ventana}")
+    lineas.append("")
+
+    if desc.get("ejecutada"):
+        lineas.append(
+            f"Descarga: {int(desc.get('listados') or 0)} en portal | "
+            f"{int(desc.get('descargados') or 0)} nuevos | "
+            f"{int(desc.get('errores') or 0)} errores SOAP"
+        )
+    if proc.get("ejecutada"):
+        lineas.append(
+            f"Ingreso: {int(proc.get('completas') or 0)} completas | "
+            f"{int(proc.get('parciales') or 0)} parciales | "
+            f"{int(proc.get('omitidas') or 0)} omitidas (ya en Drive)"
+        )
+
+    hay_alerta = bool(fatal_error)
+    if fatal_error:
+        lineas.append(f"❌ *Fallo corrida:*\n{fatal_error.strip()[:350]}")
+
+    n_cola_desc = int(cola.get("descargado") or 0)
+    n_cola_err = int(cola.get("error") or 0)
+    if n_cola_desc > 0:
+        hay_alerta = True
+        lineas.append(f"⚠️ {n_cola_desc} XML sin procesar (DESCARGADO en Supabase)")
+    if n_cola_err > 0:
+        hay_alerta = True
+        lineas.append(f"⚠️ {n_cola_err} comprobante(s) con ERROR de descarga en DB")
+
+    errores_desc = list(desc.get("errores_detalle") or [])
+    if errores_desc:
+        hay_alerta = True
+        lineas.append("Errores descarga (esta corrida):")
+        for err in errores_desc[:8]:
+            num = (err.get("num_factura") or "").strip()
+            clave = (err.get("clave") or "").strip()
+            etiq = num or clave or "?"
+            msg = (err.get("error") or "")[:80]
+            lineas.append(f"- {etiq}: {msg}")
+
+    sin_match_detalle: list[str] = []
+    for it in proc.get("sin_match") or []:
+        if isinstance(it, dict):
+            est = (it.get("estado") or "").strip().upper()
+            if est in ("IGNORADO", "REGISTRADO"):
+                continue
+            num_f = (it.get("factura") or "").strip()
+            d = (it.get("descripcion") or "").strip()
+            if d:
+                sin_match_detalle.append(f"{num_f} | {d}" if num_f else d)
+        elif str(it).strip():
+            sin_match_detalle.append(str(it).strip())
+    n_sin = len(sin_match_detalle)
+    if n_sin > 0:
+        hay_alerta = True
+        lineas.append(
+            f"⚠️ {n_sin} ítem(s) sin match — revisar hoja BD_ITEMS_PENDIENTES"
+        )
+
+    if int(proc.get("errores") or 0) > 0:
+        hay_alerta = True
+        lineas.append(f"⚠️ {int(proc.get('errores') or 0)} error(es) al procesar XML")
+
+    if not hay_alerta and (desc.get("ejecutada") or proc.get("ejecutada")):
+        lineas.append("✅ Corrida OK — sin errores ni cola pendiente.")
+
+    texto_mois = "\n".join(lineas).strip()
+    if len(texto_mois) > _WA_MAX_BODY:
+        texto_mois = texto_mois[: _WA_MAX_BODY - 20] + "\n…(truncado)"
+
+    lineas_fe = list(lineas)
+    if n_sin > 0:
+        lineas_fe.append("Detalle sin match:")
+        for item in sin_match_detalle[:20]:
+            lineas_fe.append(f"- {item}")
+        if n_sin > 20:
+            lineas_fe.append(f"… y {n_sin - 20} más")
+    texto_fe = "\n".join(lineas_fe).strip()
+    if len(texto_fe) > _WA_MAX_BODY:
+        texto_fe = texto_fe[: _WA_MAX_BODY - 40] + "\n…(mensaje truncado, ver log)"
+
+    if mo:
+        enviar_mensaje_wa(mo, texto_mois, etiqueta="Moisés facturas SRI")
+    if fe:
+        enviar_mensaje_wa(fe, texto_fe, etiqueta="Felipe facturas SRI")
+
+
 def alerta_ventas_sin_receta(items: list, fecha: str) -> None:
     """
     Platos vendidos sin filas aplicables en BD_RECETAS_DETALLE (no hubo descargo).

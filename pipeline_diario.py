@@ -1,5 +1,8 @@
 """
-Pipeline diario: ventas -> reconciliacion -> descargo -> facturas -> recalcular stock -> PAR/consumo.
+Pipeline diario: ventas -> reconciliacion -> descargo -> facturas -> recalcular stock -> guardias costos -> PAR/consumo [-> costos teóricos].
+
+Candados: tras recalcular_stock corre guardias_costos_mp.py --strict (aborta si costo corrupto).
+Cierre mediodia (cuadrante): incluye --with-costos (sync prov, subrecetas, BD_RECETAS, guardias).
 
 Fecha de ventas (sin --fecha): siempre el dia calendario ANTERIOR completo (00:00-23:59)
 en America/Guayaquil. Ej.: job el miercoles 12:00 carga martes.
@@ -590,6 +593,13 @@ def main() -> None:
             step=5,
             fecha_objetivo=fecha_objetivo,
         )
+        run_step(
+            "5b — Guardias costos MP (candado post-recalcular)",
+            ["guardias_costos_mp.py", "--strict"],
+            check=True,
+            step=5,
+            fecha_objetivo=fecha_objetivo,
+        )
         _checkpoint_step_ok(fecha_objetivo, 4, "omitido (modo nocturno)")
         _checkpoint_step_ok(fecha_objetivo, 6, "omitido (modo nocturno)")
         _alertas_inventario_pipeline(origen=f"nocturno {fecha_objetivo}")
@@ -665,6 +675,13 @@ def main() -> None:
         fecha_objetivo=fecha_objetivo,
     )
     run_step(
+        "5b — Guardias costos MP (candado post-recalcular)",
+        ["guardias_costos_mp.py", "--strict"],
+        check=True,
+        step=5,
+        fecha_objetivo=fecha_objetivo,
+    )
+    run_step(
         "6/6 — Calcular PAR y consumo diario en BD_MP_SISTEMA",
         ["calcular_par_levels.py"],
         step=6,
@@ -695,6 +712,10 @@ def main() -> None:
             ["recalcular_todos_costos.py", "--produccion"],
             step=7,
             fecha_objetivo=fecha_objetivo,
+        )
+    else:
+        print(
+            "\n  INFO: costos teóricos omitidos (usa --with-costos en cierre mediodia)"
         )
 
     _checkpoint_complete(fecha_objetivo)

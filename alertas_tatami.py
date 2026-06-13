@@ -220,6 +220,36 @@ def alerta_wa_reconciliacion_fallo(rep: dict) -> None:
         log_envio_wa("Felipe", fe, ok, msg)
 
 
+def alerta_wa_smart_menu_no_disponible(rep: dict) -> None:
+    """Smart Menu apagado/fuera de red: cuadre omitido, pipeline sigue."""
+    fecha = rep.get("fecha", "?")
+    motivo = rep.get("smart_menu_motivo") or "no accesible"
+    hist_lineas = int(rep.get("hist_lineas_tabla") or 0)
+    hist_neto = float(rep.get("hist_ventas_netas") or 0)
+
+    linea_mois = (
+        f"⚠ Smart Menu no accesible — reconciliación omitida | fecha {fecha} "
+        f"({motivo})"
+    )
+    extra = ""
+    if hist_lineas:
+        extra = (
+            f"\n\nhist_ventas: {hist_lineas} líneas, ${hist_neto:.2f} neto. "
+            "Pipeline continúa; cuadre pendiente cuando el servidor responda."
+        )
+    linea_felipe = linea_mois + extra
+
+    mo = (os.getenv("ALERTA_WA_MOISES") or "").strip()
+    fe = (os.getenv("ALERTA_WA_FELIPE") or "").strip()
+
+    if mo:
+        ok, msg = enviar_whatsapp_texto(mo, linea_mois)
+        log_envio_wa("Moisés", mo, ok, msg)
+    if fe:
+        ok, msg = enviar_whatsapp_texto(fe, linea_felipe)
+        log_envio_wa("Felipe", fe, ok, msg)
+
+
 def alerta_wa_pipeline_ok(fecha: str, *, detalle: str | None = None) -> None:
     """Confirmación de corrida: Felipe y Moisés (mismo cuerpo; Felipe puede llevar más en otros avisos)."""
     cuerpo = f"✅ Pipeline Tatami OK — {fecha}"

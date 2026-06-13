@@ -49,6 +49,12 @@ function onOpen() {
     .addSeparator()
     .addItem("▶ TEST COMPLETO", "testCompleto")
     .addToUi();
+
+  // Ingreso manual de facturas (funciones en ingreso_factura_manual.gs)
+  ui.createMenu("🍣 Tatami Facturas")
+    .addItem("✅ Aceptar e ingresar factura", "aceptarFactura")
+    .addItem("🧪 Probar (sin subir stock)", "probarFactura")
+    .addToUi();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -295,7 +301,8 @@ function promoverProductos() {
  * BD_RECETAS_DETALLE (maestro actual):
  * A=nombre_receta | B=cod_receta | C=variedad_smart_menu | D=nombre_subreceta |
  * E=cod_subreceta | F=nombre_mp | G=cod_mp_sistema | H=cantidad | I=unidad_base |
- * J=cod_bodega | K=merma_pct | L=es_opcional | M=pct_aplicacion
+ * J=cod_bodega | K=merma_pct | L=es_opcional | M=pct_aplicacion |
+ * N=costo_unitario | O=costo_linea | P=nota_costo (agente: calcular_costo_recetas.py)
  */
 function promoverRecetas() {
   const staging = SpreadsheetApp.getActiveSpreadsheet();
@@ -357,6 +364,9 @@ function promoverRecetas() {
           pctADecimal(get(d, "merma_pct"), 0),
           get(d, "es_opcional") || "NO",
           pctADecimal(get(d, "pct_aplicacion"), 1),
+          "",
+          "",
+          "",
         ]);
       } else {
         // Layout v1 (solo MP)
@@ -374,6 +384,9 @@ function promoverRecetas() {
           get(d, "merma_pct") || "0",
           get(d, "es_opcional") || "NO",
           get(d, "pct_aplicacion") || "1",
+          "",
+          "",
+          "",
         ]);
       }
       marcarPromovido(hojaStaging, f.idx, idxEstado);
@@ -985,4 +998,186 @@ function testCompleto() {
   log.push("Ejecuta 'Limpiar datos de prueba' al terminar.");
 
   ui.alert("Reporte", log.join("\n"), ui.ButtonSet.OK);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INGRESO MANUAL DE FACTURAS (pestaña INGRESO_FACTURA, menú 🍣 Tatami Facturas)
+//
+// Configuración (⚙️ Propiedades del script):
+//   TATAMI_FACTURA_API_URL = https://TU-SERVIDOR/api/factura_manual/enviar
+//   TATAMI_FACTURA_SECRET  = valor de FACTURA_SHEETS_INGEST_SECRET en .env
+// ═══════════════════════════════════════════════════════════════════════════════
+
+var HOJA_INGRESO = "INGRESO_FACTURA";
+var HOJA_REGISTRO = "REGISTRO_FACTURAS";
+var FILA_LINEAS = 7;
+var MAX_LINEAS = 40;
+
+function probarFactura() {
+  aceptarFactura_(true);
+}
+
+function aceptarFactura() {
+  aceptarFactura_(false);
+}
+
+function aceptarFactura_(modoPrueba) {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var hoja = ss.getSheetByName(HOJA_INGRESO);
+
+  var proveedor = String(hoja.getRange("B2").getValue() || "").trim();
+  var numFactura = String(hoja.getRange("B3").getValue() || "").trim();
+  var fechaRaw = hoja.getRange("B4").getValue();
+
+  if (!proveedor) { ui.alert("Falta elegir el Proveedor (B2)."); return; }
+  if (!numFactura) { ui.alert("Falta el N° de factura (B3)."); return; }
+  var fecha = formatearFecha_(fechaRaw);
+  if (!fecha) { ui.alert("Fecha de factura inválida (B4). Usa formato fecha."); return; }
+
+  var datos = hoja.getRange(FILA_LINEAS, 1, MAX_LINEAS, 3).getValues();
+  var lineas = [];
+  var problemas = [];
+  for (var i = 0; i < datos.length; i++) {
+    var desc = String(datos[i][0] || "").trim();
+    var cant = datos[i][1];
+    var costo = datos[i][2];
+    if (!desc && cant === "" && costo === "") continue;
+    if (!desc) { problemas.push("Fila " + (FILA_LINEAS + i) + ": sin descripción"); continue; }
+    if (!(cant > 0)) { problemas.push("Fila " + (FILA_LINEAS + i) + ": cantidad inválida"); continue; }
+    if (!(costo >= 0)) { problemas.push("Fila " + (FILA_LINEAS + i) + ": costo inválido"); continue; }
+    lineas.push({ descripcion: desc, cantidad: Number(cant), costo_unitario: Number(costo) });
+  }
+
+  if (problemas.length) { ui.alert("Corrige antes de aceptar:\n\n" + problemas.join("\n")); return; }
+  if (!lineas.length) { ui.alert("No hay líneas para ingresar."); return; }
+
+  var total = lineas.reduce(function (s, l) { return s + l.cantidad * l.costo_unitario; }, 0);
+  if (!modoPrueba) {
+    var conf = ui.alert(
+      "Confirmar ingreso",
+      "Proveedor: " + proveedor + "\nFactura: " + numFactura + " (" + fecha + ")\n" +
+      "Líneas: " + lineas.length + "\nTotal: $" + total.toFixed(2) + "\n\n¿Ingresar al inventario?",
+      ui.ButtonSet.YES_NO
+    );
+    if (conf !== ui.Button.YES) return;
+  }
+
+  var usuario = Session.getActiveUser().getEmail() || "desconocido";
+  var payload = {
+    usuario: usuario,
+    proveedor: proveedor,
+    num_factura: numFactura,
+    fecha_factura: fecha,
+    idempotency_key: proveedor + "|" + numFactura,
+    modo_prueba: !!modoPrueba,
+    lineas: lineas,
+  };
+
+  var props = PropertiesService.getScriptProperties();
+  var url = props.getProperty("TATAMI_FACTURA_API_URL");
+  var secret = props.getProperty("TATAMI_FACTURA_SECRET");
+  if (!url || !secret) {
+    ui.alert("Falta configurar TATAMI_FACTURA_API_URL / TATAMI_FACTURA_SECRET en Propiedades del script.");
+    return;
+  }
+
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch(url, {
+      method: "post",
+      contentType: "application/json; charset=utf-8",
+      payload: JSON.stringify(payload),
+      headers: { "X-Tatami-Factura-Secret": secret },
+      muteHttpExceptions: true,
+    });
+  } catch (e) {
+    ui.alert("No se pudo conectar con el agente:\n" + e);
+    return;
+  }
+
+  var code = resp.getResponseCode();
+  var body = {};
+  try { body = JSON.parse(resp.getContentText()); } catch (e) {}
+
+  if (code !== 200) {
+    var detalle = (body && body.detail) ? JSON.stringify(body.detail) : resp.getContentText().slice(0, 300);
+    ui.alert("El agente rechazó la factura (HTTP " + code + "):\n\n" + detalle);
+    return;
+  }
+
+  if (modoPrueba) {
+    var det = (body.lineas || []).map(function (l) {
+      var extra = l.estado === "OK_PRUEBA"
+        ? " → +" + l.entraria_stock + " " + (l.unidad_base || "") + " (MP " + l.cod_mp_sistema + ")"
+        : " ⚠ " + l.estado;
+      return "• " + l.descripcion + extra;
+    }).join("\n");
+    ui.alert(
+      "🧪 PRUEBA — nada se ingresó al stock\n\n" +
+      "Factura: " + numFactura + " | Total: $" + total.toFixed(2) + "\n\n" + det +
+      "\n\n(La pestaña no se limpió; usa Aceptar cuando sea real.)"
+    );
+    return;
+  }
+
+  var trx = body.trx || "";
+  registrarHistorial_(ss, trx, usuario, proveedor, numFactura, fecha, body.lineas || lineas);
+
+  if (body.errores && body.errores > 0) {
+    ui.alert(
+      "Ingreso PARCIAL — TRX " + trx + "\n\n" +
+      body.entradas + " líneas ingresadas, " + body.errores + " con error.\n" +
+      "Revisa REGISTRO_FACTURAS (no se limpió la pestaña)."
+    );
+    return;
+  }
+
+  limpiarIngreso_(hoja);
+  ui.alert("✅ Factura ingresada al inventario.\n\nCódigo de transacción: " + trx +
+           "\nLíneas: " + body.entradas);
+}
+
+function registrarHistorial_(ss, trx, usuario, proveedor, numFactura, fecha, lineas) {
+  var reg = ss.getSheetByName(HOJA_REGISTRO);
+  var ahora = Utilities.formatDate(new Date(), "America/Guayaquil", "yyyy-MM-dd HH:mm:ss");
+  var codProv = (proveedor.match(/^\d+/) || [""])[0];
+  var filas = [];
+  for (var i = 0; i < lineas.length; i++) {
+    var l = lineas[i];
+    filas.push([
+      trx,
+      ahora,
+      usuario,
+      codProv,
+      proveedor,
+      numFactura,
+      fecha,
+      l.descripcion,
+      l.cantidad,
+      l.costo_unitario,
+      Math.round(l.cantidad * l.costo_unitario * 100) / 100,
+      l.cod_mp_sistema || "",
+      l.estado || "OK",
+    ]);
+  }
+  if (filas.length) {
+    reg.getRange(reg.getLastRow() + 1, 1, filas.length, filas[0].length).setValues(filas);
+  }
+}
+
+function limpiarIngreso_(hoja) {
+  hoja.getRange("B2:B4").clearContent();
+  hoja.getRange(FILA_LINEAS, 1, MAX_LINEAS, 3).clearContent();
+}
+
+function formatearFecha_(v) {
+  if (v instanceof Date && !isNaN(v)) {
+    return Utilities.formatDate(v, "America/Guayaquil", "yyyy-MM-dd");
+  }
+  var s = String(v || "").trim();
+  var m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return m[3] + "-" + ("0" + m[2]).slice(-2) + "-" + ("0" + m[1]).slice(-2);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return "";
 }

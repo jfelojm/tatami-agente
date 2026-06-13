@@ -1,7 +1,8 @@
 """
 Reconciliación: totales del grid Smart Menu vs hist_ventas en Supabase (misma fecha).
 
-Sale con código 1 si no cuadra (para cortar pipeline antes de descargo de inventario).
+Sale con código 1 si no cuadra con grid accesible (corta pipeline antes de descargo).
+Si Smart Menu no responde (red/apagado), sale 0 con WARN — no bloquea el pipeline.
 
 Uso:
   python reconciliar_ventas_dia.py --fecha 2026-05-09
@@ -11,7 +12,7 @@ Variables:
   RECONCILIAR_TOL_ABS   tolerancia USD en subtotal (default 0.05)
   SUPABASE_URL / SUPABASE_KEY
 
-Salida: imprime cuadre y alerta (alertas_tatami) si falla.
+Salida: imprime cuadre y alerta (alertas_tatami) si falla el cuadre real.
 """
 
 from __future__ import annotations
@@ -35,13 +36,6 @@ def _tol() -> float:
         return 0.05
 
 
-def _count_grid_rows(fecha: str) -> int:
-    from ventas_smartmenu import descargar_ventas_grid
-
-    rows = descargar_ventas_grid(fecha)
-    return len(rows)
-
-
 def _count_distinct_docs_hist(fecha: str) -> int:
     from ventas_completitud import id_documentos_hist
     from ventas_smartmenu import supabase
@@ -50,17 +44,13 @@ def _count_distinct_docs_hist(fecha: str) -> int:
 
 
 def reconciliar(fecha: str, tol_abs: float) -> tuple[bool, dict]:
-    from ventas_smartmenu import auditar_hist_ventas_dia
+    from ventas_smartmenu import auditar_hist_ventas_dia, descargar_ventas_grid_con_meta
     from ventas_smartmenu_total import calcular_total_smartmenu
 
     fecha = (fecha or "").strip().split()[0]
 
-    grid_sin = calcular_total_smartmenu(
-        fecha, sin_iva=True, incluir_anulados=False
-    )
-    grid_iva = calcular_total_smartmenu(
-        fecha, sin_iva=False, incluir_anulados=False
-    )
+    grid_fetch = descargar_ventas_grid_con_meta(fecha)
+    grid_rows = grid_fetch.rows
     aud = auditar_hist_ventas_dia(fecha)
 
     columna_estado = aud.get("columna_estado_ok")
@@ -69,17 +59,58 @@ def reconciliar(fecha: str, tol_abs: float) -> tuple[bool, dict]:
     desc_hist = aud["sum_desc_neto"] if columna_estado else aud["sum_desc"]
     hist_neto = sub_hist - desc_hist
 
+    if not grid_fetch.disponible:
+        report: dict = {
+            "fecha": fecha,
+            "tol_abs": tol_abs,
+            "smart_menu_disponible": False,
+            "smart_menu_motivo": grid_fetch.motivo,
+            "grid_subtotal_sin_iva": 0.0,
+            "grid_ventas_brutas": 0.0,
+            "grid_descuentos": 0.0,
+            "grid_total_con_iva": 0.0,
+            "hist_ventas_netas": hist_neto,
+            "grid_docs_activos": 0,
+            "grid_docs_anulados": 0,
+            "grid_filas_cabecera": 0,
+            "hist_subtotal": sub_hist,
+            "hist_total_lineas": total_hist,
+            "hist_descuentos": desc_hist,
+            "hist_lineas_tabla": aud["lineas"],
+            "hist_docs_distinct": _count_distinct_docs_hist(fecha),
+            "diff_sub": 0.0,
+            "diff_docs": 0,
+            "internal_check": abs(total_hist - hist_neto),
+            "columna_estado_documento": columna_estado,
+            "ok": True,
+            "motivo": "smart_menu_no_disponible",
+            "warnings": [
+                "Smart Menu no accesible — cuadre grid vs hist omitido "
+                f"({grid_fetch.motivo}); pipeline continúa con hist_ventas existente"
+            ],
+        }
+        return True, report
+
+    grid_sin = calcular_total_smartmenu(
+        fecha, sin_iva=True, incluir_anulados=False, rows=grid_rows
+    )
+    grid_iva = calcular_total_smartmenu(
+        fecha, sin_iva=False, incluir_anulados=False, rows=grid_rows
+    )
+
     # grid_sin["total"] = ventas netas (brutas − descuento documento en col 16)
     diff_sub = abs(hist_neto - grid_sin["total"])
     internal_check = abs(total_hist - hist_neto)
 
-    n_grid = _count_grid_rows(fecha)
+    n_grid = len(grid_rows)
     n_hist_docs = _count_distinct_docs_hist(fecha)
     diff_docs = n_grid - n_hist_docs
 
-    report: dict = {
+    report = {
         "fecha": fecha,
         "tol_abs": tol_abs,
+        "smart_menu_disponible": True,
+        "smart_menu_motivo": grid_fetch.motivo,
         "grid_subtotal_sin_iva": grid_sin["total"],
         "grid_ventas_brutas": grid_sin.get("total_bruto", grid_sin["total"]),
         "grid_descuentos": grid_sin.get("total_descuentos", 0.0),
@@ -184,6 +215,29 @@ def main() -> None:
     if rep.get("warnings"):
         for w in rep["warnings"]:
             print(f"\n  WARN: {w}")
+
+    if rep.get("motivo") == "smart_menu_no_disponible":
+        print(
+            "\n  RESULTADO: OMITIDO — Smart Menu no accesible; cuadre pospuesto "
+            "(no es fallo de datos)."
+        )
+        detalle = json.dumps(
+            {k: v for k, v in rep.items() if k != "ok"},
+            ensure_ascii=False,
+            indent=2,
+        )
+        enviar_alerta(
+            "Reconciliación omitida — Smart Menu no accesible",
+            detalle,
+            estado="WARN",
+        )
+        try:
+            from alertas_tatami import alerta_wa_smart_menu_no_disponible
+
+            alerta_wa_smart_menu_no_disponible(rep)
+        except Exception as e:
+            print(f"  WARN: no se pudo enviar alerta WhatsApp: {e}")
+        raise SystemExit(0)
 
     if ok:
         print("\n  RESULTADO: OK — cuadre dentro de tolerancia.")
