@@ -54,15 +54,13 @@ def _norm_tel(telefono: str) -> str:
     return (telefono or "").strip().lstrip("+")
 
 
-def _parse_allowlist(env_key: str) -> set[str]:
-    return {_norm_tel(n) for n in (os.getenv(env_key) or "").split(",") if n.strip()}
-
-
-ROLES = {
-    "SOCIO": _parse_allowlist("ALLOWLIST_SOCIO"),
-    "CONSULTA": _parse_allowlist("ALLOWLIST_CONSULTA"),
-    "OPERATIVO": _parse_allowlist("ALLOWLIST_OPERATIVO"),
-}
+from estrategia_config import (
+    autorizado_comando as _estrategia_autorizado_comando,
+    autorizado_tool as _estrategia_autorizado_tool,
+    get_rol,
+    phone_roles,
+    puede_ver_costos,
+)
 
 TOOLS_ESCRITURA_SOCIO_OPERATIVO = {
     "trasladar_mp",
@@ -95,42 +93,18 @@ MSG_BATCH_NO_IDENTIFICADO = (
 )
 
 
-def get_rol(telefono: str) -> str | None:
-    tel = _norm_tel(telefono)
-    for rol, numeros in ROLES.items():
-        if tel in numeros:
-            return rol
-    return None
-
-
 def autorizado_tool(telefono: str, tool_name: str) -> bool:
-    rol = get_rol(telefono)
-    if rol is None:
-        return False
-    if rol == "SOCIO":
-        return True
-    if rol == "CONSULTA":
-        return tool_name not in TOOLS_ESCRITURA_SOCIO_OPERATIVO
-    if rol == "OPERATIVO":
-        return True
-    return False
+    return _estrategia_autorizado_tool(telefono, tool_name)
 
 
 def autorizado_comando(telefono: str, comando: str) -> bool:
-    rol = get_rol(telefono)
-    if rol is None:
-        return False
-    if rol == "SOCIO":
-        return True
-    if rol == "CONSULTA":
-        return False
-    if rol == "OPERATIVO":
-        return any(comando.upper().startswith(c) for c in COMANDOS_OPERATIVO)
-    return False
+    return _estrategia_autorizado_comando(telefono, comando)
 
 
 def _autorizado_produccion_sub(telefono: str) -> bool:
-    return get_rol(telefono) in ("SOCIO", "OPERATIVO")
+    from estrategia_config import roles_con_permiso
+
+    return bool(phone_roles(telefono) & roles_con_permiso("perm_producir_sub_roles"))
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -2689,6 +2663,7 @@ def tool_costo_plato(args):
     cod = (args.get("cod_receta") or "").strip()
     nombre = (args.get("nombre_plato") or args.get("nombre_receta") or "").strip()
     variedad = (args.get("variedad_smart_menu") or args.get("variedad") or "").strip()
+    ocultar_costos = bool(args.get("_ocultar_costos"))
     incluir_ingredientes = args.get("incluir_ingredientes")
     # Default: SOLO costo (evita spam). Si quieren ingredientes, lo piden explícitamente.
     if incluir_ingredientes is None:
@@ -2738,6 +2713,27 @@ def tool_costo_plato(args):
     nombre_out = (res.get("nombre_receta") or "").strip() or "(sin nombre)"
     var_out = (res.get("variedad_smart_menu") or "").strip()
     titulo = nombre_out + (f" ({var_out})" if var_out else "")
+
+    if ocultar_costos:
+        top_n = int(args.get("top") or 0) if str(args.get("top") or "").strip() else 0
+        top_n = top_n if top_n > 0 else 40
+        lines = [f"Ingredientes de {titulo} (por 1 unidad):", ""]
+        for d in detalle[:top_n]:
+            nom_i = (d.get("nombre") or "").strip()
+            cant = d.get("cantidad")
+            ub = (d.get("unidad_base") or "").strip()
+            if nom_i:
+                lines.append(f"- {nom_i} {cant}{ub}")
+        if len(detalle) > top_n:
+            lines.append(f"... y {len(detalle) - top_n} ingrediente(s) más.")
+        texto = "\n".join(lines)
+        return {
+            "encontrado": True,
+            "cod_receta": res.get("cod_receta"),
+            "nombre_receta": res.get("nombre_receta"),
+            "sin_costos": True,
+            "texto_whatsapp": texto,
+        }
 
     if not incluir_ingredientes:
         texto = (
@@ -3492,7 +3488,10 @@ def llamar_agente(mensaje, telefono):
                 if not autorizado_tool(telefono, tc.name):
                     result = {"error": "No autorizado para esta operación."}
                 else:
-                    result = fn(tc.input) if fn else {"error": f"Tool {tc.name} no encontrada"}
+                    inp = dict(tc.input or {})
+                    if tc.name in ("costo_plato", "receta_ingredientes", "costo_subreceta"):
+                        inp["_ocultar_costos"] = not puede_ver_costos(telefono)
+                    result = fn(inp) if fn else {"error": f"Tool {tc.name} no encontrada"}
             except Exception as e:
                 result = {"error": str(e)}
             if (

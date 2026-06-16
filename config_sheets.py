@@ -101,6 +101,19 @@ def cfg(key: str, default: Any = None) -> Any:
     return cargar_bd_config().get(key, default)
 
 
+def cfg_int(key: str, default: int = 0) -> int:
+    """Entero desde BD_CONFIG; '0' en horas no se interpreta como bool False."""
+    v = cfg(key, default)
+    if isinstance(v, bool):
+        return 0 if v is False else 1
+    if v is None:
+        return default
+    try:
+        return int(float(str(v).replace(",", ".")))
+    except (TypeError, ValueError):
+        return default
+
+
 def cfg_tokens(key: str, default: set[str] | None = None) -> set[str]:
     """
     Lee un config tipo "A,B,C" y lo devuelve como set upper.

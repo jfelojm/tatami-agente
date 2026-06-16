@@ -291,9 +291,19 @@ def _enviar_a_lista(numeros: list[str], cuerpo: str, *, etiqueta: str = "lista")
 def alerta_wa_descargo_stock_negativo(items: list[dict]) -> None:
     """
     items: [{cod_mp, nombre_mp, cod_bodega, stock_restante, unidad, cod_venta}, ...]
+    Cocina: omitido mientras alert_cocina_wa_activo=false (solo barra).
     """
     if not items:
         return
+    try:
+        from estrategia_config import alertas_wa_cocina_activas, filtrar_items_bodega_barra
+
+        if not alertas_wa_cocina_activas():
+            items = filtrar_items_bodega_barra(items)
+            if not items:
+                return
+    except Exception:
+        pass
     if not alerta_stock_negativo_habilitada():
         print(
             f"  INFO: {len(items)} línea(s) con stock negativo tras descargo — "
@@ -309,7 +319,7 @@ def alerta_wa_descargo_stock_negativo(items: list[dict]) -> None:
         )
     extra = f"\n… y {len(items) - 25} más" if len(items) > 25 else ""
     cuerpo = (
-        "⚠ Descargo inventario — stock negativo en cocina/barra\n"
+        "⚠ Descargo inventario — stock negativo (barra)\n"
         + "\n".join(lineas)
         + extra
     )

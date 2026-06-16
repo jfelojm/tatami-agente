@@ -46,13 +46,23 @@
     const label = document.getElementById(labelId);
     const c = document.getElementById(containerId);
     if (!label || !c) return;
+    if (!items || !items.length) {
+      items = [...c.querySelectorAll('input[type=checkbox]')].map(i => ({
+        v: i.value,
+        n: (i.closest('label')?.textContent || i.value).trim(),
+      }));
+    }
     const checked = w.getCheckedValues(c);
-    const total = items ? items.length : c.querySelectorAll('input[type=checkbox]').length;
-    if (!checked.length || checked.length >= total) {
+    const total = items.length || c.querySelectorAll('input[type=checkbox]').length;
+    if (!checked.length) {
+      label.textContent = prefix + ': ninguno';
+      return;
+    }
+    if (checked.length >= total) {
       label.textContent = prefix + ': todos';
       return;
     }
-    if (checked.length <= 3 && items) {
+    if (checked.length <= 3) {
       const names = checked.map(v => (items.find(it => it.v === v) || {}).n || v);
       label.textContent = prefix + ': ' + names.join(', ');
       return;
@@ -80,6 +90,7 @@
     if (!container) return;
     const cid = container.id || 'panel';
     const pre = prefix || 'Items';
+    const safeId = cid.replace(/[^a-z0-9]/gi, '_');
     const onChg = () => {
       if (labelId) w.updateDropdownLabel(cid, labelId, pre, items);
       if (onChange) onChange();
@@ -90,18 +101,18 @@
       return `<label class="chk-item" for="${id}"><input type="checkbox" id="${id}" value="${it.v}"${chk}> ${it.n}</label>`;
     }).join('');
     const actions = labelId ? `<div class="dd-actions">
-      <button type="button" onclick="selectAllInDropdown('${cid}','${labelId}','${pre}',null,window._ddOnChange_${cid})">Todos</button>
-      <button type="button" onclick="selectNoneInDropdown('${cid}','${labelId}','${pre}',null,window._ddOnChange_${cid})">Ninguno</button>
+      <button type="button" onclick="event.stopPropagation(); selectAllInDropdown('${cid}','${labelId}','${pre}',null,window._ddOnChange_${safeId})">Todos</button>
+      <button type="button" onclick="event.stopPropagation(); selectNoneInDropdown('${cid}','${labelId}','${pre}',null,window._ddOnChange_${safeId})">Ninguno</button>
     </div>` : '';
     container.innerHTML = rows + actions;
-    window['_ddOnChange_' + cid] = onChange;
+    window['_ddOnChange_' + safeId] = onChange;
     container.querySelectorAll('input[type=checkbox]').forEach(inp => {
       inp.addEventListener('change', onChg);
     });
     if (labelId) w.updateDropdownLabel(cid, labelId, pre, items);
   };
 
-  w.initMesesPanel = function (year, containerId, labelId, onChange) {
+  w.initMesesPanel = function (year, containerId, labelId, onChange, selectedValues) {
     const c = document.getElementById(containerId);
     if (!c) return;
     const items = [];
@@ -109,7 +120,14 @@
       const mm = String(m).padStart(2, '0');
       items.push({ v: `${year}-${mm}`, n: MESES[m] });
     }
-    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'Meses', onChange });
+    const sel = selectedValues == null
+      ? items.map(i => i.v)
+      : selectedValues.filter(v => String(v).startsWith(year + '-'));
+    w.buildCheckboxPanel(c, items, { allByDefault: false, labelId, prefix: 'Meses', onChange });
+    c.querySelectorAll('input[type=checkbox]').forEach(inp => {
+      inp.checked = sel.includes(inp.value);
+    });
+    if (labelId) w.updateDropdownLabel(containerId, labelId, 'Meses', items);
   };
 
   w.initDiasSemPanel = function (containerId, labelId, onChange) {
@@ -167,7 +185,9 @@
     return { desde: `${first}-01`, hasta: `${ly}-${lm}-${w.monthEnd(ly, lm)}` };
   };
 
-  w.drawPieChart = function (canvasId, chartRef, labels, values, colors) {
+  w.drawPieChart = function (canvasId, chartRef, labels, values, colors, opts) {
+    opts = opts || {};
+    const fmt = opts.format || 'money';
     const el = document.getElementById(canvasId);
     if (!el) return chartRef;
     if (chartRef && chartRef.destroy) chartRef.destroy();
@@ -181,14 +201,46 @@
       options: {
         responsive: true, maintainAspectRatio: false,
         plugins: {
-          legend: { position: 'right', labels: { boxWidth: 12, font: { size: 11 } } },
-          tooltip: { callbacks: { label: ctx => `${ctx.label}: $${ctx.parsed.toLocaleString('es-EC')}` } },
+          legend: {
+            position: 'right',
+            labels: {
+              boxWidth: 12,
+              font: { size: 11 },
+              generateLabels: chart => {
+                const ds = chart.data.datasets[0];
+                const total = ds.data.reduce((a, b) => a + b, 0) || 1;
+                return chart.data.labels.map((lbl, i) => {
+                  const v = ds.data[i];
+                  const txt = fmt === 'pct'
+                    ? `${lbl}: ${Number(v).toFixed(1)}%`
+                    : `${lbl}: $${Number(v).toLocaleString('es-EC')}`;
+                  return {
+                    text: txt,
+                    fillStyle: ds.backgroundColor[i],
+                    hidden: false,
+                    index: i,
+                  };
+                });
+              },
+            },
+          },
+          tooltip: {
+            callbacks: {
+              label: ctx => {
+                const v = ctx.parsed;
+                if (fmt === 'pct') return `${ctx.label}: ${Number(v).toFixed(1)}%`;
+                return `${ctx.label}: $${Number(v).toLocaleString('es-EC')}`;
+              },
+            },
+          },
         },
       },
     });
   };
 
-  w.drawBarLineChart = function (canvasId, chartRef, labels, barDatasets, lineData, lineLabel) {
+  w.drawBarLineChart = function (canvasId, chartRef, labels, barDatasets, lineData, lineLabel, opts) {
+    opts = opts || {};
+    const fmt = opts.format || 'money';
     const el = document.getElementById(canvasId);
     if (!el) return chartRef;
     if (chartRef && chartRef.destroy) chartRef.destroy();
@@ -199,14 +251,28 @@
         borderColor: '#BA7517', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 3, tension: 0.3, order: 1,
       });
     }
+    const yTick = fmt === 'pct'
+      ? v => Number(v).toFixed(0) + '%'
+      : v => '$' + Number(v).toLocaleString();
     return new Chart(el, {
       data: { labels, datasets },
       options: {
         responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } } },
+        plugins: {
+          legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              label: ctx => {
+                const v = ctx.parsed.y;
+                if (fmt === 'pct') return `${ctx.dataset.label}: ${Number(v).toFixed(1)}%`;
+                return `${ctx.dataset.label}: $${Number(v).toLocaleString('es-EC')}`;
+              },
+            },
+          },
+        },
         scales: {
           x: { stacked: !!barDatasets[0]?.stack, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
-          y: { stacked: !!barDatasets[0]?.stack, ticks: { callback: v => '$' + Number(v).toLocaleString() } },
+          y: { stacked: !!barDatasets[0]?.stack, ticks: { callback: yTick } },
         },
       },
     });

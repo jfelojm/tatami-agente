@@ -1,6 +1,6 @@
 # Cuadrante Tatami: 4 corridas/día (America/Guayaquil, hora local del servidor).
 #
-#   mediodia   12:00  — cierre completo AYER (facturas, PAR, recalcular)
+#   mediodia   12:00  — cierre completo AYER (PAR, recalcular, costos; facturas vía SRI AM/PM)
 #   tarde      18:00  — operativo HOY (ventas + descargo pendientes + alertas)
 #   medianoche 00:00  — operativo AYER recién cerrado (últimos tickets nocturnos)
 #   seguridad  01:00  — nocturno AYER (reconciliar + descargo + recalcular + WA si falla)

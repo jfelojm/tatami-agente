@@ -201,12 +201,19 @@ def build_rentabilidad_from_catalog(
     _ = ini_a, fin_a
     labels = sorted(serie.keys())
     margen_serie = [round(serie[k]["vta"] - serie[k]["costo"], 2) for k in labels]
+    margen_pct_serie = [
+        round((serie[k]["vta"] - serie[k]["costo"]) / serie[k]["vta"] * 100, 1)
+        if serie[k]["vta"]
+        else 0.0
+        for k in labels
+    ]
 
     return {
         "periodo": {"desde": desde.isoformat(), "hasta": hasta.isoformat()},
         "agrup": agrup,
         "labels": labels,
         "margen": margen_serie,
+        "margen_pct": margen_pct_serie,
         "barra": [round(serie[k].get("BARRA", 0), 2) for k in labels],
         "cocina": [round(serie[k].get("COCINA", 0), 2) for k in labels],
         "otro": [round(serie[k].get("OTRO", 0), 2) for k in labels],

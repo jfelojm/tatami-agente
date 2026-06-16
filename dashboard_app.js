@@ -4,12 +4,48 @@
   window.currentDash = window.currentDash || 'ventas';
   window.invResp = window.invResp || '';
   window.cmpArea = window.cmpArea || '';
+  window.rentSocioFmt = window.rentSocioFmt || 'valor';
 
   let chCompras = null;
   let chComprasPie = null;
   let chRent = null;
   let chRentPv = null;
   let chRentSocios = null;
+
+  window.syncSharedFilters = function () {
+    const dash = window.currentDash || 'ventas';
+    const aud = window.audience || 'socios';
+    const showShared = dash === 'ventas' || dash === 'rentabilidad';
+    const filt = document.getElementById('filters-ventas');
+    const dashVentas = document.getElementById('dash-ventas');
+    if (filt) filt.classList.toggle('hid', !showShared);
+    if (dashVentas) dashVentas.classList.toggle('hid', !showShared);
+    if (!showShared) return;
+    const isOp = aud === 'operativo';
+    const frTabla = document.getElementById('fr-tabla');
+    const fo = document.getElementById('filtros-operativo');
+    if (frTabla) frTabla.classList.toggle('hid', dash !== 'ventas' || !isOp);
+    if (fo) fo.classList.toggle('hid', !isOp);
+    const lblPlato = document.getElementById('lbl-plato');
+    const sp = document.getElementById('sp');
+    if (lblPlato) lblPlato.classList.toggle('hid', dash === 'rentabilidad');
+    if (sp) sp.classList.toggle('hid', dash === 'rentabilidad');
+    const pvSocios = document.getElementById('panel-socios');
+    const pvOp = document.getElementById('panel-operativo');
+    const rentSocios = document.getElementById('rent-panel-socios');
+    const rentOp = document.getElementById('rent-panel-operativo');
+    if (dash === 'ventas') {
+      if (pvSocios) pvSocios.classList.toggle('hid', aud !== 'socios');
+      if (pvOp) pvOp.classList.toggle('hid', aud !== 'operativo');
+      if (rentSocios) rentSocios.classList.add('hid');
+      if (rentOp) rentOp.classList.add('hid');
+    } else if (dash === 'rentabilidad') {
+      if (pvSocios) pvSocios.classList.add('hid');
+      if (pvOp) pvOp.classList.add('hid');
+      if (rentSocios) rentSocios.classList.toggle('hid', aud !== 'socios');
+      if (rentOp) rentOp.classList.toggle('hid', aud !== 'operativo');
+    }
+  };
 
   window.setDashboard = function (id) {
     if (!DASH_IDS.includes(id)) return;
@@ -18,18 +54,12 @@
       el.classList.toggle('on', el.dataset.dash === id);
     });
     const showVentasFilters = id === 'ventas' || id === 'rentabilidad';
-    document.getElementById('dash-ventas').classList.toggle('hid', id !== 'ventas');
-    document.getElementById('filters-ventas').classList.toggle('hid', !showVentasFilters);
     ['dash-compras', 'dash-rentabilidad', 'dash-inventario', 'dash-roturas', 'dash-confianza'].forEach(did => {
       const el = document.getElementById(did);
       if (el) el.classList.toggle('hid', id !== did.replace('dash-', ''));
     });
     document.getElementById('filters-global').classList.toggle('hid', showVentasFilters || id === 'compras' || id === 'inventario');
-    if (id === 'rentabilidad') {
-      const a = window.audience || 'socios';
-      document.getElementById('rent-panel-socios').classList.toggle('hid', a !== 'socios');
-      document.getElementById('rent-panel-operativo').classList.toggle('hid', a !== 'operativo');
-    }
+    window.syncSharedFilters();
     if (typeof window.cargarDashboard === 'function') window.cargarDashboard();
   };
 
@@ -140,40 +170,56 @@
   window.cargarRentabilidadFull = async function () {
     const err = document.getElementById('error-msg');
     err.classList.add('hid');
+    const aud = window.audience || 'socios';
     const r = typeof window.getRanges === 'function' ? window.getRanges() : getGlobalRange();
     window._periodFilter = r._filterLabels || null;
     delete r._filterLabels;
     const q = new URLSearchParams({ token: window.TOKEN, ...r, agrup: r.agrup || 'mes' });
-    const target = window.audience === 'socios' ? 'rent-socios-metrics' : 'rent-metrics';
+    const target = aud === 'socios' ? 'rent-socios-metrics' : 'rent-metrics';
     document.getElementById(target).innerHTML = '<div class="loading">Cargando...</div>';
     try {
       const res = await fetch(`${window.BASE}/api/dashboard/rentabilidad?${q}`);
-      if (!res.ok) throw new Error((await res.json()).detail || res.status);
+      if (!res.ok) {
+        const ej = await res.json().catch(() => ({}));
+        throw new Error(ej.detail || `Error ${res.status}`);
+      }
       window._rentData = await res.json();
-      renderRentabilidad();
+      window.renderRentabilidad();
       document.getElementById('last-update').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
     } catch (e) {
+      console.error('rentabilidad', e);
       err.textContent = 'Error rentabilidad: ' + e.message;
       err.classList.remove('hid');
+      document.getElementById(target).innerHTML = '<div class="loading">No se pudo cargar rentabilidad</div>';
     }
   };
 
   window.renderRentabilidad = function () {
     const d = window._rentData;
-    if (!d) return;
+    if (!d || !d.resumen) return;
     const s = d.resumen;
+    const aud = window.audience || 'socios';
     const pvInc = typeof window.pvIncludes === 'function' ? window.pvIncludes : () => true;
 
-    if (window.audience === 'socios') {
-      document.getElementById('rent-socios-metrics').innerHTML = [
-        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), d.nota_costo || ''),
-        card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
-        card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
-        card('Costo MP período', '$' + s.costo_real.toLocaleString('es-EC'), 'Promedio compras ENTRADA'),
-      ].join('');
+    if (aud === 'socios') {
+      const fmt = window.rentSocioFmt || 'valor';
+      const pctCosto = s.vta ? Math.round(s.costo_real / s.vta * 1000) / 10 : 0;
+      const metrics = fmt === 'pct'
+        ? [
+          card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), d.nota_costo || ''),
+          card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
+          card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
+          card('Costo MP / ventas', pctCosto + '%', '$' + s.costo_real.toLocaleString('es-EC')),
+        ]
+        : [
+          card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), d.nota_costo || ''),
+          card('Margen real', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
+          card('Margen teórico', '$' + s.margen_teorico.toLocaleString('es-EC'), s.margen_teorico_pct + '% del neto'),
+          card('Costo MP período', '$' + s.costo_real.toLocaleString('es-EC'), 'Promedio compras ENTRADA'),
+        ];
+      document.getElementById('rent-socios-metrics').innerHTML = metrics.join('');
 
       const mpv = d.margen_pv || {};
-      const dmpv = d.desglose_pv || {};
       const pvLabels = [];
       const pvVals = [];
       const colors = { BARRA: '#378ADD', COCINA: '#1D9E75', OTRO: '#888780' };
@@ -182,19 +228,32 @@
         pvLabels.push(k === 'BARRA' ? 'Barra' : k === 'COCINA' ? 'Cocina' : 'Otro');
         pvVals.push(mpv[k] || 0);
       });
-      chRentPv = drawPieChart('cv-rent-pv', chRentPv, pvLabels, pvVals, Object.values(colors));
+      const pieVals = fmt === 'pct'
+        ? (() => {
+          const tot = pvVals.reduce((a, b) => a + b, 0);
+          return pvVals.map(v => tot ? Math.round(v / tot * 1000) / 10 : 0);
+        })()
+        : pvVals;
+      const pieTitle = document.getElementById('rent-pie-title');
+      if (pieTitle) pieTitle.textContent = fmt === 'pct' ? 'Participación del margen por PV (%)' : 'Margen por punto de venta ($)';
+      const evoTitle = document.getElementById('rent-evo-title');
+      if (evoTitle) evoTitle.textContent = fmt === 'pct' ? 'Evolución margen bruto (%)' : 'Evolución del margen ($)';
+      chRentPv = pvLabels.length
+        ? drawPieChart('cv-rent-pv', chRentPv, pvLabels, pieVals, Object.values(colors), { format: fmt === 'pct' ? 'pct' : 'money' })
+        : (chRentPv && chRentPv.destroy ? (chRentPv.destroy(), null) : null);
 
       let labels = d.labels || [];
-      let margen = d.margen || [];
+      let serie = fmt === 'pct' ? (d.margen_pct || []) : (d.margen || []);
       const pf = window._periodFilter;
       if (pf && pf.length) {
         const idx = labels.map((l, i) => pf.includes(l) ? i : -1).filter(i => i >= 0);
         labels = idx.map(i => labels[i]);
-        margen = idx.map(i => margen[i]);
+        serie = idx.map(i => serie[i]);
       }
+      const barLbl = fmt === 'pct' ? 'Margen %' : 'Margen $';
       chRentSocios = drawBarLineChart('cv-rent-socios', chRentSocios, labels, [
-        { type: 'bar', label: 'Margen $', data: margen, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5 },
-      ], margen, 'Margen');
+        { type: 'bar', label: barLbl, data: serie, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5 },
+      ], fmt === 'pct' ? null : serie, fmt === 'pct' ? null : 'Margen', { format: fmt === 'pct' ? 'pct' : 'money' });
       return;
     }
 
@@ -227,7 +286,12 @@
     chRent = drawBarLineChart('cv-rent', chRent, labels, datasets, margen, 'Margen total');
 
     let tb = '';
-    (d.platos || []).filter(p => pvInc(p.pv)).slice(0, 40).forEach(p => {
+    const ord = (document.getElementById('so') || {}).value || 'desc';
+    const platos = (d.platos || []).filter(p => pvInc(p.pv)).slice().sort((a, b) => {
+      const rev = ord !== 'asc';
+      return rev ? (b.vta - a.vta) : (a.vta - b.vta);
+    });
+    platos.slice(0, 40).forEach(p => {
       tb += `<tr><td>${esc(p.nombre)}<div style="font-size:11px;color:#888780">${esc(p.cat)} · ${p.pv}</div></td><td class="r">$${p.vta.toLocaleString('es-EC')}</td><td class="r">${p.margen_real_pct}%</td><td class="r">$${p.margen_real.toLocaleString('es-EC')}</td></tr>`;
     });
     document.getElementById('rent-tb').innerHTML = tb || '<tr><td colspan="4">Sin datos</td></tr>';
@@ -235,6 +299,15 @@
   };
 
   window.cargarRentabilidad = window.cargarRentabilidadFull;
+
+  window.setRentSocioFmt = function (fmt, btn) {
+    window.rentSocioFmt = fmt;
+    if (btn && btn.parentElement) {
+      btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+    }
+    if (window._rentData) window.renderRentabilidad();
+  };
 
   /* ——— Inventario ——— */
   window.setInvResp = function (resp, btn) {

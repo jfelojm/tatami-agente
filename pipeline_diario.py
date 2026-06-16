@@ -1,5 +1,6 @@
 """
-Pipeline diario: ventas -> reconciliacion -> descargo -> facturas -> recalcular stock -> guardias costos -> PAR/consumo [-> costos teóricos].
+Pipeline diario: ventas -> reconciliacion -> descargo -> recalcular stock -> guardias costos -> PAR/consumo [-> costos teóricos].
+Facturas de compra: portal SRI (procesar_facturas_sri.py / tareas TatamiFacturasSRI AM y PM), no Drive.
 
 Candados: tras recalcular_stock corre guardias_costos_mp.py --strict (aborta si costo corrupto).
 Cierre mediodia (cuadrante): incluye --with-costos (sync prov, subrecetas, BD_RECETAS, guardias).
@@ -332,6 +333,13 @@ def run_step(
         print(f"\nWARN: paso termino con codigo {r.returncode} (se continua)")
     if r.returncode == 0 and step is not None and fecha_objetivo:
         _checkpoint_step_ok(fecha_objetivo, step, name)
+    if r.returncode == 0:
+        try:
+            from alertas_pipeline import ping_wa_paso_proceso
+
+            ping_wa_paso_proceso(name)
+        except Exception as e:
+            print(f"  WARN: ping WA paso: {e}")
     return r.returncode
 
 
@@ -610,63 +618,14 @@ def main() -> None:
 
     print("\n" + "=" * 60)
     print(
-        "PIPELINE: 4/6 — Procesar facturas Drive "
-        "(mov + BD_ITEMS_PROV precios/XML/fecha + BD_MP_SISTEMA)"
+        "PIPELINE: 4/6 — Facturas compra (omitido; portal SRI TatamiFacturasSRI AM/PM)"
     )
     print("=" * 60)
-    resumen_facturas = {
-        "total_procesadas": 0,
-        "completas": 0,
-        "parciales": 0,
-        "sin_xmls": True,
-        "total_usd": 0.0,
-        "sin_match": [],
-    }
-    err_facturas: str | None = None
-    _checkpoint_step_in_progress(
-        fecha_objetivo,
-        4,
-        "procesar_facturas (en curso)",
-        last_ok_step=3,
-        last_ok_name="3/6 — Descargo inventario (hist_ventas -> mov_inventario + stock Sheets)",
+    print(
+        "  INFO: compras vía procesar_facturas_sri.py — "
+        "Drive ya no corre en el pipeline diario."
     )
-    try:
-        from procesar_facturas_drive import procesar_facturas
-
-        resumen_facturas = procesar_facturas(dry_run=False, reprocesar=False)
-        print(
-            "\n  --- Pipeline: resumen paso facturas ---\n"
-            f"    XMLs en carpeta: {resumen_facturas.get('xmls_en_carpeta', '?')}\n"
-            f"    Aplicados esta corrida: {resumen_facturas.get('total_procesadas', 0)}\n"
-            f"    Omitidos (ya COMPLETA): {resumen_facturas.get('xmls_omitidos_completa', '?')}\n"
-            f"    Facturas COMPLETAS/PARCIALES (esta corrida): "
-            f"{resumen_facturas.get('completas', 0)}/{resumen_facturas.get('parciales', 0)}"
-        )
-        _checkpoint_step_ok(fecha_objetivo, 4, "procesar_facturas (in-process)")
-    except Exception as e:
-        err_facturas = str(e)
-        print(f"\n  WARN: procesar_facturas no completó (pipeline continúa): {e}")
-        resumen_facturas = {
-            "total_procesadas": 0,
-            "completas": 0,
-            "parciales": 0,
-            "sin_xmls": False,
-            "total_usd": 0.0,
-            "sin_match": [],
-            "xmls_en_carpeta": 0,
-            "xmls_omitidos_completa": 0,
-        }
-        _checkpoint_step_ok(
-            fecha_objetivo,
-            4,
-            f"procesar_facturas WARN: {e[:120]}",
-        )
-    try:
-        from alertas_pipeline import enviar_resumen_facturas
-
-        enviar_resumen_facturas(resumen_facturas, pipeline_error=err_facturas)
-    except Exception as e:
-        print(f"  WARN: enviar_resumen_facturas: {e}")
+    _checkpoint_step_ok(fecha_objetivo, 4, "omitido (facturas vía SRI)")
 
     run_step(
         "5/6 — Recalcular stock/costo Sheets desde mov_inventario",
@@ -681,12 +640,20 @@ def main() -> None:
         step=5,
         fecha_objetivo=fecha_objetivo,
     )
-    run_step(
-        "6/6 — Calcular PAR y consumo diario en BD_MP_SISTEMA",
-        ["calcular_par_levels.py"],
-        step=6,
-        fecha_objetivo=fecha_objetivo,
-    )
+    from config_sheets import cfg
+
+    if cfg("par_reemplaza_pipeline_diario", False):
+        print(
+            "\n  INFO: PAR omitido (par semanal domingo — ver par_semanal.py / TatamiPARSemanal)"
+        )
+        _checkpoint_step_ok(fecha_objetivo, 6, "omitido (PAR semanal)")
+    else:
+        run_step(
+            "6/6 — Calcular PAR y consumo diario en BD_MP_SISTEMA",
+            ["calcular_par_levels.py"],
+            step=6,
+            fecha_objetivo=fecha_objetivo,
+        )
     try:
         from alertas_ordenes_compra_barra import enviar_alertas_ordenes_compra_barra
 
@@ -727,9 +694,10 @@ def main() -> None:
 
     _alerta_pipeline_ok(
         fecha_objetivo,
-        resumen_facturas=resumen_facturas,
+        resumen_facturas=None,
         skip_reconciliar=args.skip_reconciliar,
         notas=[
+            "Facturas compra: portal SRI (tareas TatamiFacturasSRI AM/PM).",
             "Revisá el chat con la línea WhatsApp Business del local (Meta), no un contacto personal.",
         ],
     )

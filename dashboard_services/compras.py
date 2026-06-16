@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from datetime import date
 
@@ -15,9 +16,12 @@ from dashboard_services.periodos import (
 from inventario_stock_mp import norm_mp
 
 
+# Bodegas operativas de inventario
+_BOD_INVENTARIO = frozenset({"BOD-001", "BOD-002", "BOD-003", "BOD-005"})
 # BOD-001, BOD-005 = Cocina · BOD-002, BOD-003 = Barra
 _BOD_COCINA = frozenset({"BOD-001", "BOD-005"})
 _BOD_BARRA = frozenset({"BOD-002", "BOD-003"})
+_TIPOS_PROV_INV = frozenset({"BARRA", "COCINA"})
 
 
 def _to_float(v: object) -> float:
@@ -53,19 +57,43 @@ def _clave_agrup(fecha: str, agrup: str) -> str:
     return fecha[:7]
 
 
-def _mapa_proveedores_nombre(prov_rows: list[dict]) -> dict[str, str]:
-    """RUC -> razón social (nunca mostrar RUC como nombre)."""
+def _ruc_claves(ruc: str) -> list[str]:
+    raw = (ruc or "").strip()
+    if not raw:
+        return []
+    digits = re.sub(r"\D", "", raw)
+    keys = [raw]
+    if digits:
+        keys.append(digits)
+        if len(digits) == 10:
+            keys.append(digits + "001")
+    return keys
+
+
+def _mapa_proveedores_inventario(prov_rows: list[dict]) -> dict[str, str]:
+    """Claves RUC -> razón social solo proveedores Tipo Barra/Cocina en BD_PROV."""
     out: dict[str, str] = {}
     for p in prov_rows:
-        ruc = (p.get("ruc") or p.get("RUC") or "").strip()
+        tipo = (p.get("Tipo") or p.get("tipo") or "").strip().upper()
+        if tipo not in _TIPOS_PROV_INV:
+            continue
         nombre = (p.get("razon_social") or p.get("Razon_social") or "").strip()
-        if ruc and nombre:
-            out[ruc] = nombre
+        ruc = (p.get("ruc") or p.get("RUC") or "").strip()
+        if not nombre or not ruc:
+            continue
+        for key in _ruc_claves(ruc):
+            out[key] = nombre
     return out
 
 
+def _nombre_proveedor_inventario(ruc: str, prov_inv: dict[str, str]) -> str | None:
+    for key in _ruc_claves(ruc):
+        if key in prov_inv:
+            return prov_inv[key]
+    return None
+
+
 def _mapa_mp_area(rows_mp: list[dict]) -> dict[str, str]:
-    """cod_mp -> área default desde BD_MP_SISTEMA."""
     out: dict[str, str] = {}
     for r in rows_mp:
         cod = norm_mp(r.get("cod_mp_sistema"))
@@ -78,24 +106,10 @@ def _mapa_mp_area(rows_mp: list[dict]) -> dict[str, str]:
     return out
 
 
-def _nombre_proveedor(
-    ruc: str,
-    meta_factura: dict,
-    prov_por_ruc: dict[str, str],
-) -> str:
-    ruc = (ruc or "").strip()
-    if ruc and ruc in prov_por_ruc:
-        return prov_por_ruc[ruc]
-    rs = (meta_factura.get("razon_social") or "").strip()
-    if rs and not rs.isdigit() and len(rs) > 8:
-        return rs
-    return "Proveedor sin nombre"
-
-
 def _metricas_compras(
     rows: list[dict],
     facturas: list[dict],
-    prov_por_ruc: dict[str, str],
+    prov_inv: dict[str, str],
     mps_validos: set[str],
     mp_area: dict[str, str],
     *,
@@ -119,22 +133,31 @@ def _metricas_compras(
         if not _es_entrada_compra(r):
             continue
         cod = norm_mp(r.get("cod_mp_sistema"))
-        if mps_validos and cod not in mps_validos:
-            continue
-        bod = normalizar_cod_bodega(r.get("cod_bodega_destino") or r.get("cod_bodega_origen"))
-        area = _area_bodega(bod) if bod else mp_area.get(cod, "OTRO")
-        if area_filtro and area != area_filtro:
+        if not cod or cod not in mps_validos:
             continue
 
-        ct = _to_float(r.get("costo_total"))
-        total += ct
-        lineas += 1
-        por_area[area] += ct
+        bod = normalizar_cod_bodega(r.get("cod_bodega_destino") or r.get("cod_bodega_origen"))
+        if bod not in _BOD_INVENTARIO:
+            continue
+
+        area = _area_bodega(bod)
+        if area_filtro and area != area_filtro:
+            continue
 
         num = (r.get("num_documento") or "").strip()
         fac = fact_por_num.get(num, {})
         ruc = (fac.get("ruc_proveedor") or "").strip()
-        prov = _nombre_proveedor(ruc, fac, prov_por_ruc)
+        prov = _nombre_proveedor_inventario(ruc, prov_inv)
+        if not prov:
+            continue
+
+        ct = _to_float(r.get("costo_total"))
+        if ct <= 0:
+            continue
+
+        total += ct
+        lineas += 1
+        por_area[area] += ct
         por_prov[prov]["vta"] += ct
         por_prov[prov]["lineas"] += 1
         if num:
@@ -199,19 +222,19 @@ def build_resumen_compras(
 ) -> dict:
     mps_validos = {norm_mp(r.get("cod_mp_sistema")) for r in rows_mp if norm_mp(r.get("cod_mp_sistema"))}
     mp_area = _mapa_mp_area(rows_mp)
-    prov_por_ruc = _mapa_proveedores_nombre(rows_prov)
+    prov_inv = _mapa_proveedores_inventario(rows_prov)
 
     rows = query_mov_fn(desde.isoformat(), hasta.isoformat())
     facturas = query_facturas_fn(desde.isoformat(), hasta.isoformat())
     actual = _metricas_compras(
-        rows, facturas, prov_por_ruc, mps_validos, mp_area, agrup=agrup, area_filtro=area
+        rows, facturas, prov_inv, mps_validos, mp_area, agrup=agrup, area_filtro=area
     )
 
     ini_a, fin_a = periodo_anterior(desde, hasta)
     ant = _metricas_compras(
         query_mov_fn(ini_a.isoformat(), fin_a.isoformat()),
         facturas,
-        prov_por_ruc,
+        prov_inv,
         mps_validos,
         mp_area,
         agrup=agrup,
@@ -222,7 +245,7 @@ def build_resumen_compras(
     ya = _metricas_compras(
         query_mov_fn(ini_y.isoformat(), fin_y.isoformat()),
         facturas,
-        prov_por_ruc,
+        prov_inv,
         mps_validos,
         mp_area,
         agrup=agrup,
@@ -233,7 +256,7 @@ def build_resumen_compras(
     ytd = _metricas_compras(
         query_mov_fn(ini_ytd.isoformat(), fin_ytd.isoformat()),
         facturas,
-        prov_por_ruc,
+        prov_inv,
         mps_validos,
         mp_area,
         agrup=agrup,
@@ -255,4 +278,5 @@ def build_resumen_compras(
         },
         "acumulado_anio": {"vta": ytd["vta"], "lineas": ytd["lineas"]},
         "facturas_parciales": parciales,
+        "nota": "Solo ENTRADAS a bodegas 001/002/003/005, MPs en BD_MP_SISTEMA y proveedores BD_PROV Tipo Barra/Cocina",
     }

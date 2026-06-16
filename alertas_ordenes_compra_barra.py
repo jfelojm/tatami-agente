@@ -21,6 +21,15 @@ load_dotenv(override=True)
 
 
 def alertas_ordenes_compra_barra_habilitadas() -> bool:
+    try:
+        from config_sheets import cfg
+
+        if cfg("alert_pedidos_activo") is False:
+            return False
+        if cfg("alert_pedidos_barra_activo") is False:
+            return False
+    except Exception:
+        pass
     v = (os.getenv("TATAMI_ALERT_ORDENES_COMPRA_BARRA") or "").strip().lower()
     return v in ("1", "true", "yes", "si", "sí")
 
@@ -30,6 +39,15 @@ def destinatarios_ordenes_compra_barra() -> list[tuple[str, str]]:
     preview = (os.getenv("ALERTA_WA_ORDENES_BARRA_PREVIEW") or "").strip()
     if preview:
         return [(preview, "preview órdenes barra")]
+
+    try:
+        from estrategia_config import telefonos_alerta
+
+        dest = telefonos_alerta("alert_pedidos_roles_barra")
+        if dest:
+            return [(t, f"pedidos {lab}") for t, lab in dest]
+    except Exception:
+        pass
 
     lista = (os.getenv("ALERTA_WA_ORDENES_BARRA") or "").strip()
     if lista:

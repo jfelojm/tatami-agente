@@ -389,9 +389,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Descarga y procesa facturas recibidas SRI")
     parser.add_argument(
         "--corrida",
-        choices=["AM", "PM"],
         default=os.getenv("SRI_CORRIDA", "AM"),
-        help="Etiqueta de corrida (AM=10:00, PM=18:00)",
+        help="Etiqueta de corrida (AM, PM, H07, etc.)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Sin escrituras en Supabase/Sheets")
     parser.add_argument(
