@@ -92,6 +92,99 @@ def _norm_punto_venta(raw: str) -> str:
     return pv or "OTRO"
 
 
+def _parse_punto_venta_query(punto_venta: list[str] | None) -> set[str] | None:
+    if not punto_venta:
+        return None
+    pv_filtros: set[str] = set()
+    for raw in punto_venta:
+        for part in raw.split(","):
+            pv_norm = _norm_punto_venta(part.strip())
+            if pv_norm:
+                pv_filtros.add(pv_norm)
+    return pv_filtros or None
+
+
+def _filtrar_rows_punto_venta(
+    rows: list[dict], catalogo: dict, pv_filtros: set[str] | None
+) -> list[dict]:
+    if not pv_filtros:
+        return rows
+    out: list[dict] = []
+    for r in rows:
+        meta = _resolver_producto(
+            catalogo,
+            cod_smart_menu=r.get("cod_smart_menu") or "",
+            variedad_smart_menu=r.get("variedad_smart_menu") or "",
+            nombre_producto=r.get("nombre_producto") or "",
+        )
+        if meta["pv"] in pv_filtros:
+            out.append(r)
+    return out
+
+
+def _filtrar_ventas_catalogo(
+    rows: list[dict],
+    catalogo: dict,
+    *,
+    pv_filtros: set[str] | None = None,
+    cat_filtros: list[str] | None = None,
+    platos_filtro: list[str] | None = None,
+) -> list[dict]:
+    rows = _filtrar_rows_punto_venta(rows, catalogo, pv_filtros)
+    cats_f = cat_filtros or []
+    platos_f = platos_filtro or []
+    if not cats_f and not platos_f:
+        return rows
+    out: list[dict] = []
+    for r in rows:
+        meta = _resolver_producto(
+            catalogo,
+            cod_smart_menu=r.get("cod_smart_menu") or "",
+            variedad_smart_menu=r.get("variedad_smart_menu") or "",
+            nombre_producto=r.get("nombre_producto") or "",
+        )
+        if not _match_filtro_categorias(meta["cat"], cats_f):
+            continue
+        if not _match_filtro_platos(meta, platos_f):
+            continue
+        out.append(r)
+    return out
+
+
+def _socios_query_fn(
+    sb,
+    catalogo: dict,
+    pv_filtros: set[str] | None,
+    *,
+    platos_filtro: list[str] | None = None,
+    cat_filtros: list[str] | None = None,
+):
+    platos_f = platos_filtro or []
+    cats_f = cat_filtros or []
+
+    def query_fn(d: str, h: str) -> list[dict]:
+        rows = _query_hist_ventas(sb, desde=d, hasta=h)
+        rows = _filtrar_rows_punto_venta(rows, catalogo, pv_filtros)
+        if not platos_f and not cats_f:
+            return rows
+        out: list[dict] = []
+        for r in rows:
+            meta = _resolver_producto(
+                catalogo,
+                cod_smart_menu=r.get("cod_smart_menu") or "",
+                variedad_smart_menu=r.get("variedad_smart_menu") or "",
+                nombre_producto=r.get("nombre_producto") or "",
+            )
+            if not _match_filtro_categorias(meta["cat"], cats_f):
+                continue
+            if not _match_filtro_platos(meta, platos_f):
+                continue
+            out.append(r)
+        return out
+
+    return query_fn
+
+
 def _cargar_catalogo() -> dict:
     global _cache_catalogo
     if _cache_catalogo is not None:
@@ -311,6 +404,20 @@ def _dia_semana_iso(fecha: str) -> int:
     return date.fromisoformat(fecha[:10]).isoweekday()
 
 
+def _parse_list_query(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    out: list[str] = []
+    for raw in values:
+        if not raw:
+            continue
+        for part in str(raw).split(","):
+            p = part.strip()
+            if p:
+                out.append(p)
+    return out
+
+
 def _match_filtro_plato(meta: dict, plato: str) -> bool:
     if not plato:
         return True
@@ -322,6 +429,40 @@ def _match_filtro_plato(meta: dict, plato: str) -> bool:
             and meta.get("variedad_smart_menu", "") == var.strip()
         )
     return _norm_key(meta.get("nombre", "")) == _norm_key(plato)
+
+
+def _match_filtro_platos(meta: dict, platos: list[str]) -> bool:
+    if not platos:
+        return True
+    return any(_match_filtro_plato(meta, p) for p in platos)
+
+
+def _match_filtro_categorias(cat: str, categorias: list[str]) -> bool:
+    if not categorias:
+        return True
+    nk = _norm_key(cat)
+    return any(_norm_key(c) == nk for c in categorias)
+
+
+def _opciones_filtro_catalogo(catalogo: dict) -> dict:
+    multivariety_cods: set[str] = catalogo["multivariety_cods"]
+    platos: list[dict] = []
+    cats: set[str] = set()
+    for (_cod, _var), meta in catalogo["by_cod_var"].items():
+        cats.add(meta["cat"])
+        platos.append(
+            {
+                "id": f"{meta['cod_smart_menu']}|{meta['variedad_smart_menu']}",
+                "nombre": _nombre_display(meta, multivariety_cods),
+                "cat": meta["cat"],
+                "pv": meta["pv"],
+            }
+        )
+    platos.sort(key=lambda x: _norm_key(x["nombre"]))
+    return {
+        "platos_catalogo": platos,
+        "categorias_catalogo": sorted(cats, key=_norm_key),
+    }
 
 
 def _ordenar_items(items: list[dict], orden: str, key_vta: str = "vta", key_uds: str = "uds") -> list[dict]:
@@ -371,8 +512,8 @@ def ventas(
     agrup: str = Query(default="mes"),
     dia_semana: int | None = Query(default=None, ge=1, le=7),
     punto_venta: list[str] | None = Query(default=None),
-    categoria: str | None = Query(default=None),
-    plato: str | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+    plato: list[str] | None = Query(default=None),
     orden: str = Query(default="desc"),
     incluir_socios: bool = Query(default=False),
 ):
@@ -386,22 +527,17 @@ def ventas(
         raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta")
     rows = _query_hist_ventas(sb, desde=desde, hasta=hasta)
 
-    pv_filtros: set[str] | None = None
-    if punto_venta:
-        pv_filtros = set()
-        for raw in punto_venta:
-            for part in raw.split(","):
-                pv_norm = _norm_punto_venta(part.strip())
-                if pv_norm:
-                    pv_filtros.add(pv_norm)
-        if not pv_filtros:
-            pv_filtros = None
-    cat_filtro = _norm_key(categoria) if categoria else ""
+    pv_filtros = _parse_punto_venta_query(punto_venta)
+    cat_filtros = [_norm_key(c) for c in _parse_list_query(categoria)]
+    platos_filtro = _parse_list_query(plato)
+    hay_filtro_trend = bool(platos_filtro or cat_filtros)
 
     resumen: dict[str, dict[str, float]] = defaultdict(
         lambda: {"BARRA": 0.0, "COCINA": 0.0, "OTRO": 0.0}
     )
-    plato_trend: dict[str, dict[str, float]] = defaultdict(lambda: {"vta": 0.0, "uds": 0.0})
+    trend_series: dict[str, dict] = defaultdict(
+        lambda: {"nombre": "", "periods": defaultdict(lambda: {"vta": 0.0, "uds": 0.0})}
+    )
     desglose: dict[str, dict] = {
         pv: {"vta": 0.0, "uds": 0.0, "categorias": defaultdict(lambda: {"vta": 0.0, "uds": 0.0, "platos": {}})}
         for pv in ("BARRA", "COCINA", "OTRO")
@@ -429,9 +565,9 @@ def ventas(
 
         if pv_filtros and pv not in pv_filtros:
             continue
-        if cat_filtro and _norm_key(cat) != cat_filtro:
+        if not _match_filtro_categorias(cat, cat_filtros):
             continue
-        if plato and not _match_filtro_plato(meta, plato):
+        if not _match_filtro_platos(meta, platos_filtro):
             continue
 
         total = _neto_linea(r)
@@ -502,9 +638,17 @@ def ventas(
             productos_flat[cod_prod]["variedades"][var_key]["vta"] += total
             productos_flat[cod_prod]["variedades"][var_key]["uds"] += uds
 
-        if plato:
-            plato_trend[key]["vta"] += total
-            plato_trend[key]["uds"] += uds
+        if hay_filtro_trend:
+            if platos_filtro:
+                series_id = plato_key
+                series_name = _nombre_display(meta, multivariety_cods)
+            else:
+                series_id = f"cat:{cat}"
+                series_name = cat
+            bucket = trend_series[series_id]
+            bucket["nombre"] = series_name
+            bucket["periods"][key]["vta"] += total
+            bucket["periods"][key]["uds"] += uds
 
     labels = sorted(resumen.keys())
     desglose_out: dict[str, dict] = {}
@@ -594,13 +738,19 @@ def ventas(
         orden,
     )
 
-    plato_labels = sorted(plato_trend.keys()) if plato else []
-    plato_nombre = ""
-    if plato:
-        for p in platos_list:
-            if _match_filtro_plato(p, plato):
-                plato_nombre = p["nombre"]
-                break
+    filtro_trend = None
+    if hay_filtro_trend and labels:
+        series_out = []
+        for sid, sdata in sorted(trend_series.items(), key=lambda x: x[1]["nombre"]):
+            series_out.append(
+                {
+                    "id": sid,
+                    "nombre": sdata["nombre"],
+                    "vta": [round(sdata["periods"][k]["vta"], 2) for k in labels],
+                    "uds": [round(sdata["periods"][k]["uds"], 0) for k in labels],
+                }
+            )
+        filtro_trend = {"labels": labels, "series": series_out}
 
     result = {
         "labels": labels,
@@ -617,18 +767,17 @@ def ventas(
         "top_barra": desglose_out["BARRA"]["platos"][:20],
         "top_cocina": desglose_out["COCINA"]["platos"][:20],
         "top_otro": desglose_out["OTRO"]["platos"][:10],
-        "plato_trend": {
-            "nombre": plato_nombre,
-            "labels": plato_labels,
-            "vta": [round(plato_trend[k]["vta"], 2) for k in plato_labels],
-            "uds": [round(plato_trend[k]["uds"], 0) for k in plato_labels],
-        }
-        if plato
-        else None,
+        "filtro_trend": filtro_trend,
     }
-    if incluir_socios and desde and hasta and not plato:
+    if incluir_socios and desde and hasta:
         result["socios"] = build_resumen_socios(
-            query_fn=lambda d, h: _query_hist_ventas(sb, desde=d, hasta=h),
+            query_fn=_socios_query_fn(
+                sb,
+                catalogo,
+                pv_filtros,
+                platos_filtro=platos_filtro,
+                cat_filtros=cat_filtros,
+            ),
             catalogo=catalogo,
             resolver=_resolver_producto,
             neto_fn=_neto_linea,
@@ -701,7 +850,9 @@ def _query_conteo_ciclos(sb, limit: int = 50) -> list[dict]:
 @router.get("/api/dashboard/meta")
 def dashboard_meta(token: str = ""):
     _check_token(token)
-    return meta_dashboard(_get_sb())
+    base = meta_dashboard(_get_sb())
+    base.update(_opciones_filtro_catalogo(_cargar_catalogo()))
+    return base
 
 
 @router.get("/api/dashboard/ventas/socios")
@@ -709,6 +860,9 @@ def ventas_socios(
     token: str = "",
     desde: str | None = Query(default=None),
     hasta: str | None = Query(default=None),
+    punto_venta: list[str] | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+    plato: list[str] | None = Query(default=None),
 ):
     _check_token(token)
     sb = _get_sb()
@@ -720,11 +874,18 @@ def ventas_socios(
     if desde_d > hasta_d:
         raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta")
 
-    def query_fn(d: str, h: str) -> list[dict]:
-        return _query_hist_ventas(sb, desde=d, hasta=h)
+    pv_filtros = _parse_punto_venta_query(punto_venta)
+    cat_filtros = [_norm_key(c) for c in _parse_list_query(categoria)]
+    platos_filtro = _parse_list_query(plato)
 
     return build_resumen_socios(
-        query_fn=query_fn,
+        query_fn=_socios_query_fn(
+            sb,
+            catalogo,
+            pv_filtros,
+            platos_filtro=platos_filtro,
+            cat_filtros=cat_filtros,
+        ),
         catalogo=catalogo,
         resolver=_resolver_producto,
         neto_fn=_neto_linea,
@@ -791,6 +952,9 @@ def dashboard_rentabilidad(
     desde: str | None = Query(default=None),
     hasta: str | None = Query(default=None),
     agrup: str = Query(default="mes"),
+    punto_venta: list[str] | None = Query(default=None),
+    categoria: list[str] | None = Query(default=None),
+    plato: list[str] | None = Query(default=None),
 ):
     _check_token(token)
     sb = _get_sb()
@@ -799,10 +963,19 @@ def dashboard_rentabilidad(
     hasta = _sanitize_fecha(hasta)
     if not desde or not hasta:
         raise HTTPException(status_code=400, detail="desde y hasta son obligatorios")
-    ventas = _query_hist_ventas(sb, desde=desde, hasta=hasta)
+    pv_filtros = _parse_punto_venta_query(punto_venta)
+    cat_filtros = [_norm_key(c) for c in _parse_list_query(categoria)]
+    platos_filtro = _parse_list_query(plato)
+    ventas = _filtrar_ventas_catalogo(
+        _query_hist_ventas(sb, desde=desde, hasta=hasta),
+        catalogo,
+        pv_filtros=pv_filtros,
+        cat_filtros=cat_filtros,
+        platos_filtro=platos_filtro,
+    )
     entradas = [
         m for m in _query_mov_inventario(sb, desde=desde, hasta=hasta)
-        if (m.get("tipo_mov") or "") == "ENTRADA"
+        if (m.get("tipo_mov") or "") in ("ENTRADA", "ENTRADA_COSTO_HIST")
     ]
     return build_rentabilidad_from_catalog(
         rows_ventas=ventas,

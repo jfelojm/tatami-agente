@@ -6,17 +6,15 @@ import os
 import time
 
 import gspread
-from google.oauth2.service_account import Credentials
-
+from google_credentials import google_credentials
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 _cache: dict[str, tuple[float, list[dict]]] = {}
 _TTL = 120.0
 
 
 def _conectar():
-    path = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials/google_service_account.json")
     sid = os.getenv("SPREADSHEET_ID", "")
-    creds = Credentials.from_service_account_file(path, scopes=SCOPES)
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(sid)
 
 

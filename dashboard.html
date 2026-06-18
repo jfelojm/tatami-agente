@@ -62,6 +62,11 @@ tr:hover td{background:#f5f4f0}
 .dd-btn::after{content:'▾';font-size:10px;color:#888780;flex-shrink:0}
 .dd-btn.open{border-color:#185fa5;background:#e6f1fb}
 .dd-menu{display:none;position:absolute;top:calc(100% + 4px);left:0;z-index:200;background:#fff;border:0.5px solid #d3d1c7;border-radius:8px;padding:4px 0;min-width:200px;max-height:280px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.1)}
+.dd-menu.dd-menu-wide{min-width:300px;max-height:380px;overflow:hidden;padding:0}
+.dd-menu.dd-menu-wide #cat-panel,
+.dd-menu.dd-menu-wide #plato-panel{display:flex;flex-direction:column;max-height:380px;width:100%}
+.dd-search{width:calc(100% - 16px);margin:8px 8px 4px;padding:7px 10px;border:0.5px solid #d3d1c7;border-radius:6px;font-size:12px;box-sizing:border-box}
+.dd-list{max-height:260px;overflow-y:auto;padding:0 0 4px}
 .dd-menu.open{display:block}
 .dd-menu .chk-item{display:flex;align-items:center;gap:8px;padding:7px 12px;font-size:12px;width:100%;margin:0}
 .dd-menu .chk-item:hover{background:#f5f4f0}
@@ -80,6 +85,7 @@ tr:hover td{background:#f5f4f0}
 .collapse-body.open{display:block}
 .cw-sm{position:relative;width:100%;height:200px}
 .cw-pie{position:relative;width:100%;max-width:360px;height:220px;margin:0 auto}
+.cw-pie-wide{position:relative;width:100%;max-width:100%;height:340px;margin:0 auto}
 .dash-panel.hid{display:none}
 .meta-banner{font-size:11px;color:#666660;background:#f1efe8;border:0.5px solid #d3d1c7;border-radius:8px;padding:8px 12px;margin-bottom:10px}
 .delta-up{color:#1D9E75;font-size:11px}
@@ -154,9 +160,19 @@ tr:hover td{background:#f5f4f0}
       <div class="dd-menu" id="pv-panel"></div>
     </div>
     </span>
+    <span id="filtros-plato-cat">
+    <span class="fl">Categoría</span>
+    <div class="dd-wrap" id="dd-cat-wrap">
+      <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-cat-wrap')"><span id="dd-cat-label">Categoría: todas</span></button>
+      <div class="dd-menu dd-menu-wide"><div id="cat-panel"></div></div>
+    </div>
+    <span class="fl">Plato</span>
+    <div class="dd-wrap" id="dd-plato-wrap">
+      <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-plato-wrap')"><span id="dd-plato-label">Plato: todos</span></button>
+      <div class="dd-menu dd-menu-wide"><div id="plato-panel"></div></div>
+    </div>
+    </span>
     <span id="filtros-operativo" class="hid">
-    <span class="fl" id="lbl-plato">Plato</span>
-    <select id="sp" onchange="cargar()"><option value="">Todos</option></select>
     <span class="fl">Orden</span>
     <select id="so" onchange="onOrdenChange()">
       <option value="desc">Mayor→menor</option>
@@ -192,7 +208,7 @@ tr:hover td{background:#f5f4f0}
       <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-semanas-wrap')"><span id="dd-semanas-label">Semanas: todas</span></button>
       <div class="dd-menu" id="chk-semanas"></div>
     </div>
-    <select id="rm" class="hid" onchange="cargar()">
+    <select id="rm" class="hid" onchange="onRmChange()">
       <option value="01">Ene</option><option value="02">Feb</option><option value="03">Mar</option>
       <option value="04">Abr</option><option value="05">May</option><option value="06" selected>Jun</option>
       <option value="07">Jul</option><option value="08">Ago</option><option value="09">Sep</option>
@@ -269,6 +285,12 @@ tr:hover td{background:#f5f4f0}
     </div>
   </div>
   <div class="socios-grid">
+    <div class="sec hid" id="socios-trend-sec" style="grid-column:1/-1">
+      <div class="st" id="socios-trend-title">Tendencia del filtro</div>
+      <div class="cw" style="height:220px"><canvas id="cv-socios-trend"></canvas></div>
+    </div>
+  </div>
+  <div class="socios-grid">
     <div class="sec">
       <div class="st">Top categorías</div>
       <div style="overflow-x:auto"><table><thead><tr><th>Categoría</th><th class="r">Ventas $</th><th class="r">%</th></tr></thead><tbody id="socios-cats"></tbody></table></div>
@@ -330,7 +352,7 @@ tr:hover td{background:#f5f4f0}
   <div class="metrics" id="compras-metrics"><div class="loading">Cargando...</div></div>
   <div class="socios-grid">
     <div class="sec"><div class="st">Histórico de compras</div><div class="cw"><canvas id="cv-compras"></canvas></div></div>
-    <div class="sec"><div class="st">Participación por proveedor</div><div class="cw-pie"><canvas id="cv-compras-pie"></canvas></div></div>
+    <div class="sec"><div class="st">Participación por proveedor</div><div class="cw-pie-wide"><canvas id="cv-compras-pie"></canvas></div></div>
   </div>
   <div class="sec"><div class="st">Compras por proveedor (inventario)</div>
     <table><thead><tr><th>Proveedor</th><th class="r">Facturas</th><th class="r">Total $</th><th class="r">%</th></tr></thead><tbody id="compras-tb"></tbody></table>
@@ -338,13 +360,15 @@ tr:hover td{background:#f5f4f0}
 </div>
 
 <div id="dash-rentabilidad" class="dash-panel hid">
+  <div style="display:flex;justify-content:flex-end;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px" id="rent-fmt-bar">
+    <div class="bg" id="rent-fmt-toggle">
+      <button type="button" class="mb on" onclick="setRentSocioFmt('valor',this)">Valores $</button>
+      <button type="button" class="mb" onclick="setRentSocioFmt('pct',this)">Porcentaje %</button>
+    </div>
+  </div>
   <div id="rent-panel-socios" class="panel-socios">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px">
+    <div style="margin-bottom:8px">
       <span style="font-size:13px;color:#888780">Rentabilidad bruta · vista socios</span>
-      <div class="bg" id="rent-fmt-toggle">
-        <button type="button" class="mb on" onclick="setRentSocioFmt('valor',this)">Valores $</button>
-        <button type="button" class="mb" onclick="setRentSocioFmt('pct',this)">Porcentaje %</button>
-      </div>
     </div>
     <div class="metrics" id="rent-socios-metrics"><div class="loading">Cargando...</div></div>
     <div class="socios-grid">
@@ -353,6 +377,9 @@ tr:hover td{background:#f5f4f0}
     </div>
   </div>
   <div id="rent-panel-operativo" class="panel-operativo hid">
+    <div style="margin-bottom:8px">
+      <span style="font-size:13px;color:#888780">Rentabilidad bruta · vista operativa</span>
+    </div>
     <div class="metrics" id="rent-metrics"><div class="loading">Cargando...</div></div>
     <div class="sec"><div class="st" id="rent-ct">Margen bruto en el tiempo</div>
       <div class="cw"><canvas id="cv-rent"></canvas></div>
@@ -453,7 +480,8 @@ tr:hover td{background:#f5f4f0}
     return [...el.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
   };
 
-  w.updateDropdownLabel = function (containerId, labelId, prefix, items) {
+  w.updateDropdownLabel = function (containerId, labelId, prefix, items, opts) {
+    opts = opts || {};
     const label = document.getElementById(labelId);
     const c = document.getElementById(containerId);
     if (!label || !c) return;
@@ -466,7 +494,7 @@ tr:hover td{background:#f5f4f0}
     const checked = w.getCheckedValues(c);
     const total = items.length || c.querySelectorAll('input[type=checkbox]').length;
     if (!checked.length) {
-      label.textContent = prefix + ': ninguno';
+      label.textContent = prefix + ': ' + (opts.emptyLabel || 'ninguno');
       return;
     }
     if (checked.length >= total) {
@@ -523,6 +551,53 @@ tr:hover td{background:#f5f4f0}
     if (labelId) w.updateDropdownLabel(cid, labelId, pre, items);
   };
 
+  w.filterSearchablePanel = function (containerId, query) {
+    const list = document.getElementById(containerId + '-list');
+    if (!list) return;
+    const q = (query || '').toLowerCase().trim();
+    list.querySelectorAll('.chk-item').forEach(el => {
+      const t = el.getAttribute('data-search') || (el.textContent || '').toLowerCase();
+      el.style.display = !q || t.includes(q) ? '' : 'none';
+    });
+  };
+
+  w.buildSearchableCheckboxPanel = function (container, items, opts) {
+    opts = opts || {};
+    if (!container) return;
+    if (!items || !items.length) {
+      container.innerHTML = '<div style="padding:12px;font-size:12px;color:#888780">Sin opciones disponibles</div>';
+      return;
+    }
+    const cid = container.id || 'panel';
+    const pre = opts.prefix || 'Items';
+    const safeId = cid.replace(/[^a-z0-9]/gi, '_');
+    const placeholder = opts.searchPlaceholder || 'Buscar…';
+    const onChg = () => {
+      if (opts.labelId) w.updateDropdownLabel(cid, opts.labelId, pre, items, { emptyLabel: opts.emptyLabel });
+      if (opts.onChange) opts.onChange();
+    };
+    const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    const rows = items.map(it => {
+      const id = cid + '-cb-' + String(it.v).replace(/[^a-z0-9]/gi, '_');
+      const chk = opts.allByDefault ? ' checked' : '';
+      const searchText = (it.n + ' ' + (it.search || it.v)).toLowerCase();
+      return `<label class="chk-item" data-search="${esc(searchText)}" for="${id}"><input type="checkbox" id="${id}" value="${esc(it.v)}"${chk}> ${esc(it.n)}</label>`;
+    }).join('');
+    const actions = opts.labelId ? `<div class="dd-actions">
+      <button type="button" onclick="event.stopPropagation(); selectAllInDropdown('${cid}','${opts.labelId}','${pre}',null,window._ddOnChange_${safeId})">Todos</button>
+      <button type="button" onclick="event.stopPropagation(); selectNoneInDropdown('${cid}','${opts.labelId}','${pre}',null,window._ddOnChange_${safeId})">Ninguno</button>
+    </div>` : '';
+    container.innerHTML =
+      `<input type="text" class="dd-search" placeholder="${esc(placeholder)}" onclick="event.stopPropagation()" oninput="filterSearchablePanel('${cid}', this.value)">` +
+      actions +
+      `<div class="dd-list" id="${cid}-list">${rows}</div>`;
+    window['_ddOnChange_' + safeId] = opts.onChange;
+    container.querySelectorAll('input[type=checkbox]').forEach(inp => {
+      inp.addEventListener('change', onChg);
+    });
+    if (opts.labelId) w.updateDropdownLabel(cid, opts.labelId, pre, items, { emptyLabel: opts.emptyLabel });
+  };
+
   w.initMesesPanel = function (year, containerId, labelId, onChange, selectedValues) {
     const c = document.getElementById(containerId);
     if (!c) return;
@@ -557,18 +632,121 @@ tr:hover td{background:#f5f4f0}
     w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'P. venta', onChange });
   };
 
-  w.syncSemanasFromData = function (labels, containerId, labelId, onChange) {
-    const c = document.getElementById(containerId);
-    if (!c || !labels) return;
-    const items = labels.map(l => ({ v: l, n: l.replace('-W', ' S') }));
-    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'Semanas', onChange });
+  w.isoWeekKeyFromDate = function (date) {
+    const d = new Date(date.getTime());
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));
+    const week1 = new Date(d.getFullYear(), 0, 4);
+    const weekNum = 1 + Math.round(
+      ((d - week1) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7
+    );
+    return `${d.getFullYear()}-W${String(weekNum).padStart(2, '0')}`;
   };
 
-  w.syncDiasFromData = function (labels, containerId, labelId, onChange) {
+  w.weekLabelsForYear = function (year, hastaIso) {
+    const y = parseInt(year, 10);
+    if (!y) return [];
+    const end = hastaIso ? new Date(hastaIso + 'T12:00:00') : new Date(y, 11, 31);
+    const start = new Date(y, 0, 1);
+    const seen = new Set();
+    const labels = [];
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const key = w.isoWeekKeyFromDate(d);
+      if (parseInt(key.slice(0, 4), 10) === y && !seen.has(key)) {
+        seen.add(key);
+        labels.push(key);
+      }
+    }
+    return labels.sort();
+  };
+
+  w.isoWeekMonday = function (isoYear, week) {
+    const simple = new Date(isoYear, 0, 1 + (week - 1) * 7);
+    const dow = simple.getDay();
+    const monday = new Date(simple);
+    if (dow <= 4) monday.setDate(simple.getDate() - simple.getDay() + 1);
+    else monday.setDate(simple.getDate() + 8 - simple.getDay());
+    return monday;
+  };
+
+  w.weekKeysToDateRange = function (weekKeys) {
+    if (!weekKeys || !weekKeys.length) return null;
+    let minD = null;
+    let maxD = null;
+    weekKeys.forEach(k => {
+      const m = /^(\d{4})-W(\d{2})$/.exec(String(k));
+      if (!m) return;
+      const mon = w.isoWeekMonday(parseInt(m[1], 10), parseInt(m[2], 10));
+      const sun = new Date(mon);
+      sun.setDate(sun.getDate() + 6);
+      if (!minD || mon < minD) minD = mon;
+      if (!maxD || sun > maxD) maxD = sun;
+    });
+    if (!minD || !maxD) return null;
+    const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return { desde: fmt(minD), hasta: fmt(maxD) };
+  };
+
+  w.syncSemanasFromData = function (labels, containerId, labelId, onChange, selectedValues) {
     const c = document.getElementById(containerId);
-    if (!c || !labels) return;
+    if (!c || !labels || !labels.length) return;
+    const items = labels.map(l => ({ v: l, n: l.replace('-W', ' S') }));
+    const sel = selectedValues;
+    const allDefault = sel == null;
+    w.buildCheckboxPanel(c, items, { allByDefault: allDefault, labelId, prefix: 'Semanas', onChange });
+    if (sel && sel.length) {
+      c.querySelectorAll('input[type=checkbox]').forEach(inp => {
+        inp.checked = sel.includes(inp.value);
+      });
+      if (labelId) w.updateDropdownLabel(containerId, labelId, 'Semanas', items);
+    }
+  };
+
+  w.initSemanasPanel = function (year, containerId, labelId, onChange, selectedValues, hastaIso) {
+    const labels = w.weekLabelsForYear(year, hastaIso);
+    w.syncSemanasFromData(labels, containerId, labelId, onChange, selectedValues);
+  };
+
+  w.syncDiasFromData = function (labels, containerId, labelId, onChange, selectedValues) {
+    const c = document.getElementById(containerId);
+    if (!c || !labels || !labels.length) return;
     const items = labels.map(l => ({ v: l, n: l.slice(8) + '/' + l.slice(5, 7) }));
-    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'Días', onChange });
+    const sel = selectedValues;
+    const allDefault = sel == null;
+    w.buildCheckboxPanel(c, items, { allByDefault: allDefault, labelId, prefix: 'Días', onChange });
+    if (sel && sel.length) {
+      c.querySelectorAll('input[type=checkbox]').forEach(inp => {
+        inp.checked = sel.includes(inp.value);
+      });
+      if (labelId) w.updateDropdownLabel(containerId, labelId, 'Días', items);
+    }
+  };
+
+  w.dayLabelsForMonth = function (year, monthStr, hastaIso) {
+    const y = parseInt(year, 10);
+    const m = parseInt(monthStr, 10);
+    if (!y || !m) return [];
+    const mm = String(m).padStart(2, '0');
+    let maxDay = parseInt(w.monthEnd(String(y), mm), 10);
+    if (hastaIso) {
+      const parts = String(hastaIso).slice(0, 10).split('-');
+      if (parts.length >= 3) {
+        const hy = parseInt(parts[0], 10);
+        const hm = parseInt(parts[1], 10);
+        const hd = parseInt(parts[2], 10);
+        if (hy === y && hm === m && hd > 0 && hd < maxDay) maxDay = hd;
+      }
+    }
+    const labels = [];
+    for (let d = 1; d <= maxDay; d++) {
+      labels.push(`${y}-${mm}-${String(d).padStart(2, '0')}`);
+    }
+    return labels;
+  };
+
+  w.initDiasPanel = function (year, monthStr, containerId, labelId, onChange, selectedValues, hastaIso) {
+    const labels = w.dayLabelsForMonth(year, monthStr, hastaIso);
+    w.syncDiasFromData(labels, containerId, labelId, onChange, selectedValues);
   };
 
   w.pvIncludesCheck = function (containerId, key) {
@@ -599,42 +777,58 @@ tr:hover td{background:#f5f4f0}
   w.drawPieChart = function (canvasId, chartRef, labels, values, colors, opts) {
     opts = opts || {};
     const fmt = opts.format || 'money';
+    const legendPosition = opts.legendPosition || 'right';
     const el = document.getElementById(canvasId);
     if (!el) return chartRef;
     if (chartRef && chartRef.destroy) chartRef.destroy();
     const pal = colors || ['#378ADD', '#1D9E75', '#BA7517', '#85B7EB', '#5DCAA5', '#888780', '#a32d2d', '#0c447c'];
+    const nums = (values || []).map(v => Number(v) || 0);
+    const total = nums.reduce((a, b) => a + b, 0) || 1;
+    const shortLbl = (s, max) => {
+      const n = max || (legendPosition === 'bottom' ? 32 : 20);
+      s = String(s || '');
+      return s.length > n ? s.slice(0, n - 1) + '…' : s;
+    };
+    const legendLine = (lbl, v) => {
+      const pct = ((Number(v) || 0) / total * 100).toFixed(1);
+      if (fmt === 'pct') return `${shortLbl(lbl)}: ${pct}%`;
+      return `${shortLbl(lbl)}: $${Number(v).toLocaleString('es-EC')} · ${pct}%`;
+    };
     return new Chart(el, {
       type: 'pie',
       data: {
         labels,
-        datasets: [{ data: values, backgroundColor: labels.map((_, i) => pal[i % pal.length]) }],
+        datasets: [{ data: nums, backgroundColor: labels.map((_, i) => pal[i % pal.length]) }],
       },
       options: {
-        responsive: true, maintainAspectRatio: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: { padding: 6 },
         plugins: {
           legend: {
-            position: 'right',
+            position: legendPosition,
             labels: {
               boxWidth: 12,
-              font: { size: 11 },
+              font: { size: 10 },
+              padding: 10,
               generateLabels: chart => {
                 const ds = chart.data.datasets[0];
-                return chart.data.labels.map((lbl, i) => {
-                  const v = ds.data[i];
-                  const txt = fmt === 'pct'
-                    ? `${lbl}: ${Number(v).toFixed(1)}%`
-                    : `${lbl}: $${Number(v).toLocaleString('es-EC')}`;
-                  return { text: txt, fillStyle: ds.backgroundColor[i], hidden: false, index: i };
-                });
+                return chart.data.labels.map((lbl, i) => ({
+                  text: legendLine(lbl, ds.data[i]),
+                  fillStyle: ds.backgroundColor[i],
+                  hidden: false,
+                  index: i,
+                }));
               },
             },
           },
           tooltip: {
             callbacks: {
               label: ctx => {
-                const v = ctx.parsed;
-                if (fmt === 'pct') return `${ctx.label}: ${Number(v).toFixed(1)}%`;
-                return `${ctx.label}: $${Number(v).toLocaleString('es-EC')}`;
+                const v = Number(ctx.parsed) || 0;
+                const pct = (v / total * 100).toFixed(1);
+                if (fmt === 'pct') return `${ctx.label}: ${v.toFixed(1)}%`;
+                return `${ctx.label}: $${v.toLocaleString('es-EC')} (${pct}%)`;
               },
             },
           },
@@ -650,16 +844,21 @@ tr:hover td{background:#f5f4f0}
     if (!el) return chartRef;
     if (chartRef && chartRef.destroy) chartRef.destroy();
     const datasets = [...barDatasets];
+    barDatasets.forEach((ds, i) => {
+      datasets[i] = { ...ds, type: ds.type || 'bar', order: ds.order != null ? ds.order : 2 };
+    });
     if (lineData) {
       datasets.push({
         type: 'line', label: lineLabel || 'Total', data: lineData,
-        borderColor: '#BA7517', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 3, tension: 0.3, order: 1,
+        borderColor: '#BA7517', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 3, tension: 0.3, order: 0,
       });
     }
+    const stacked = barDatasets.some(ds => ds.stack);
     const yTick = fmt === 'pct'
       ? v => Number(v).toFixed(0) + '%'
       : v => '$' + Number(v).toLocaleString();
     return new Chart(el, {
+      type: 'bar',
       data: { labels, datasets },
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -672,12 +871,58 @@ tr:hover td{background:#f5f4f0}
                 if (fmt === 'pct') return `${ctx.dataset.label}: ${Number(v).toFixed(1)}%`;
                 return `${ctx.dataset.label}: $${Number(v).toLocaleString('es-EC')}`;
               },
+              footer: items => {
+                if (!items.length || !barDatasets[0]?.stack) return '';
+                const barItems = items.filter(i => i.dataset.type === 'bar' && i.parsed.y != null);
+                if (barItems.length < 2) return '';
+                const sum = barItems.reduce((s, i) => s + Number(i.parsed.y || 0), 0);
+                return fmt === 'pct' ? `Total: ${sum.toFixed(1)}%` : `Total barra: $${sum.toLocaleString('es-EC')}`;
+              },
             },
           },
         },
         scales: {
-          x: { stacked: !!barDatasets[0]?.stack, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
-          y: { stacked: !!barDatasets[0]?.stack, ticks: { callback: yTick } },
+          x: { stacked, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+          y: { stacked, ticks: { callback: yTick } },
+        },
+      },
+    });
+  };
+
+  w.drawFiltroTrendChart = function (canvasId, chartRef, filtroTrend, opts) {
+    opts = opts || {};
+    const el = document.getElementById(canvasId);
+    if (!el) return chartRef;
+    if (chartRef && chartRef.destroy) chartRef.destroy();
+    if (!filtroTrend || !filtroTrend.series || !filtroTrend.series.length) return null;
+    const pal = ['#378ADD', '#1D9E75', '#BA7517', '#85B7EB', '#5DCAA5', '#a32d2d', '#0c447c', '#888780'];
+    const labels = filtroTrend.labels || [];
+    const datasets = filtroTrend.series.map((s, i) => ({
+      type: 'line',
+      label: s.nombre,
+      data: s.vta || [],
+      borderColor: pal[i % pal.length],
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      pointRadius: 3,
+      tension: 0.3,
+    }));
+    return new Chart(el, {
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              label: ctx => `${ctx.dataset.label}: $${Number(ctx.parsed.y || 0).toLocaleString('es-EC')}`,
+            },
+          },
+        },
+        scales: {
+          x: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+          y: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: { callback: v => '$' + Number(v).toLocaleString() } },
         },
       },
     });
@@ -722,12 +967,10 @@ tr:hover td{background:#f5f4f0}
     const isOp = aud === 'operativo';
     const frTabla = document.getElementById('fr-tabla');
     const fo = document.getElementById('filtros-operativo');
+    const fpc = document.getElementById('filtros-plato-cat');
     if (frTabla) frTabla.classList.toggle('hid', dash !== 'ventas' || !isOp);
     if (fo) fo.classList.toggle('hid', !isOp);
-    const lblPlato = document.getElementById('lbl-plato');
-    const sp = document.getElementById('sp');
-    if (lblPlato) lblPlato.classList.toggle('hid', dash === 'rentabilidad');
-    if (sp) sp.classList.toggle('hid', dash === 'rentabilidad');
+    if (fpc) fpc.classList.toggle('hid', !((dash === 'ventas') || (dash === 'rentabilidad' && isOp)));
     const pvSocios = document.getElementById('panel-socios');
     const pvOp = document.getElementById('panel-operativo');
     const rentSocios = document.getElementById('rent-panel-socios');
@@ -814,8 +1057,21 @@ tr:hover td{background:#f5f4f0}
   window.getComprasRange = function () {
     const y = document.getElementById('cmp-anio').value;
     const meses = getCheckedValues(document.getElementById('cmp-meses'));
-    return rangeFromMeses(meses.length ? meses : [`${y}-01`, `${y}-12`], y);
+    if (meses.length) return rangeFromMeses(meses, y);
+    const meta = window._meta || {};
+    const desde = `${y}-01-01`;
+    let hasta = `${y}-12-31`;
+    if (meta.movimientos_hasta && String(meta.movimientos_hasta).startsWith(y)) {
+      hasta = meta.movimientos_hasta;
+    }
+    return { desde, hasta };
   };
+
+  function formatCmpLabel(lbl, agrup) {
+    if (agrup !== 'mes' || !/^\d{4}-\d{2}$/.test(lbl)) return lbl;
+    const n = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    return n[parseInt(lbl.slice(5, 7), 10)] + ' ' + lbl.slice(2, 4);
+  }
 
   window.setCmpArea = function (area, btn) {
     window.cmpArea = area;
@@ -823,6 +1079,20 @@ tr:hover td{background:#f5f4f0}
     btn.classList.add('on');
     cargarCompras();
   };
+
+  function pieProveedoresTop(provs, max) {
+    const list = (provs || []).slice();
+    max = max || 8;
+    if (list.length <= max) return list;
+    const top = list.slice(0, max - 1);
+    const rest = list.slice(max - 1);
+    top.push({
+      nombre: 'Otros (' + rest.length + ' prov.)',
+      vta: rest.reduce((s, p) => s + (Number(p.vta) || 0), 0),
+      pct: rest.reduce((s, p) => s + (Number(p.pct) || 0), 0),
+    });
+    return top;
+  }
 
   window.cargarCompras = async function () {
     document.getElementById('compras-metrics').innerHTML = '<div class="loading">Cargando...</div>';
@@ -843,17 +1113,44 @@ tr:hover td{background:#f5f4f0}
       card('Proveedores', String(a.proveedores.length), `Acum. año $${d.acumulado_anio.vta.toLocaleString('es-EC')}`),
     ].join('');
 
-    const labels = a.labels || [];
-    const serie = a.serie || [];
-    chCompras = drawBarLineChart('cv-compras', chCompras, labels, [
-      { type: 'bar', label: 'Compras $', data: serie, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5 },
-    ], serie, 'Total');
+    const labels = (a.labels || []).map(l => formatCmpLabel(l, agrup));
+    const serie = (a.serie || []).map(v => Number(v) || 0);
+    let barra = (a.serie_barra || []).map(v => Number(v) || 0);
+    let cocina = (a.serie_cocina || []).map(v => Number(v) || 0);
+    const splitSum = barra.reduce((s, v) => s + v, 0) + cocina.reduce((s, v) => s + v, 0);
+    const serieSum = serie.reduce((s, v) => s + v, 0);
+    if (serieSum > 0 && splitSum === 0) {
+      const pa = a.por_area || {};
+      const t = (pa.BARRA || 0) + (pa.COCINA || 0);
+      const pB = t > 0 ? (pa.BARRA || 0) / t : 0.5;
+      const pC = t > 0 ? (pa.COCINA || 0) / t : 0.5;
+      barra = serie.map(v => Math.round(v * pB * 100) / 100);
+      cocina = serie.map(v => Math.round(v * pC * 100) / 100);
+    }
+    let barDatasets;
+    if (window.cmpArea === 'BARRA') {
+      barDatasets = [
+        { type: 'bar', label: 'Barra', data: serie, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5 },
+      ];
+    } else if (window.cmpArea === 'COCINA') {
+      barDatasets = [
+        { type: 'bar', label: 'Cocina', data: serie, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5 },
+      ];
+    } else {
+      barDatasets = [
+        { type: 'bar', label: 'Barra', data: barra, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'compras' },
+        { type: 'bar', label: 'Cocina', data: cocina, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'compras' },
+      ];
+    }
+    chCompras = drawBarLineChart('cv-compras', chCompras, labels, barDatasets, serie, 'Total');
 
-    const provs = a.top_proveedores || [];
+    const provs = pieProveedoresTop(a.top_proveedores || []);
     chComprasPie = drawPieChart(
       'cv-compras-pie', chComprasPie,
       provs.map(p => p.nombre),
       provs.map(p => p.vta),
+      null,
+      { legendPosition: 'bottom' },
     );
 
     let tb = '';
@@ -873,6 +1170,8 @@ tr:hover td{background:#f5f4f0}
     window._periodFilter = r._filterLabels || null;
     delete r._filterLabels;
     const q = new URLSearchParams({ token: window.TOKEN, ...r, agrup: r.agrup || 'mes' });
+    if (typeof appendPvToQuery === 'function') appendPvToQuery(q);
+    if (typeof appendPlatoCatToQuery === 'function') appendPlatoCatToQuery(q);
     const target = aud === 'socios' ? 'rent-socios-metrics' : 'rent-metrics';
     document.getElementById(target).innerHTML = '<div class="loading">Cargando...</div>';
     try {
@@ -890,6 +1189,19 @@ tr:hover td{background:#f5f4f0}
       err.classList.remove('hid');
       document.getElementById(target).innerHTML = '<div class="loading">No se pudo cargar rentabilidad</div>';
     }
+  };
+
+  window.sliceRentSeries = function (d, pf) {
+    let labels = d.labels || [];
+    const keys = ['margen', 'margen_pct', 'barra', 'cocina', 'otro', 'barra_pct', 'cocina_pct', 'otro_pct'];
+    const out = { labels };
+    keys.forEach(k => { out[k] = (d[k] || []).slice(); });
+    if (pf && pf.length) {
+      const idx = labels.map((l, i) => (pf.includes(l) ? i : -1)).filter(i => i >= 0);
+      out.labels = idx.map(i => labels[i]);
+      keys.forEach(k => { out[k] = idx.map(i => out[k][i]); });
+    }
+    return out;
   };
 
   window.renderRentabilidad = function () {
@@ -940,52 +1252,58 @@ tr:hover td{background:#f5f4f0}
         ? drawPieChart('cv-rent-pv', chRentPv, pvLabels, pieVals, Object.values(colors), { format: fmt === 'pct' ? 'pct' : 'money' })
         : (chRentPv && chRentPv.destroy ? (chRentPv.destroy(), null) : null);
 
-      let labels = d.labels || [];
-      let serie = fmt === 'pct' ? (d.margen_pct || []) : (d.margen || []);
-      const pf = window._periodFilter;
-      if (pf && pf.length) {
-        const idx = labels.map((l, i) => pf.includes(l) ? i : -1).filter(i => i >= 0);
-        labels = idx.map(i => labels[i]);
-        serie = idx.map(i => serie[i]);
+      const sliced = window.sliceRentSeries(d, window._periodFilter);
+      const labels = sliced.labels;
+      const datasets = [];
+      if (fmt === 'pct') {
+        if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: sliced.barra_pct, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'm' });
+        if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: sliced.cocina_pct, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'm' });
+        if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: sliced.otro_pct, backgroundColor: '#d3d1c7', borderColor: '#888780', borderWidth: 0.5, stack: 'm' });
+        chRentSocios = drawBarLineChart('cv-rent-socios', chRentSocios, labels, datasets, sliced.margen_pct, 'Margen', { format: 'pct' });
+      } else {
+        if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: sliced.barra, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'm' });
+        if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: sliced.cocina, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'm' });
+        if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: sliced.otro, backgroundColor: '#d3d1c7', borderColor: '#888780', borderWidth: 0.5, stack: 'm' });
+        chRentSocios = drawBarLineChart('cv-rent-socios', chRentSocios, labels, datasets, sliced.margen, 'Margen', { format: 'money' });
       }
-      const barLbl = fmt === 'pct' ? 'Margen %' : 'Margen $';
-      chRentSocios = drawBarLineChart('cv-rent-socios', chRentSocios, labels, [
-        { type: 'bar', label: barLbl, data: serie, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5 },
-      ], fmt === 'pct' ? null : serie, fmt === 'pct' ? null : 'Margen', { format: fmt === 'pct' ? 'pct' : 'money' });
       return;
     }
 
-    document.getElementById('rent-metrics').innerHTML = [
-      card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
-      card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
-      card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
-      card('Costo real', '$' + s.costo_real.toLocaleString('es-EC'), d.nota_costo || ''),
-    ].join('');
+    const filtroLbl = typeof filtroLabelSuffix === 'function' ? filtroLabelSuffix() : '';
+    const fmtOp = window.rentSocioFmt || 'valor';
+    const pctCostoOp = s.vta ? Math.round(s.costo_real / s.vta * 1000) / 10 : 0;
+    document.getElementById('rent-metrics').innerHTML = fmtOp === 'pct'
+      ? [
+        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
+        card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
+        card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
+        card('Costo MP / ventas', pctCostoOp + '%', '$' + s.costo_real.toLocaleString('es-EC')),
+      ].join('')
+      : [
+        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
+        card('Margen real', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
+        card('Margen teórico', '$' + s.margen_teorico.toLocaleString('es-EC'), s.margen_teorico_pct + '% del neto'),
+        card('Costo real', '$' + s.costo_real.toLocaleString('es-EC'), d.nota_costo || ''),
+      ].join('');
 
-    let labels = d.labels || [];
-    let barra = d.barra || [];
-    let cocina = d.cocina || [];
-    let otro = d.otro || [];
-    let margen = d.margen || [];
-    const pf = window._periodFilter;
-    if (pf && pf.length) {
-      const idx = labels.map((l, i) => pf.includes(l) ? i : -1).filter(i => i >= 0);
-      labels = idx.map(i => labels[i]);
-      barra = idx.map(i => barra[i]);
-      cocina = idx.map(i => cocina[i]);
-      otro = idx.map(i => otro[i]);
-      margen = idx.map(i => margen[i]);
-    }
-
+    const slicedOp = window.sliceRentSeries(d, window._periodFilter);
+    const labels = slicedOp.labels;
     const datasets = [];
-    if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: barra, backgroundColor: '#85B7EB', stack: 'm' });
-    if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: cocina, backgroundColor: '#5DCAA5', stack: 'm' });
-    if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: otro, backgroundColor: '#d3d1c7', stack: 'm' });
-    chRent = drawBarLineChart('cv-rent', chRent, labels, datasets, margen, 'Margen total');
+    if (fmtOp === 'pct') {
+      if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: slicedOp.barra_pct, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'm' });
+      if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: slicedOp.cocina_pct, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'm' });
+      if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: slicedOp.otro_pct, backgroundColor: '#d3d1c7', borderColor: '#888780', borderWidth: 0.5, stack: 'm' });
+      chRent = drawBarLineChart('cv-rent', chRent, labels, datasets, slicedOp.margen_pct, 'Margen total', { format: 'pct' });
+    } else {
+      if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: slicedOp.barra, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'm' });
+      if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: slicedOp.cocina, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'm' });
+      if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: slicedOp.otro, backgroundColor: '#d3d1c7', borderColor: '#888780', borderWidth: 0.5, stack: 'm' });
+      chRent = drawBarLineChart('cv-rent', chRent, labels, datasets, slicedOp.margen, 'Margen total', { format: 'money' });
+    }
 
     let tb = '';
     const ord = (document.getElementById('so') || {}).value || 'desc';
-    const platos = (d.platos || []).filter(p => pvInc(p.pv)).slice().sort((a, b) => {
+    const platos = (d.platos || []).slice().sort((a, b) => {
       const rev = ord !== 'asc';
       return rev ? (b.vta - a.vta) : (a.vta - b.vta);
     });
@@ -993,7 +1311,8 @@ tr:hover td{background:#f5f4f0}
       tb += `<tr><td>${esc(p.nombre)}<div style="font-size:11px;color:#888780">${esc(p.cat)} · ${p.pv}</div></td><td class="r">$${p.vta.toLocaleString('es-EC')}</td><td class="r">${p.margen_real_pct}%</td><td class="r">$${p.margen_real.toLocaleString('es-EC')}</td></tr>`;
     });
     document.getElementById('rent-tb').innerHTML = tb || '<tr><td colspan="4">Sin datos</td></tr>';
-    document.getElementById('rent-ct').textContent = 'Margen bruto · ' + (typeof getTitle === 'function' ? getTitle() : '');
+    const ctBase = 'Margen bruto · ' + (typeof getTitle === 'function' ? getTitle() : '') + filtroLbl;
+    document.getElementById('rent-ct').textContent = fmtOp === 'pct' ? ctBase + ' (%)' : ctBase + ' ($)';
   };
 
   window.cargarRentabilidad = window.cargarRentabilidadFull;
@@ -1111,6 +1430,9 @@ const BASE = window.location.origin;
 window.BASE = BASE;
 let ch = null;
 let chDow = null;
+let chSociosTrend = null;
+let _catalogoFiltros = null;
+let _filtroTrend = null;
 let mode = 'r';
 let ag = 'mes';
 let rng = 'mes';
@@ -1127,6 +1449,8 @@ const PV_KEYS = ['BARRA', 'COCINA', 'OTRO'];
 // Estado del dropdown de "Meses" para evitar que se resetee a "todos"
 // si por alguna razón se vuelve a llamar initMesesPanel().
 let _mesesSelected = null;
+let _semanasSelected = null;
+let _diasSelected = null;
 let _mesesDebounce = null;
 let _cargarSeq = 0;
 
@@ -1184,25 +1508,41 @@ async function loadMeta() {
     const res = await fetch(`${BASE}/api/dashboard/meta?token=${TOKEN}`);
     if (!res.ok) return;
     _meta = await res.json();
+    window._meta = _meta;
+    if (_meta.platos_catalogo || _meta.categorias_catalogo) {
+      _catalogoFiltros = {
+        platos_catalogo: _meta.platos_catalogo || [],
+        categorias_catalogo: _meta.categorias_catalogo || [],
+      };
+      initCatalogoFiltros();
+    }
     const el = document.getElementById('meta-banner');
     const v = _meta.ventas_hasta || '—';
     const m = _meta.movimientos_hasta || '—';
-    el.textContent = `Datos de ventas hasta ${v} · Movimientos inventario hasta ${m}`;
+    const md = _meta.movimientos_desde || '—';
+    el.textContent = `Datos de ventas hasta ${v} · Movimientos inventario ${md} → ${m}`;
     el.classList.remove('hid');
+    if (ag === 'semana') refreshSemanasPanel();
+    if (ag === 'dia') refreshDiasPanel();
+    if (window.currentDash === 'compras' && typeof cargarCompras === 'function') cargarCompras();
   } catch (_) {}
 }
 
 function renderSocios() {
   try {
-  const s = _socios;
+  const s = applySociosPvFilter(_socios);
   if (!s || !s.actual) return;
   const a = s.actual;
   const cmp = s.comparativo_anterior.metricas;
   const cya = s.comparativo_anio.metricas;
   const ytd = s.acumulado_anio;
   const displayRange = getSociosRange();
+  const desde = (s.periodo && s.periodo.desde) || displayRange.desde;
+  const hasta = (s.periodo && s.periodo.hasta) || displayRange.hasta;
+  const pvSel = getSelectedPuntosVenta();
+  const pvLbl = pvSel ? ' · ' + pvSel.map(k => ({BARRA:'Barra',COCINA:'Cocina',OTRO:'Otro'}[k] || k)).join(', ') : '';
   document.getElementById('socios-title').textContent =
-    `Resumen ${displayRange.desde} → ${displayRange.hasta}`;
+    `Resumen ${desde} → ${hasta}${pvLbl}`;
 
   document.getElementById('socios-metrics').innerHTML = [
     cardSocios('Ventas netas', '$' + a.vta.toLocaleString('es-EC', {minimumFractionDigits:2}), `vs ant. ${deltaHtml(cmp.vta.delta_pct)} · vs año ${deltaHtml(cya.vta.delta_pct)}`),
@@ -1214,11 +1554,14 @@ function renderSocios() {
   ].join('');
 
   const mix = a.mix_pv;
-  document.getElementById('socios-mix').innerHTML = ['BARRA','COCINA','OTRO'].map(k => {
+  const pvKeys = activePvKeys();
+  const mixVta = pvKeys.reduce((sum, k) => sum + (mix[k]?.vta || 0), 0);
+  document.getElementById('socios-mix').innerHTML = pvKeys.map(k => {
     const m = mix[k];
+    const pct = mixVta > 0 ? Math.round(m.vta / mixVta * 1000) / 10 : 0;
     const colors = {BARRA:'#378ADD',COCINA:'#1D9E75',OTRO:'#888780'};
     const labels = {BARRA:'Barra',COCINA:'Cocina',OTRO:'Otro'};
-    return `<div style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${labels[k]}</span><span>$${m.vta.toLocaleString('es-EC')} · ${m.pct}%</span></div><div class="bb" style="width:100%;height:8px;margin-top:4px"><div class="bf" style="width:${Math.min(m.pct,100)}%;background:${colors[k]};height:8px"></div></div></div>`;
+    return `<div style="margin-bottom:8px"><div style="display:flex;justify-content:space-between;font-size:12px"><span>${labels[k]}</span><span>$${m.vta.toLocaleString('es-EC')} · ${pct}%</span></div><div class="bb" style="width:100%;height:8px;margin-top:4px"><div class="bf" style="width:${Math.min(pct,100)}%;background:${colors[k]};height:8px"></div></div></div>`;
   }).join('');
 
   let catHtml = '';
@@ -1241,7 +1584,8 @@ function renderSocios() {
        Descuentos aplicados: <strong>$${a.descuentos.toLocaleString('es-EC')}</strong>
      </div>`;
 
-  drawDowChart(a.por_dia_semana || []);
+  drawDowChart(enrichDowRows(a.por_dia_semana || [], mix));
+  drawSociosTrendChart();
   } catch (e) {
     console.error('renderSocios', e);
     document.getElementById('error-msg').textContent = 'Error al renderizar Socios: ' + e.message;
@@ -1253,19 +1597,145 @@ function cardSocios(label, value, sub) {
   return `<div class="mc"><div class="ml">${label}</div><div class="mv">${value}</div><div class="ms">${sub}</div></div>`;
 }
 
-function drawDowChart(rows) {
-  const labels = rows.map(r => r.nombre);
-  const data = rows.map(r => r.vta);
-  if (chDow) chDow.destroy();
-  chDow = new Chart(document.getElementById('cv-dow'), {
-    type: 'bar',
-    data: { labels, datasets: [{ data, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5 }] },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => '$' + ctx.parsed.y.toLocaleString('es-EC') } } },
-      scales: { y: { ticks: { callback: v => '$' + v.toLocaleString() } } }
-    }
+function drawSociosTrendChart() {
+  const sec = document.getElementById('socios-trend-sec');
+  const ft = _filtroTrend;
+  const active = ft && ft.series && ft.series.length && hasPlatoCatFilter();
+  if (sec) sec.classList.toggle('hid', !active);
+  if (!active) {
+    if (chSociosTrend) { chSociosTrend.destroy(); chSociosTrend = null; }
+    return;
+  }
+  const names = ft.series.map(s => s.nombre).slice(0, 3).join(', ');
+  const extra = ft.series.length > 3 ? ` (+${ft.series.length - 3})` : '';
+  document.getElementById('socios-trend-title').textContent = 'Tendencia: ' + names + extra;
+  chSociosTrend = drawFiltroTrendChart('cv-socios-trend', chSociosTrend, ft);
+}
+
+function enrichDowRows(rows, mix) {
+  if (!rows || !rows.length) return [];
+  const hasBreakdown = rows.some(r =>
+    Number(r.barra || 0) + Number(r.cocina || 0) + Number(r.otro || 0) > 0
+  );
+  if (hasBreakdown) return rows;
+  const mB = Number(mix?.BARRA?.vta) || 0;
+  const mC = Number(mix?.COCINA?.vta) || 0;
+  const mO = Number(mix?.OTRO?.vta) || 0;
+  const tot = mB + mC + mO;
+  if (!tot) {
+    return rows.map(r => ({
+      ...r,
+      barra: 0,
+      cocina: 0,
+      otro: Number(r.vta) || 0,
+    }));
+  }
+  const pB = mB / tot;
+  const pC = mC / tot;
+  const pO = mO / tot;
+  return rows.map(r => {
+    const v = Number(r.vta) || 0;
+    return {
+      ...r,
+      barra: Math.round(v * pB * 100) / 100,
+      cocina: Math.round(v * pC * 100) / 100,
+      otro: Math.round(v * pO * 100) / 100,
+    };
   });
+}
+
+function drawDowChart(rows) {
+  const canvas = document.getElementById('cv-dow');
+  if (!canvas || !rows || !rows.length) {
+    if (chDow) { chDow.destroy(); chDow = null; }
+    return;
+  }
+  const labels = rows.map(r => r.nombre);
+  const num = v => Number(v) || 0;
+  const datasets = [];
+  const stackId = 'ventas';
+  if (pvIncludes('BARRA')) {
+    datasets.push({
+      label: 'Barra',
+      data: rows.map(r => num(r.barra)),
+      backgroundColor: '#85B7EB',
+      borderColor: '#378ADD',
+      borderWidth: 0.5,
+      stack: stackId,
+    });
+  }
+  if (pvIncludes('COCINA')) {
+    datasets.push({
+      label: 'Cocina',
+      data: rows.map(r => num(r.cocina)),
+      backgroundColor: '#5DCAA5',
+      borderColor: '#1D9E75',
+      borderWidth: 0.5,
+      stack: stackId,
+    });
+  }
+  if (pvIncludes('OTRO')) {
+    datasets.push({
+      label: 'Otro',
+      data: rows.map(r => num(r.otro)),
+      backgroundColor: '#d3d1c7',
+      borderColor: '#888780',
+      borderWidth: 0.5,
+      stack: stackId,
+    });
+  }
+  const totalVta = rows.reduce((s, r) => s + num(r.vta), 0);
+  const totalBk = rows.reduce((s, r) => s + num(r.barra) + num(r.cocina) + num(r.otro), 0);
+  const stacked = datasets.length > 0 && !(totalVta > 0 && totalBk === 0);
+  if (!datasets.length || (totalVta > 0 && totalBk === 0)) {
+    datasets.length = 0;
+    datasets.push({
+      label: 'Total',
+      data: rows.map(r => num(r.vta)),
+      backgroundColor: '#85B7EB',
+      borderColor: '#378ADD',
+      borderWidth: 0.5,
+    });
+  }
+  if (chDow) { chDow.destroy(); chDow = null; }
+  try {
+    chDow = new Chart(canvas, {
+      type: 'bar',
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            display: datasets.length > 1,
+            labels: { boxWidth: 12, font: { size: 11 } },
+          },
+          tooltip: {
+            callbacks: {
+              label: ctx => {
+                const y = ctx.parsed && ctx.parsed.y != null ? ctx.parsed.y : ctx.raw;
+                return `${ctx.dataset.label}: $${Number(y).toLocaleString('es-EC')}`;
+              },
+              footer: stacked ? (items => {
+                const sum = items.reduce((s, it) => s + Number(it.parsed.y || 0), 0);
+                return sum ? `Total: $${sum.toLocaleString('es-EC')}` : '';
+              }) : undefined,
+            },
+          },
+        },
+        scales: {
+          x: { stacked, ticks: { maxRotation: 0 } },
+          y: {
+            stacked,
+            beginAtZero: true,
+            ticks: { callback: v => '$' + Number(v).toLocaleString() },
+          },
+        },
+      },
+    });
+  } catch (e) {
+    console.error('drawDowChart', e);
+  }
 }
 
 function exportSociosCsv() {
@@ -1301,6 +1771,63 @@ function setMode(m, btn) {
   document.getElementById('pp').classList.toggle('hid', m !== 'p');
   cargar();
 }
+function semanasHastaIso() {
+  return (_meta && _meta.ventas_hasta) || null;
+}
+
+function captureSemanasSelection() {
+  const c = document.getElementById('chk-semanas');
+  if (!c) return;
+  const sel = getCheckedValues(c);
+  const total = c.querySelectorAll('input[type=checkbox]').length;
+  if (!total || sel.length >= total) _semanasSelected = null;
+  else if (sel.length) _semanasSelected = sel;
+}
+
+function refreshSemanasPanel() {
+  captureSemanasSelection();
+  const anio = document.getElementById('ra').value;
+  initSemanasPanel(anio, 'chk-semanas', 'dd-semanas-label', onSemanasCheckChange, _semanasSelected, semanasHastaIso());
+}
+
+function onSemanasCheckChange() {
+  captureSemanasSelection();
+  onPeriodCheckChange();
+}
+
+function diasHastaIso() {
+  return (_meta && _meta.ventas_hasta) || null;
+}
+
+function captureDiasSelection() {
+  const c = document.getElementById('chk-dias');
+  if (!c) return;
+  const sel = getCheckedValues(c);
+  const total = c.querySelectorAll('input[type=checkbox]').length;
+  if (!total || sel.length >= total) _diasSelected = null;
+  else if (sel.length) _diasSelected = sel;
+}
+
+function refreshDiasPanel() {
+  captureDiasSelection();
+  const anio = document.getElementById('ra').value;
+  const mes = document.getElementById('rm').value;
+  initDiasPanel(anio, mes, 'chk-dias', 'dd-dias-label', onDiasCheckChange, _diasSelected, diasHastaIso());
+}
+
+function onDiasCheckChange() {
+  captureDiasSelection();
+  onPeriodCheckChange();
+}
+
+function onRmChange() {
+  if (ag === 'dia') {
+    _diasSelected = null;
+    refreshDiasPanel();
+  }
+  cargar();
+}
+
 function setAg(a, btn) {
   const prevAg = ag;
   ag = a;
@@ -1312,6 +1839,8 @@ function setAg(a, btn) {
   h('rm', a === 'semana' || a === 'dia');
   h('dd-dias-wrap', a === 'dia');
   h('dd-dias-sem-wrap', a === 'dia');
+  if (a === 'semana') refreshSemanasPanel();
+  if (a === 'dia') refreshDiasPanel();
   // Evita reinicializar el dropdown de meses si se ejecuta de nuevo con el mismo modo.
   if (prevAg === a) return;
   if (a === 'mes' || a === 'anio') onYearChange();
@@ -1333,6 +1862,14 @@ function onYearChange() {
   const anio = document.getElementById('ra').value;
   initMesesPanel(anio, 'chk-meses', 'dd-meses-label', onMesSelectionChange, _mesesSelected);
   _mesesSelected = getCheckedValues(document.getElementById('chk-meses'));
+  if (ag === 'semana') {
+    _semanasSelected = null;
+    refreshSemanasPanel();
+  }
+  if (ag === 'dia') {
+    _diasSelected = null;
+    refreshDiasPanel();
+  }
 }
 
 function onMesSelectionChange() {
@@ -1348,12 +1885,20 @@ function onMesSelectionChange() {
 }
 
 function onPeriodCheckChange() {
+  if ((ag === 'semana' || ag === 'dia') && audience === 'socios') {
+    cargar();
+    return;
+  }
   if (_data || window._rentData) applyPeriodFilter();
   else cargar();
 }
 
 function onPvChange() {
-  if (window.currentDash === 'rentabilidad' && window._rentData) { window.renderRentabilidad(); return; }
+  if (window.currentDash === 'rentabilidad') {
+    if (typeof window.cargarRentabilidadFull === 'function') return window.cargarRentabilidadFull();
+    return;
+  }
+  if (audience === 'socios' && _socios) { renderSocios(); return; }
   if (_data) render();
   else cargar();
 }
@@ -1385,12 +1930,22 @@ function getSelectedPeriodRange() {
   }
   if (ag === 'semana') {
     const sems = getCheckedValues(document.getElementById('chk-semanas'));
+    const total = document.querySelectorAll('#chk-semanas input[type=checkbox]').length;
+    if (sems.length > 0 && total && sems.length < total) {
+      const wr = weekKeysToDateRange(sems);
+      if (wr) return { ...wr, agrup: 'semana', _filterLabels: sems };
+    }
     if (!sems.length && _data) return getRangesLegacy().desde ? getRangesLegacy() : { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'semana' };
     return { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'semana', _filterLabels: sems };
   }
   const dias = getCheckedValues(document.getElementById('chk-dias'));
   const mes = document.getElementById('rm').value;
   const finMes = monthEnd(anio, mes);
+  const totalDias = document.querySelectorAll('#chk-dias input[type=checkbox]').length;
+  if (dias.length > 0 && totalDias && dias.length < totalDias) {
+    const sorted = [...dias].sort();
+    return { desde: sorted[0], hasta: sorted[sorted.length - 1], agrup: 'dia', _filterLabels: dias };
+  }
   return { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'dia', _filterLabels: dias };
 }
 
@@ -1462,10 +2017,88 @@ function h(id, show) {
   if (e) e.classList.toggle('hid', !show);
 }
 
+function getSelectedPlatos() {
+  return getCheckedValues(document.getElementById('plato-panel'));
+}
+
+function getSelectedCategorias() {
+  return getCheckedValues(document.getElementById('cat-panel'));
+}
+
+function hasPlatoCatFilter() {
+  const selPlatos = getSelectedPlatos();
+  const selCats = getSelectedCategorias();
+  const platoPanel = document.getElementById('plato-panel');
+  const totalPlatos = platoPanel ? platoPanel.querySelectorAll('input[type=checkbox]').length : 0;
+  return selCats.length > 0 || (selPlatos.length > 0 && selPlatos.length < totalPlatos);
+}
+
+function appendPlatoCatToQuery(q) {
+  const selPlatos = getSelectedPlatos();
+  const selCats = getSelectedCategorias();
+  const platoPanel = document.getElementById('plato-panel');
+  const totalPlatos = platoPanel ? platoPanel.querySelectorAll('input[type=checkbox]').length : 0;
+  if (selCats.length) selCats.forEach(c => q.append('categoria', c));
+  if (selPlatos.length && selPlatos.length < totalPlatos) {
+    selPlatos.forEach(p => q.append('plato', p));
+  }
+}
+
+function filtroLabelSuffix() {
+  const selPlatos = getSelectedPlatos();
+  const selCats = getSelectedCategorias();
+  const parts = [];
+  if (selPlatos.length) {
+    parts.push(selPlatos.length <= 2 ? selPlatos.join(', ') : `${selPlatos.length} platos`);
+  }
+  if (selCats.length) {
+    parts.push(selCats.length <= 2 ? selCats.join(', ') : `${selCats.length} categorías`);
+  }
+  return parts.length ? ' — ' + parts.join(' · ') : '';
+}
+
+function initCatalogoFiltros() {
+  if (!_catalogoFiltros) return;
+  const cats = (_catalogoFiltros.categorias_catalogo || []).map(c => ({ v: c, n: c }));
+  buildSearchableCheckboxPanel(document.getElementById('cat-panel'), cats, {
+    allByDefault: false,
+    emptyLabel: 'todas',
+    labelId: 'dd-cat-label',
+    prefix: 'Categoría',
+    searchPlaceholder: 'Buscar categoría…',
+    onChange: () => { rebuildPlatoPanel(); cargar(); },
+  });
+  rebuildPlatoPanel();
+}
+
+function rebuildPlatoPanel() {
+  if (!_catalogoFiltros) return;
+  const panel = document.getElementById('plato-panel');
+  if (!panel) return;
+  const prev = new Set(getSelectedPlatos());
+  const selCats = getSelectedCategorias();
+  const items = (_catalogoFiltros.platos_catalogo || [])
+    .filter(p => !selCats.length || selCats.includes(p.cat))
+    .map(p => ({ v: p.id, n: `${p.nombre} · ${p.cat}` }));
+  buildSearchableCheckboxPanel(panel, items, {
+    allByDefault: false,
+    emptyLabel: 'todos',
+    labelId: 'dd-plato-label',
+    prefix: 'Plato',
+    searchPlaceholder: 'Buscar plato o bebida…',
+    onChange: () => cargar(),
+  });
+  if (prev.size) {
+    panel.querySelectorAll('input[type=checkbox]').forEach(inp => {
+      inp.checked = prev.has(inp.value);
+    });
+    updateDropdownLabel('plato-panel', 'dd-plato-label', 'Plato', items, { emptyLabel: 'todos' });
+  }
+}
+
 function getTitle() {
   const meses = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
-  const platoSel = document.getElementById('sp');
-  const platoTxt = platoSel.value ? ` — ${platoSel.options[platoSel.selectedIndex].text}` : '';
+  const platoTxt = filtroLabelSuffix();
   if (mode === 'p') {
     const dd = document.getElementById('pd-d').value;
     const dm = meses[parseInt(document.getElementById('pd-m').value)];
@@ -1483,13 +2116,126 @@ function getTitle() {
   return `Días de ${mes} ${anio}${platoTxt}`;
 }
 
+function getSelectedPuntosVenta() {
+  const sel = getCheckedValues(document.getElementById('pv-panel'));
+  if (!sel.length || sel.length >= 3) return null;
+  return sel;
+}
+
+function appendPvToQuery(q) {
+  const pv = getSelectedPuntosVenta();
+  if (!pv) return;
+  q.set('punto_venta', pv.join(','));
+}
+
+function activePvKeys() {
+  return ['BARRA', 'COCINA', 'OTRO'].filter(k => pvIncludes(k));
+}
+
+function isPvPartialFilter() {
+  const keys = activePvKeys();
+  return keys.length > 0 && keys.length < 3;
+}
+
+function dowVtaForPv(row, pvKeys, mix) {
+  const cols = { BARRA: 'barra', COCINA: 'cocina', OTRO: 'otro' };
+  const hasBk = Number(row.barra || 0) + Number(row.cocina || 0) + Number(row.otro || 0) > 0
+    || pvKeys.some(k => row[cols[k]] != null);
+  if (hasBk) {
+    return pvKeys.reduce((s, k) => s + (Number(row[cols[k]]) || 0), 0);
+  }
+  const dayTotal = Number(row.vta) || 0;
+  const selMix = pvKeys.reduce((s, k) => s + (Number(mix[k]?.vta) || 0), 0);
+  const allMix = (Number(mix.BARRA?.vta) || 0) + (Number(mix.COCINA?.vta) || 0) + (Number(mix.OTRO?.vta) || 0);
+  return allMix > 0 ? dayTotal * selMix / allMix : 0;
+}
+
+function scaleCmpMetrics(metrics, ratio) {
+  if (!metrics || ratio === 1) return metrics;
+  const out = {};
+  Object.entries(metrics).forEach(([key, m]) => {
+    const a = Number(m.actual) || 0;
+    const b = Number(m.base) || 0;
+    const na = Math.round(a * ratio * 100) / 100;
+    const nb = Math.round(b * ratio * 100) / 100;
+    out[key] = {
+      ...m,
+      actual: na,
+      base: nb,
+      delta: Math.round((na - nb) * 100) / 100,
+    };
+  });
+  return out;
+}
+
+/** Ajusta métricas Socios al filtro P. venta (mix_pv + comparativos proporcionales). */
+function applySociosPvFilter(socios) {
+  if (!isPvPartialFilter() || !socios?.actual) return socios;
+  const pvKeys = activePvKeys();
+  const a = socios.actual;
+  const mix = a.mix_pv || {};
+  let vta = 0;
+  let uds = 0;
+  pvKeys.forEach(k => {
+    vta += Number(mix[k]?.vta) || 0;
+    uds += Number(mix[k]?.uds) || 0;
+  });
+  const totalVta = Number(a.vta) || 0;
+  const ratio = totalVta > 0 ? vta / totalVta : 1;
+  const ticket = uds > 0 ? vta / uds : 0;
+
+  let finde = 0;
+  let semana = 0;
+  (a.por_dia_semana || []).forEach(r => {
+    const dv = dowVtaForPv(r, pvKeys, mix);
+    semana += dv;
+    if (Number(r.dia) >= 5 && Number(r.dia) <= 7) finde += dv;
+  });
+  const finde_pct = semana > 0 ? Math.round(finde / semana * 1000) / 10 : 0;
+
+  const ytd = socios.acumulado_anio || {};
+  const nytdVta = Math.round((Number(ytd.vta) || 0) * ratio);
+  const nytdUds = Math.round((Number(ytd.uds) || 0) * ratio);
+
+  return {
+    ...socios,
+    actual: {
+      ...a,
+      vta: Math.round(vta * 100) / 100,
+      uds: Math.round(uds),
+      ticket: Math.round(ticket * 100) / 100,
+      finde_pct,
+      descuentos: Math.round((Number(a.descuentos) || 0) * ratio),
+      top_categorias: (a.top_categorias || []).map(c => ({
+        ...c,
+        vta: Math.round((Number(c.vta) || 0) * ratio * 100) / 100,
+      })),
+      top_platos: (a.top_platos || []).filter(p => pvIncludes(p.pv)),
+    },
+    comparativo_anterior: {
+      ...socios.comparativo_anterior,
+      metricas: scaleCmpMetrics(socios.comparativo_anterior?.metricas, ratio),
+    },
+    comparativo_anio: {
+      ...socios.comparativo_anio,
+      metricas: scaleCmpMetrics(socios.comparativo_anio?.metricas, ratio),
+    },
+    acumulado_anio: {
+      ...ytd,
+      vta: nytdVta,
+      uds: nytdUds,
+      ticket: nytdUds > 0 ? Math.round(nytdVta / nytdUds * 100) / 100 : 0,
+    },
+  };
+}
+
 function buildUrl() {
   const p = getRanges();
   delete p._filterLabels;
-  const plato = document.getElementById('sp').value;
   const orden = document.getElementById('so').value;
   const q = new URLSearchParams({ token: TOKEN, orden, ...p });
-  if (plato) q.set('plato', plato);
+  appendPlatoCatToQuery(q);
+  appendPvToQuery(q);
   return `${BASE}/api/dashboard/ventas?${q}`;
 }
 
@@ -1503,7 +2249,15 @@ async function cargar() {
     document.getElementById('socios-metrics').innerHTML = '<div class="loading">Cargando...</div>';
     try {
       const r = getSociosRange();
-      const q = new URLSearchParams({ token: TOKEN, ...r, incluir_socios: '1', agrup: 'mes', orden: 'desc' });
+      const q = new URLSearchParams({
+        token: TOKEN,
+        ...r,
+        incluir_socios: '1',
+        agrup: ag === 'semana' ? 'semana' : (ag === 'dia' ? 'dia' : (ag === 'anio' ? 'anio' : 'mes')),
+        orden: 'desc',
+      });
+      appendPvToQuery(q);
+      appendPlatoCatToQuery(q);
       let res = await fetch(`${BASE}/api/dashboard/ventas?${q}`);
       if (!res.ok) {
         q.delete('incluir_socios');
@@ -1518,7 +2272,10 @@ async function cargar() {
       const data = await res.json();
       if (mySeq !== _cargarSeq) return;
       _socios = data.socios || data;
+      _filtroTrend = data.filtro_trend || null;
       if (!_socios || !_socios.actual) throw new Error('Sin datos socios — despliegue pendiente en servidor');
+      if (ag === 'semana') refreshSemanasPanel();
+      if (ag === 'dia') refreshDiasPanel();
       document.getElementById('last-update').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
       renderSocios();
     } catch (e) {
@@ -1543,10 +2300,10 @@ async function cargar() {
     }
     _data = await res.json();
     if (mySeq !== _cargarSeq) return;
+    _filtroTrend = _data.filtro_trend || null;
     window._periodFilter = getRanges()._filterLabels || null;
-    if (ag === 'semana' && _data.labels) syncSemanasFromData(_data.labels, 'chk-semanas', 'dd-semanas-label', onPeriodCheckChange);
-    if (ag === 'dia' && _data.labels) syncDiasFromData(_data.labels, 'chk-dias', 'dd-dias-label', onPeriodCheckChange);
-    fillPlatoOptions(_data.platos || []);
+    if (ag === 'semana') refreshSemanasPanel();
+    if (ag === 'dia') refreshDiasPanel();
     document.getElementById('last-update').textContent = 'Actualizado ' + new Date().toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit' });
     render();
   } catch (e) {
@@ -1557,18 +2314,6 @@ async function cargar() {
   }
 }
 
-function fillPlatoOptions(platos) {
-  const sel = document.getElementById('sp');
-  const current = sel.value;
-  sel.innerHTML = '<option value="">Todos</option>';
-  platos.slice(0, 400).forEach(p => {
-    const o = document.createElement('option');
-    o.value = p.id || `${p.cod_smart_menu}|${p.variedad_smart_menu}`;
-    o.textContent = p.nombre_display || p.nombre;
-    sel.appendChild(o);
-  });
-  if ([...sel.options].some(o => o.value === current)) sel.value = current;
-}
 
 function render() {
   if (!_data) return;
@@ -1632,41 +2377,32 @@ function drawChart() {
   const idx = chartIndices(d.labels);
   const labels = idx.map(i => d.labels[i]);
   const pick = arr => idx.map(i => (arr || [])[i] ?? 0);
-  const plato = document.getElementById('sp').value;
   const legend = document.getElementById('chart-legend');
   const showBarra = pvIncludes('BARRA');
   const showCocina = pvIncludes('COCINA');
   const showOtro = pvIncludes('OTRO');
+
+  if (d.filtro_trend && d.filtro_trend.series && d.filtro_trend.series.length && hasPlatoCatFilter()) {
+    const ft = {
+      labels: idx.map(i => d.filtro_trend.labels[i]),
+      series: d.filtro_trend.series.map(s => ({
+        ...s,
+        vta: idx.map(i => (s.vta || [])[i] ?? 0),
+      })),
+    };
+    legend.innerHTML = ft.series.map((s, i) => {
+      const pal = ['#378ADD', '#1D9E75', '#BA7517', '#85B7EB', '#5DCAA5'];
+      return `<span><span class="ls" style="background:${pal[i % pal.length]};height:3px;width:14px;border-radius:2px"></span>${s.nombre}</span>`;
+    }).join('');
+    ch = drawFiltroTrendChart('cv', ch, ft);
+    return;
+  }
+
   const legendParts = [];
   if (showBarra) legendParts.push(`<span><span class="ls" style="background:#85B7EB"></span>Barra</span>`);
   if (showCocina) legendParts.push(`<span><span class="ls" style="background:#5DCAA5"></span>Cocina</span>`);
   if (showOtro) legendParts.push(`<span><span class="ls" style="background:#d3d1c7"></span>Otro</span>`);
   legendParts.push(`<span><span class="ls" style="background:#BA7517;height:3px;width:14px;border-radius:2px"></span>Total</span>`);
-
-  if (plato && d.plato_trend && d.plato_trend.labels.length) {
-    legend.innerHTML = `<span><span class="ls" style="background:#85B7EB"></span>Ventas $</span><span><span class="ls" style="background:#BA7517;height:3px;width:14px;border-radius:2px"></span>Unidades</span>`;
-    if (ch) ch.destroy();
-    ch = new Chart(document.getElementById('cv'), {
-      data: {
-        labels: d.plato_trend.labels,
-        datasets: [
-          { type:'bar', label:'Ventas $', data:d.plato_trend.vta, backgroundColor:'#85B7EB', borderColor:'#378ADD', borderWidth:0.5, yAxisID:'y' },
-          { type:'line', label:'Unidades', data:d.plato_trend.uds, borderColor:'#BA7517', backgroundColor:'transparent', borderWidth:2, pointRadius:3, tension:0.3, yAxisID:'y1' }
-        ]
-      },
-      options: {
-        responsive:true, maintainAspectRatio:false,
-        plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: ctx => ctx.dataset.label + ': ' + (ctx.datasetIndex===0 ? '$'+ctx.parsed.y.toLocaleString('es-EC') : ctx.parsed.y) } } },
-        scales:{
-          x:{ grid:{color:'rgba(128,128,128,0.08)'}, ticks:{color:'#888780',font:{size:11},maxRotation:45,autoSkip:true,maxTicksLimit:12} },
-          y:{ position:'left', grid:{color:'rgba(128,128,128,0.08)'}, ticks:{color:'#888780', callback:v=>'$'+v.toLocaleString()} },
-          y1:{ position:'right', grid:{drawOnChartArea:false}, ticks:{color:'#BA7517'} }
-        }
-      }
-    });
-    return;
-  }
-
   legend.innerHTML = legendParts.join('');
   const barraD = showBarra ? pick(d.barra) : labels.map(() => 0);
   const cocinaD = showCocina ? pick(d.cocina) : labels.map(() => 0);
@@ -1826,13 +2562,15 @@ function bootDashboard() {
     document.getElementById('error-msg').classList.remove('hid');
     return;
   }
-  loadMeta();
-  initPvPanel('pv-panel', 'dd-pv-label', onPvChange);
-  onYearChange();
-  initDiasSemPanel('chk-dias-sem', 'dd-dias-sem-label', onPeriodCheckChange);
-  if (typeof initComprasMeses === 'function') initComprasMeses();
-  if (typeof window.syncSharedFilters === 'function') window.syncSharedFilters();
-  cargar();
+  (async () => {
+    await loadMeta();
+    initPvPanel('pv-panel', 'dd-pv-label', onPvChange);
+    onYearChange();
+    initDiasSemPanel('chk-dias-sem', 'dd-dias-sem-label', onPeriodCheckChange);
+    if (typeof initComprasMeses === 'function') initComprasMeses();
+    if (typeof window.syncSharedFilters === 'function') window.syncSharedFilters();
+    cargar();
+  })();
 }
 bootDashboard();
 </script>

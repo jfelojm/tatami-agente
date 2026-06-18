@@ -19,7 +19,9 @@ def _metricas_periodo(rows: list[dict], catalogo: dict, resolver, neto_fn, dia_s
     }
     categorias: dict[str, float] = defaultdict(float)
     platos: dict[str, dict] = {}
-    por_dia: dict[int, float] = defaultdict(float)
+    por_dia: dict[int, dict[str, float]] = {
+        i: {"BARRA": 0.0, "COCINA": 0.0, "OTRO": 0.0} for i in range(1, 8)
+    }
     lineas = 0
     lineas_otro = 0
     descuentos = 0.0
@@ -50,7 +52,7 @@ def _metricas_periodo(rows: list[dict], catalogo: dict, resolver, neto_fn, dia_s
         desglose_pv[pv]["vta"] += total
         desglose_pv[pv]["uds"] += uds
         categorias[meta["cat"]] += total
-        por_dia[dia_semana_fn(fecha)] += total
+        por_dia[dia_semana_fn(fecha)][pv] += total
 
         pk = f"{meta['cod_smart_menu']}|{meta['variedad_smart_menu']}|{meta['nombre']}"
         if pk not in platos:
@@ -90,11 +92,18 @@ def _metricas_periodo(rows: list[dict], catalogo: dict, resolver, neto_fn, dia_s
 
     dias_nombres = ["", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
     por_dia_out = [
-        {"dia": i, "nombre": dias_nombres[i], "vta": round(por_dia.get(i, 0), 2)}
+        {
+            "dia": i,
+            "nombre": dias_nombres[i],
+            "vta": round(sum(por_dia[i].values()), 2),
+            "barra": round(por_dia[i]["BARRA"], 2),
+            "cocina": round(por_dia[i]["COCINA"], 2),
+            "otro": round(por_dia[i]["OTRO"], 2),
+        }
         for i in range(1, 8)
     ]
-    finde = sum(por_dia.get(d, 0) for d in (5, 6, 7))
-    semana = sum(por_dia.values())
+    finde = sum(sum(por_dia[d].values()) for d in (5, 6, 7))
+    semana = sum(sum(por_dia[d].values()) for d in range(1, 8))
     mix_pv = {
         pv: {
             "vta": round(desglose_pv[pv]["vta"], 2),

@@ -42,7 +42,8 @@
     return [...el.querySelectorAll('input[type=checkbox]:checked')].map(i => i.value);
   };
 
-  w.updateDropdownLabel = function (containerId, labelId, prefix, items) {
+  w.updateDropdownLabel = function (containerId, labelId, prefix, items, opts) {
+    opts = opts || {};
     const label = document.getElementById(labelId);
     const c = document.getElementById(containerId);
     if (!label || !c) return;
@@ -55,7 +56,7 @@
     const checked = w.getCheckedValues(c);
     const total = items.length || c.querySelectorAll('input[type=checkbox]').length;
     if (!checked.length) {
-      label.textContent = prefix + ': ninguno';
+      label.textContent = prefix + ': ' + (opts.emptyLabel || 'ninguno');
       return;
     }
     if (checked.length >= total) {
@@ -112,6 +113,53 @@
     if (labelId) w.updateDropdownLabel(cid, labelId, pre, items);
   };
 
+  w.filterSearchablePanel = function (containerId, query) {
+    const list = document.getElementById(containerId + '-list');
+    if (!list) return;
+    const q = (query || '').toLowerCase().trim();
+    list.querySelectorAll('.chk-item').forEach(el => {
+      const t = el.getAttribute('data-search') || (el.textContent || '').toLowerCase();
+      el.style.display = !q || t.includes(q) ? '' : 'none';
+    });
+  };
+
+  w.buildSearchableCheckboxPanel = function (container, items, opts) {
+    opts = opts || {};
+    if (!container) return;
+    if (!items || !items.length) {
+      container.innerHTML = '<div style="padding:12px;font-size:12px;color:#888780">Sin opciones disponibles</div>';
+      return;
+    }
+    const cid = container.id || 'panel';
+    const pre = opts.prefix || 'Items';
+    const safeId = cid.replace(/[^a-z0-9]/gi, '_');
+    const placeholder = opts.searchPlaceholder || 'Buscar…';
+    const onChg = () => {
+      if (opts.labelId) w.updateDropdownLabel(cid, opts.labelId, pre, items, { emptyLabel: opts.emptyLabel });
+      if (opts.onChange) opts.onChange();
+    };
+    const esc = s => String(s || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    const rows = items.map(it => {
+      const id = cid + '-cb-' + String(it.v).replace(/[^a-z0-9]/gi, '_');
+      const chk = opts.allByDefault ? ' checked' : '';
+      const searchText = (it.n + ' ' + (it.search || it.v)).toLowerCase();
+      return `<label class="chk-item" data-search="${esc(searchText)}" for="${id}"><input type="checkbox" id="${id}" value="${esc(it.v)}"${chk}> ${esc(it.n)}</label>`;
+    }).join('');
+    const actions = opts.labelId ? `<div class="dd-actions">
+      <button type="button" onclick="event.stopPropagation(); selectAllInDropdown('${cid}','${opts.labelId}','${pre}',null,window._ddOnChange_${safeId})">Todos</button>
+      <button type="button" onclick="event.stopPropagation(); selectNoneInDropdown('${cid}','${opts.labelId}','${pre}',null,window._ddOnChange_${safeId})">Ninguno</button>
+    </div>` : '';
+    container.innerHTML =
+      `<input type="text" class="dd-search" placeholder="${esc(placeholder)}" onclick="event.stopPropagation()" oninput="filterSearchablePanel('${cid}', this.value)">` +
+      actions +
+      `<div class="dd-list" id="${cid}-list">${rows}</div>`;
+    window['_ddOnChange_' + safeId] = opts.onChange;
+    container.querySelectorAll('input[type=checkbox]').forEach(inp => {
+      inp.addEventListener('change', onChg);
+    });
+    if (opts.labelId) w.updateDropdownLabel(cid, opts.labelId, pre, items, { emptyLabel: opts.emptyLabel });
+  };
+
   w.initMesesPanel = function (year, containerId, labelId, onChange, selectedValues) {
     const c = document.getElementById(containerId);
     if (!c) return;
@@ -146,18 +194,121 @@
     w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'P. venta', onChange });
   };
 
-  w.syncSemanasFromData = function (labels, containerId, labelId, onChange) {
-    const c = document.getElementById(containerId);
-    if (!c || !labels) return;
-    const items = labels.map(l => ({ v: l, n: l.replace('-W', ' S') }));
-    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'Semanas', onChange });
+  w.isoWeekKeyFromDate = function (date) {
+    const d = new Date(date.getTime());
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));
+    const week1 = new Date(d.getFullYear(), 0, 4);
+    const weekNum = 1 + Math.round(
+      ((d - week1) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7
+    );
+    return `${d.getFullYear()}-W${String(weekNum).padStart(2, '0')}`;
   };
 
-  w.syncDiasFromData = function (labels, containerId, labelId, onChange) {
+  w.weekLabelsForYear = function (year, hastaIso) {
+    const y = parseInt(year, 10);
+    if (!y) return [];
+    const end = hastaIso ? new Date(hastaIso + 'T12:00:00') : new Date(y, 11, 31);
+    const start = new Date(y, 0, 1);
+    const seen = new Set();
+    const labels = [];
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const key = w.isoWeekKeyFromDate(d);
+      if (parseInt(key.slice(0, 4), 10) === y && !seen.has(key)) {
+        seen.add(key);
+        labels.push(key);
+      }
+    }
+    return labels.sort();
+  };
+
+  w.isoWeekMonday = function (isoYear, week) {
+    const simple = new Date(isoYear, 0, 1 + (week - 1) * 7);
+    const dow = simple.getDay();
+    const monday = new Date(simple);
+    if (dow <= 4) monday.setDate(simple.getDate() - simple.getDay() + 1);
+    else monday.setDate(simple.getDate() + 8 - simple.getDay());
+    return monday;
+  };
+
+  w.weekKeysToDateRange = function (weekKeys) {
+    if (!weekKeys || !weekKeys.length) return null;
+    let minD = null;
+    let maxD = null;
+    weekKeys.forEach(k => {
+      const m = /^(\d{4})-W(\d{2})$/.exec(String(k));
+      if (!m) return;
+      const mon = w.isoWeekMonday(parseInt(m[1], 10), parseInt(m[2], 10));
+      const sun = new Date(mon);
+      sun.setDate(sun.getDate() + 6);
+      if (!minD || mon < minD) minD = mon;
+      if (!maxD || sun > maxD) maxD = sun;
+    });
+    if (!minD || !maxD) return null;
+    const fmt = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return { desde: fmt(minD), hasta: fmt(maxD) };
+  };
+
+  w.syncSemanasFromData = function (labels, containerId, labelId, onChange, selectedValues) {
     const c = document.getElementById(containerId);
-    if (!c || !labels) return;
+    if (!c || !labels || !labels.length) return;
+    const items = labels.map(l => ({ v: l, n: l.replace('-W', ' S') }));
+    const sel = selectedValues;
+    const allDefault = sel == null;
+    w.buildCheckboxPanel(c, items, { allByDefault: allDefault, labelId, prefix: 'Semanas', onChange });
+    if (sel && sel.length) {
+      c.querySelectorAll('input[type=checkbox]').forEach(inp => {
+        inp.checked = sel.includes(inp.value);
+      });
+      if (labelId) w.updateDropdownLabel(containerId, labelId, 'Semanas', items);
+    }
+  };
+
+  w.initSemanasPanel = function (year, containerId, labelId, onChange, selectedValues, hastaIso) {
+    const labels = w.weekLabelsForYear(year, hastaIso);
+    w.syncSemanasFromData(labels, containerId, labelId, onChange, selectedValues);
+  };
+
+  w.syncDiasFromData = function (labels, containerId, labelId, onChange, selectedValues) {
+    const c = document.getElementById(containerId);
+    if (!c || !labels || !labels.length) return;
     const items = labels.map(l => ({ v: l, n: l.slice(8) + '/' + l.slice(5, 7) }));
-    w.buildCheckboxPanel(c, items, { allByDefault: true, labelId, prefix: 'Días', onChange });
+    const sel = selectedValues;
+    const allDefault = sel == null;
+    w.buildCheckboxPanel(c, items, { allByDefault: allDefault, labelId, prefix: 'Días', onChange });
+    if (sel && sel.length) {
+      c.querySelectorAll('input[type=checkbox]').forEach(inp => {
+        inp.checked = sel.includes(inp.value);
+      });
+      if (labelId) w.updateDropdownLabel(containerId, labelId, 'Días', items);
+    }
+  };
+
+  w.dayLabelsForMonth = function (year, monthStr, hastaIso) {
+    const y = parseInt(year, 10);
+    const m = parseInt(monthStr, 10);
+    if (!y || !m) return [];
+    const mm = String(m).padStart(2, '0');
+    let maxDay = parseInt(w.monthEnd(String(y), mm), 10);
+    if (hastaIso) {
+      const parts = String(hastaIso).slice(0, 10).split('-');
+      if (parts.length >= 3) {
+        const hy = parseInt(parts[0], 10);
+        const hm = parseInt(parts[1], 10);
+        const hd = parseInt(parts[2], 10);
+        if (hy === y && hm === m && hd > 0 && hd < maxDay) maxDay = hd;
+      }
+    }
+    const labels = [];
+    for (let d = 1; d <= maxDay; d++) {
+      labels.push(`${y}-${mm}-${String(d).padStart(2, '0')}`);
+    }
+    return labels;
+  };
+
+  w.initDiasPanel = function (year, monthStr, containerId, labelId, onChange, selectedValues, hastaIso) {
+    const labels = w.dayLabelsForMonth(year, monthStr, hastaIso);
+    w.syncDiasFromData(labels, containerId, labelId, onChange, selectedValues);
   };
 
   w.pvIncludesCheck = function (containerId, key) {
@@ -188,48 +339,58 @@
   w.drawPieChart = function (canvasId, chartRef, labels, values, colors, opts) {
     opts = opts || {};
     const fmt = opts.format || 'money';
+    const legendPosition = opts.legendPosition || 'right';
     const el = document.getElementById(canvasId);
     if (!el) return chartRef;
     if (chartRef && chartRef.destroy) chartRef.destroy();
     const pal = colors || ['#378ADD', '#1D9E75', '#BA7517', '#85B7EB', '#5DCAA5', '#888780', '#a32d2d', '#0c447c'];
+    const nums = (values || []).map(v => Number(v) || 0);
+    const total = nums.reduce((a, b) => a + b, 0) || 1;
+    const shortLbl = (s, max) => {
+      const n = max || (legendPosition === 'bottom' ? 32 : 20);
+      s = String(s || '');
+      return s.length > n ? s.slice(0, n - 1) + '…' : s;
+    };
+    const legendLine = (lbl, v) => {
+      const pct = ((Number(v) || 0) / total * 100).toFixed(1);
+      if (fmt === 'pct') return `${shortLbl(lbl)}: ${pct}%`;
+      return `${shortLbl(lbl)}: $${Number(v).toLocaleString('es-EC')} · ${pct}%`;
+    };
     return new Chart(el, {
       type: 'pie',
       data: {
         labels,
-        datasets: [{ data: values, backgroundColor: labels.map((_, i) => pal[i % pal.length]) }],
+        datasets: [{ data: nums, backgroundColor: labels.map((_, i) => pal[i % pal.length]) }],
       },
       options: {
-        responsive: true, maintainAspectRatio: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: { padding: 6 },
         plugins: {
           legend: {
-            position: 'right',
+            position: legendPosition,
             labels: {
               boxWidth: 12,
-              font: { size: 11 },
+              font: { size: 10 },
+              padding: 10,
               generateLabels: chart => {
                 const ds = chart.data.datasets[0];
-                const total = ds.data.reduce((a, b) => a + b, 0) || 1;
-                return chart.data.labels.map((lbl, i) => {
-                  const v = ds.data[i];
-                  const txt = fmt === 'pct'
-                    ? `${lbl}: ${Number(v).toFixed(1)}%`
-                    : `${lbl}: $${Number(v).toLocaleString('es-EC')}`;
-                  return {
-                    text: txt,
-                    fillStyle: ds.backgroundColor[i],
-                    hidden: false,
-                    index: i,
-                  };
-                });
+                return chart.data.labels.map((lbl, i) => ({
+                  text: legendLine(lbl, ds.data[i]),
+                  fillStyle: ds.backgroundColor[i],
+                  hidden: false,
+                  index: i,
+                }));
               },
             },
           },
           tooltip: {
             callbacks: {
               label: ctx => {
-                const v = ctx.parsed;
-                if (fmt === 'pct') return `${ctx.label}: ${Number(v).toFixed(1)}%`;
-                return `${ctx.label}: $${Number(v).toLocaleString('es-EC')}`;
+                const v = Number(ctx.parsed) || 0;
+                const pct = (v / total * 100).toFixed(1);
+                if (fmt === 'pct') return `${ctx.label}: ${v.toFixed(1)}%`;
+                return `${ctx.label}: $${v.toLocaleString('es-EC')} (${pct}%)`;
               },
             },
           },
@@ -245,16 +406,21 @@
     if (!el) return chartRef;
     if (chartRef && chartRef.destroy) chartRef.destroy();
     const datasets = [...barDatasets];
+    barDatasets.forEach((ds, i) => {
+      datasets[i] = { ...ds, type: ds.type || 'bar', order: ds.order != null ? ds.order : 2 };
+    });
     if (lineData) {
       datasets.push({
         type: 'line', label: lineLabel || 'Total', data: lineData,
-        borderColor: '#BA7517', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 3, tension: 0.3, order: 1,
+        borderColor: '#BA7517', backgroundColor: 'transparent', borderWidth: 2, pointRadius: 3, tension: 0.3, order: 0,
       });
     }
+    const stacked = barDatasets.some(ds => ds.stack);
     const yTick = fmt === 'pct'
       ? v => Number(v).toFixed(0) + '%'
       : v => '$' + Number(v).toLocaleString();
     return new Chart(el, {
+      type: 'bar',
       data: { labels, datasets },
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -267,12 +433,58 @@
                 if (fmt === 'pct') return `${ctx.dataset.label}: ${Number(v).toFixed(1)}%`;
                 return `${ctx.dataset.label}: $${Number(v).toLocaleString('es-EC')}`;
               },
+              footer: items => {
+                if (!items.length || !barDatasets[0]?.stack) return '';
+                const barItems = items.filter(i => i.dataset.type === 'bar' && i.parsed.y != null);
+                if (barItems.length < 2) return '';
+                const sum = barItems.reduce((s, i) => s + Number(i.parsed.y || 0), 0);
+                return fmt === 'pct' ? '' : `Total barra: $${sum.toLocaleString('es-EC')}`;
+              },
             },
           },
         },
         scales: {
-          x: { stacked: !!barDatasets[0]?.stack, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
-          y: { stacked: !!barDatasets[0]?.stack, ticks: { callback: yTick } },
+          x: { stacked, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+          y: { stacked, ticks: { callback: yTick } },
+        },
+      },
+    });
+  };
+
+  w.drawFiltroTrendChart = function (canvasId, chartRef, filtroTrend, opts) {
+    opts = opts || {};
+    const el = document.getElementById(canvasId);
+    if (!el) return chartRef;
+    if (chartRef && chartRef.destroy) chartRef.destroy();
+    if (!filtroTrend || !filtroTrend.series || !filtroTrend.series.length) return null;
+    const pal = ['#378ADD', '#1D9E75', '#BA7517', '#85B7EB', '#5DCAA5', '#a32d2d', '#0c447c', '#888780'];
+    const labels = filtroTrend.labels || [];
+    const datasets = filtroTrend.series.map((s, i) => ({
+      type: 'line',
+      label: s.nombre,
+      data: s.vta || [],
+      borderColor: pal[i % pal.length],
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      pointRadius: 3,
+      tension: 0.3,
+    }));
+    return new Chart(el, {
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              label: ctx => `${ctx.dataset.label}: $${Number(ctx.parsed.y || 0).toLocaleString('es-EC')}`,
+            },
+          },
+        },
+        scales: {
+          x: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+          y: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: { callback: v => '$' + Number(v).toLocaleString() } },
         },
       },
     });

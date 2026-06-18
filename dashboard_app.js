@@ -24,12 +24,10 @@
     const isOp = aud === 'operativo';
     const frTabla = document.getElementById('fr-tabla');
     const fo = document.getElementById('filtros-operativo');
+    const fpc = document.getElementById('filtros-plato-cat');
     if (frTabla) frTabla.classList.toggle('hid', dash !== 'ventas' || !isOp);
     if (fo) fo.classList.toggle('hid', !isOp);
-    const lblPlato = document.getElementById('lbl-plato');
-    const sp = document.getElementById('sp');
-    if (lblPlato) lblPlato.classList.toggle('hid', dash === 'rentabilidad');
-    if (sp) sp.classList.toggle('hid', dash === 'rentabilidad');
+    if (fpc) fpc.classList.toggle('hid', !((dash === 'ventas') || (dash === 'rentabilidad' && isOp)));
     const pvSocios = document.getElementById('panel-socios');
     const pvOp = document.getElementById('panel-operativo');
     const rentSocios = document.getElementById('rent-panel-socios');
@@ -116,8 +114,35 @@
   window.getComprasRange = function () {
     const y = document.getElementById('cmp-anio').value;
     const meses = getCheckedValues(document.getElementById('cmp-meses'));
-    return rangeFromMeses(meses.length ? meses : [`${y}-01`, `${y}-12`], y);
+    if (meses.length) return rangeFromMeses(meses, y);
+    const meta = window._meta || {};
+    const desde = `${y}-01-01`;
+    let hasta = `${y}-12-31`;
+    if (meta.movimientos_hasta && String(meta.movimientos_hasta).startsWith(y)) {
+      hasta = meta.movimientos_hasta;
+    }
+    return { desde, hasta };
   };
+
+  function formatCmpLabel(lbl, agrup) {
+    if (agrup !== 'mes' || !/^\d{4}-\d{2}$/.test(lbl)) return lbl;
+    const n = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    return n[parseInt(lbl.slice(5, 7), 10)] + ' ' + lbl.slice(2, 4);
+  }
+
+  function pieProveedoresTop(provs, max) {
+    const list = (provs || []).slice();
+    max = max || 8;
+    if (list.length <= max) return list;
+    const top = list.slice(0, max - 1);
+    const rest = list.slice(max - 1);
+    top.push({
+      nombre: 'Otros (' + rest.length + ' prov.)',
+      vta: rest.reduce((s, p) => s + (Number(p.vta) || 0), 0),
+      pct: rest.reduce((s, p) => s + (Number(p.pct) || 0), 0),
+    });
+    return top;
+  }
 
   window.setCmpArea = function (area, btn) {
     window.cmpArea = area;
@@ -145,17 +170,44 @@
       card('Proveedores', String(a.proveedores.length), `Acum. año $${d.acumulado_anio.vta.toLocaleString('es-EC')}`),
     ].join('');
 
-    const labels = a.labels || [];
-    const serie = a.serie || [];
-    chCompras = drawBarLineChart('cv-compras', chCompras, labels, [
-      { type: 'bar', label: 'Compras $', data: serie, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5 },
-    ], serie, 'Total');
+    const labels = (a.labels || []).map(l => formatCmpLabel(l, agrup));
+    const serie = (a.serie || []).map(v => Number(v) || 0);
+    let barra = (a.serie_barra || []).map(v => Number(v) || 0);
+    let cocina = (a.serie_cocina || []).map(v => Number(v) || 0);
+    const splitSum = barra.reduce((s, v) => s + v, 0) + cocina.reduce((s, v) => s + v, 0);
+    const serieSum = serie.reduce((s, v) => s + v, 0);
+    if (serieSum > 0 && splitSum === 0) {
+      const pa = a.por_area || {};
+      const t = (pa.BARRA || 0) + (pa.COCINA || 0);
+      const pB = t > 0 ? (pa.BARRA || 0) / t : 0.5;
+      const pC = t > 0 ? (pa.COCINA || 0) / t : 0.5;
+      barra = serie.map(v => Math.round(v * pB * 100) / 100);
+      cocina = serie.map(v => Math.round(v * pC * 100) / 100);
+    }
+    let barDatasets;
+    if (window.cmpArea === 'BARRA') {
+      barDatasets = [
+        { type: 'bar', label: 'Barra', data: serie, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5 },
+      ];
+    } else if (window.cmpArea === 'COCINA') {
+      barDatasets = [
+        { type: 'bar', label: 'Cocina', data: serie, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5 },
+      ];
+    } else {
+      barDatasets = [
+        { type: 'bar', label: 'Barra', data: barra, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'compras' },
+        { type: 'bar', label: 'Cocina', data: cocina, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'compras' },
+      ];
+    }
+    chCompras = drawBarLineChart('cv-compras', chCompras, labels, barDatasets, serie, 'Total');
 
-    const provs = a.top_proveedores || [];
+    const provs = pieProveedoresTop(a.top_proveedores || []);
     chComprasPie = drawPieChart(
       'cv-compras-pie', chComprasPie,
       provs.map(p => p.nombre),
       provs.map(p => p.vta),
+      null,
+      { legendPosition: 'bottom' },
     );
 
     let tb = '';
@@ -175,6 +227,8 @@
     window._periodFilter = r._filterLabels || null;
     delete r._filterLabels;
     const q = new URLSearchParams({ token: window.TOKEN, ...r, agrup: r.agrup || 'mes' });
+    if (typeof appendPvToQuery === 'function') appendPvToQuery(q);
+    if (typeof appendPlatoCatToQuery === 'function') appendPlatoCatToQuery(q);
     const target = aud === 'socios' ? 'rent-socios-metrics' : 'rent-metrics';
     document.getElementById(target).innerHTML = '<div class="loading">Cargando...</div>';
     try {
@@ -192,6 +246,19 @@
       err.classList.remove('hid');
       document.getElementById(target).innerHTML = '<div class="loading">No se pudo cargar rentabilidad</div>';
     }
+  };
+
+  window.sliceRentSeries = function (d, pf) {
+    let labels = d.labels || [];
+    const keys = ['margen', 'margen_pct', 'barra', 'cocina', 'otro', 'barra_pct', 'cocina_pct', 'otro_pct'];
+    const out = { labels };
+    keys.forEach(k => { out[k] = (d[k] || []).slice(); });
+    if (pf && pf.length) {
+      const idx = labels.map((l, i) => (pf.includes(l) ? i : -1)).filter(i => i >= 0);
+      out.labels = idx.map(i => labels[i]);
+      keys.forEach(k => { out[k] = idx.map(i => out[k][i]); });
+    }
+    return out;
   };
 
   window.renderRentabilidad = function () {
@@ -242,52 +309,58 @@
         ? drawPieChart('cv-rent-pv', chRentPv, pvLabels, pieVals, Object.values(colors), { format: fmt === 'pct' ? 'pct' : 'money' })
         : (chRentPv && chRentPv.destroy ? (chRentPv.destroy(), null) : null);
 
-      let labels = d.labels || [];
-      let serie = fmt === 'pct' ? (d.margen_pct || []) : (d.margen || []);
-      const pf = window._periodFilter;
-      if (pf && pf.length) {
-        const idx = labels.map((l, i) => pf.includes(l) ? i : -1).filter(i => i >= 0);
-        labels = idx.map(i => labels[i]);
-        serie = idx.map(i => serie[i]);
+      const sliced = window.sliceRentSeries(d, window._periodFilter);
+      const labels = sliced.labels;
+      const datasets = [];
+      if (fmt === 'pct') {
+        if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: sliced.barra_pct, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'm' });
+        if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: sliced.cocina_pct, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'm' });
+        if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: sliced.otro_pct, backgroundColor: '#d3d1c7', borderColor: '#888780', borderWidth: 0.5, stack: 'm' });
+        chRentSocios = drawBarLineChart('cv-rent-socios', chRentSocios, labels, datasets, sliced.margen_pct, 'Margen', { format: 'pct' });
+      } else {
+        if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: sliced.barra, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'm' });
+        if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: sliced.cocina, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'm' });
+        if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: sliced.otro, backgroundColor: '#d3d1c7', borderColor: '#888780', borderWidth: 0.5, stack: 'm' });
+        chRentSocios = drawBarLineChart('cv-rent-socios', chRentSocios, labels, datasets, sliced.margen, 'Margen', { format: 'money' });
       }
-      const barLbl = fmt === 'pct' ? 'Margen %' : 'Margen $';
-      chRentSocios = drawBarLineChart('cv-rent-socios', chRentSocios, labels, [
-        { type: 'bar', label: barLbl, data: serie, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5 },
-      ], fmt === 'pct' ? null : serie, fmt === 'pct' ? null : 'Margen', { format: fmt === 'pct' ? 'pct' : 'money' });
       return;
     }
 
-    document.getElementById('rent-metrics').innerHTML = [
-      card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
-      card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
-      card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
-      card('Costo real', '$' + s.costo_real.toLocaleString('es-EC'), d.nota_costo || ''),
-    ].join('');
+    const filtroLbl = typeof filtroLabelSuffix === 'function' ? filtroLabelSuffix() : '';
+    const fmtOp = window.rentSocioFmt || 'valor';
+    const pctCostoOp = s.vta ? Math.round(s.costo_real / s.vta * 1000) / 10 : 0;
+    document.getElementById('rent-metrics').innerHTML = fmtOp === 'pct'
+      ? [
+        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
+        card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
+        card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
+        card('Costo MP / ventas', pctCostoOp + '%', '$' + s.costo_real.toLocaleString('es-EC')),
+      ].join('')
+      : [
+        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
+        card('Margen real', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
+        card('Margen teórico', '$' + s.margen_teorico.toLocaleString('es-EC'), s.margen_teorico_pct + '% del neto'),
+        card('Costo real', '$' + s.costo_real.toLocaleString('es-EC'), d.nota_costo || ''),
+      ].join('');
 
-    let labels = d.labels || [];
-    let barra = d.barra || [];
-    let cocina = d.cocina || [];
-    let otro = d.otro || [];
-    let margen = d.margen || [];
-    const pf = window._periodFilter;
-    if (pf && pf.length) {
-      const idx = labels.map((l, i) => pf.includes(l) ? i : -1).filter(i => i >= 0);
-      labels = idx.map(i => labels[i]);
-      barra = idx.map(i => barra[i]);
-      cocina = idx.map(i => cocina[i]);
-      otro = idx.map(i => otro[i]);
-      margen = idx.map(i => margen[i]);
-    }
-
+    const slicedOp = window.sliceRentSeries(d, window._periodFilter);
+    const labels = slicedOp.labels;
     const datasets = [];
-    if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: barra, backgroundColor: '#85B7EB', stack: 'm' });
-    if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: cocina, backgroundColor: '#5DCAA5', stack: 'm' });
-    if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: otro, backgroundColor: '#d3d1c7', stack: 'm' });
-    chRent = drawBarLineChart('cv-rent', chRent, labels, datasets, margen, 'Margen total');
+    if (fmtOp === 'pct') {
+      if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: slicedOp.barra_pct, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'm' });
+      if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: slicedOp.cocina_pct, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'm' });
+      if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: slicedOp.otro_pct, backgroundColor: '#d3d1c7', borderColor: '#888780', borderWidth: 0.5, stack: 'm' });
+      chRent = drawBarLineChart('cv-rent', chRent, labels, datasets, slicedOp.margen_pct, 'Margen total', { format: 'pct' });
+    } else {
+      if (pvInc('BARRA')) datasets.push({ type: 'bar', label: 'Barra', data: slicedOp.barra, backgroundColor: '#85B7EB', borderColor: '#378ADD', borderWidth: 0.5, stack: 'm' });
+      if (pvInc('COCINA')) datasets.push({ type: 'bar', label: 'Cocina', data: slicedOp.cocina, backgroundColor: '#5DCAA5', borderColor: '#1D9E75', borderWidth: 0.5, stack: 'm' });
+      if (pvInc('OTRO')) datasets.push({ type: 'bar', label: 'Otro', data: slicedOp.otro, backgroundColor: '#d3d1c7', borderColor: '#888780', borderWidth: 0.5, stack: 'm' });
+      chRent = drawBarLineChart('cv-rent', chRent, labels, datasets, slicedOp.margen, 'Margen total', { format: 'money' });
+    }
 
     let tb = '';
     const ord = (document.getElementById('so') || {}).value || 'desc';
-    const platos = (d.platos || []).filter(p => pvInc(p.pv)).slice().sort((a, b) => {
+    const platos = (d.platos || []).slice().sort((a, b) => {
       const rev = ord !== 'asc';
       return rev ? (b.vta - a.vta) : (a.vta - b.vta);
     });
@@ -295,7 +368,8 @@
       tb += `<tr><td>${esc(p.nombre)}<div style="font-size:11px;color:#888780">${esc(p.cat)} · ${p.pv}</div></td><td class="r">$${p.vta.toLocaleString('es-EC')}</td><td class="r">${p.margen_real_pct}%</td><td class="r">$${p.margen_real.toLocaleString('es-EC')}</td></tr>`;
     });
     document.getElementById('rent-tb').innerHTML = tb || '<tr><td colspan="4">Sin datos</td></tr>';
-    document.getElementById('rent-ct').textContent = 'Margen bruto · ' + (typeof getTitle === 'function' ? getTitle() : '');
+    const ctBase = 'Margen bruto · ' + (typeof getTitle === 'function' ? getTitle() : '') + filtroLbl;
+    document.getElementById('rent-ct').textContent = fmtOp === 'pct' ? ctBase + ' (%)' : ctBase + ' ($)';
   };
 
   window.cargarRentabilidad = window.cargarRentabilidadFull;
