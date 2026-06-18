@@ -8,7 +8,11 @@
  * 1. Abre el Sheets de Staging → Extensiones → Apps Script
  * 2. Borra todo el código existente
  * 3. Pega este script completo
- * 4. Guarda (Ctrl+S) y recarga el Sheets
+ * 4. ⚙️ Ajustes del proyecto → activar "Mostrar archivo de manifiesto appsscript.json"
+ *    → pega el contenido de scripts_apps_script/appsscript.json del repo
+ * 5. Ejecuta una vez solicitarPermisosExternos (▶) y acepta permisos de Google
+ * 6. Propiedades del script: TATAMI_FACTURA_API_URL y TATAMI_FACTURA_SECRET
+ * 7. Guarda (Ctrl+S) y recarga el Sheets
  *
  * Staging ID: 1TJu70BNG4i3it4y51Eg3YlDNswLkh1QGRt6v-qAyexU
  * Master ID:  1rTVMfsOBssx2R-Sbuj1SRx9NZSd_hinEa9IK_ahGqZY
@@ -50,8 +54,11 @@ function onOpen() {
     .addItem("▶ TEST COMPLETO", "testCompleto")
     .addToUi();
 
-  // Ingreso manual de facturas (funciones en ingreso_factura_manual.gs)
+  // Ingreso manual de facturas
   ui.createMenu("🍣 Tatami Facturas")
+    .addItem("🔐 Autorizar conexión con agente", "solicitarPermisosExternosMenu")
+    .addItem("🔍 Verificar URL y proveedores", "verificarConexionFactura")
+    .addSeparator()
     .addItem("✅ Aceptar e ingresar factura", "aceptarFactura")
     .addItem("🧪 Probar (sin subir stock)", "probarFactura")
     .addToUi();
@@ -1004,17 +1011,115 @@ function testCompleto() {
 // INGRESO MANUAL DE FACTURAS (pestaña INGRESO_FACTURA, menú 🍣 Tatami Facturas)
 //
 // Configuración (⚙️ Propiedades del script):
-//   TATAMI_FACTURA_API_URL = https://TU-SERVIDOR/api/factura_manual/enviar
-//   TATAMI_FACTURA_SECRET  = valor de FACTURA_SHEETS_INGEST_SECRET en .env
-// ═══════════════════════════════════════════════════════════════════════════════
+//   TATAMI_FACTURA_API_URL = https://tatami-agente-production.up.railway.app/api/factura_manual/enviar
+//   TATAMI_FACTURA_SECRET  = valor de FACTURA_SHEETS_INGEST_SECRET en Railway/.env
+//
+var TATAMI_FACTURA_URL_CORRECTA = "https://tatami-agente-production.up.railway.app/api/factura_manual/enviar";
 
 var HOJA_INGRESO = "INGRESO_FACTURA";
 var HOJA_REGISTRO = "REGISTRO_FACTURAS";
 var FILA_LINEAS = 7;
 var MAX_LINEAS = 40;
 
+/**
+ * Ejecutar UNA VEZ desde el editor ▶ (sin diálogos — evita timeout de 6 min).
+ * Revisa el Registro de ejecución: debe decir "Permisos externos: OK".
+ */
+function solicitarPermisosExternos() {
+  var resp = UrlFetchApp.fetch("https://www.google.com", {
+    method: "get",
+    muteHttpExceptions: true,
+    followRedirects: true,
+  });
+  Logger.log("Permisos externos: OK (HTTP " + resp.getResponseCode() + ")");
+  return resp.getResponseCode();
+}
+
+/** Menú Tatami Facturas — usar desde el Sheets (sí tiene UI). */
+function solicitarPermisosExternosMenu() {
+  try {
+    var code = solicitarPermisosExternos();
+    SpreadsheetApp.getUi().alert(
+      "Permisos OK",
+      "El script ya puede llamar al agente (prueba HTTP " + code + ").\n\n" +
+        "Verifica TATAMI_FACTURA_API_URL y TATAMI_FACTURA_SECRET en Propiedades del script.",
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+  } catch (e) {
+    SpreadsheetApp.getUi().alert("Error de autorización:\n\n" + String(e));
+  }
+}
+
 function probarFactura() {
   aceptarFactura_(true);
+}
+
+/** Verifica URL, secret y que el servidor tenga proveedor 165 habilitado. */
+function verificarConexionFactura() {
+  var ui = SpreadsheetApp.getUi();
+  var props = PropertiesService.getScriptProperties();
+  var url = String(props.getProperty("TATAMI_FACTURA_API_URL") || "").trim();
+  var secret = String(props.getProperty("TATAMI_FACTURA_SECRET") || "").trim();
+
+  if (!url || !secret) {
+    ui.alert(
+      "Falta configuración",
+      "Define en Propiedades del script:\n\n" +
+        "TATAMI_FACTURA_API_URL\n" +
+        TATAMI_FACTURA_URL_CORRECTA + "\n\n" +
+        "TATAMI_FACTURA_SECRET\n" +
+        "(mismo valor que FACTURA_SHEETS_INGEST_SECRET en Railway)",
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+
+  var pingUrl = url.replace(/\/enviar\/?$/i, "/ping");
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch(pingUrl, {
+      method: "get",
+      headers: { "X-Tatami-Factura-Secret": secret },
+      muteHttpExceptions: true,
+    });
+  } catch (e) {
+    ui.alert("No se pudo conectar:\n\nURL ping: " + pingUrl + "\n\n" + String(e));
+    return;
+  }
+
+  var code = resp.getResponseCode();
+  var body = {};
+  try { body = JSON.parse(resp.getContentText()); } catch (e) {}
+
+  if (code === 401) {
+    ui.alert(
+      "Secret incorrecto (HTTP 401)",
+      "TATAMI_FACTURA_SECRET no coincide con Railway.\n\nURL: " + url,
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+  if (code !== 200) {
+    ui.alert(
+      "Servidor incorrecto o desactualizado (HTTP " + code + ")",
+      "URL configurada:\n" + url + "\n\n" +
+        "Debe ser:\n" + TATAMI_FACTURA_URL_CORRECTA + "\n\n" +
+        "Respuesta: " + resp.getContentText().slice(0, 400),
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+
+  var provs = (body.proveedores_manuales || []).join(", ");
+  var ok165 = (body.proveedores_manuales || []).indexOf("165") !== -1;
+  ui.alert(
+    ok165 ? "✅ Conexión OK" : "⚠ Servidor sin proveedor 165",
+    "URL: " + url + "\n\nProveedores manuales: " + provs + "\n\n" +
+      (ok165
+        ? "Podés ingresar facturas de Inguil Lazo (165)."
+        : "Cambiá TATAMI_FACTURA_API_URL a:\n" + TATAMI_FACTURA_URL_CORRECTA),
+    ui.ButtonSet.OK
+  );
 }
 
 function aceptarFactura() {
@@ -1092,7 +1197,17 @@ function aceptarFactura_(modoPrueba) {
       muteHttpExceptions: true,
     });
   } catch (e) {
-    ui.alert("No se pudo conectar con el agente:\n" + e);
+    var msg = String(e);
+    if (msg.indexOf("UrlFetchApp") !== -1 || msg.indexOf("external_request") !== -1) {
+      ui.alert(
+        "Falta autorizar el script para conectar con el agente.\n\n" +
+          "Menú 🍣 Tatami Facturas → «Autorizar conexión con agente»\n" +
+          "(o en Apps Script ejecuta solicitarPermisosExternos y acepta permisos)\n\n" +
+          msg
+      );
+    } else {
+      ui.alert("No se pudo conectar con el agente:\n" + msg);
+    }
     return;
   }
 
@@ -1102,7 +1217,11 @@ function aceptarFactura_(modoPrueba) {
 
   if (code !== 200) {
     var detalle = (body && body.detail) ? JSON.stringify(body.detail) : resp.getContentText().slice(0, 300);
-    ui.alert("El agente rechazó la factura (HTTP " + code + "):\n\n" + detalle);
+    ui.alert(
+      "El agente rechazó la factura (HTTP " + code + "):\n\n" + detalle +
+        "\n\n—\nURL usada:\n" + url +
+        "\n\nSi falta proveedor 165: menú 🔍 Verificar URL y proveedores"
+    );
     return;
   }
 

@@ -38,6 +38,35 @@ router = APIRouter()
 PROVEEDORES_PERMITIDOS = {"161", "164", "165"}  # Sumba Chocho, Loja Lasso, Inguil Lazo
 
 
+def _extraer_cod_proveedor(proveedor_raw: str) -> str:
+    """Código numérico al inicio del dropdown (tolera espacios/BOM de Sheets)."""
+    s = unicodedata.normalize("NFKC", str(proveedor_raw or "").strip())
+    s = s.lstrip("\ufeff\u200b\u00a0\u202f")
+    m = re.match(r"^(\d+)", s)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b(\d{2,4})\b", s)
+    return m.group(1) if m else ""
+
+
+def _check_factura_secret(request: Request) -> None:
+    secret = request.headers.get("X-Tatami-Factura-Secret")
+    expected = (os.getenv("FACTURA_SHEETS_INGEST_SECRET") or "").strip()
+    if not expected or secret != expected:
+        raise HTTPException(status_code=401, detail="No autorizado")
+
+
+@router.get("/ping")
+def ping_factura_manual(request: Request):
+    """Diagnóstico: Apps Script puede verificar URL/secret y proveedores habilitados."""
+    _check_factura_secret(request)
+    return {
+        "ok": True,
+        "proveedores_manuales": sorted(PROVEEDORES_PERMITIDOS),
+        "nota": "Si 165 no aparece aquí, el Sheets apunta a un servidor desactualizado.",
+    }
+
+
 def _norm_desc(s: str) -> str:
     s = unicodedata.normalize("NFKD", str(s or ""))
     s = "".join(c for c in s if not unicodedata.combining(c))
@@ -78,11 +107,7 @@ def _ruc_proveedor(cod_proveedor: str) -> str:
 
 @router.post("/enviar")
 async def recibir_factura_manual(request: Request):
-    secret = request.headers.get("X-Tatami-Factura-Secret")
-    expected = (os.getenv("FACTURA_SHEETS_INGEST_SECRET") or "").strip()
-    if not expected or secret != expected:
-        raise HTTPException(status_code=401, detail="No autorizado")
-
+    _check_factura_secret(request)
     try:
         payload = await request.json()
     except Exception:
@@ -113,12 +138,15 @@ def _procesar_factura_manual(payload: dict):
     lineas = payload.get("lineas")
     modo_prueba = bool(payload.get("modo_prueba"))
 
-    m = re.match(r"^(\d+)", proveedor_raw)
-    cod_proveedor = m.group(1) if m else ""
+    cod_proveedor = _extraer_cod_proveedor(proveedor_raw)
     if cod_proveedor not in PROVEEDORES_PERMITIDOS:
         raise HTTPException(
             status_code=400,
-            detail=f"Proveedor no habilitado para ingreso manual: '{proveedor_raw}'",
+            detail=(
+                f"Proveedor no habilitado para ingreso manual: '{proveedor_raw}' "
+                f"(cod extraído: '{cod_proveedor or '?'}'; "
+                f"permitidos: {sorted(PROVEEDORES_PERMITIDOS)})"
+            ),
         )
     if not num_factura:
         raise HTTPException(status_code=400, detail="Falta num_factura")
