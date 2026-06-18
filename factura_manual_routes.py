@@ -35,7 +35,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter()
 
-PROVEEDORES_PERMITIDOS = {"161", "164"}  # Sumba Chocho, Loja Lasso
+PROVEEDORES_PERMITIDOS = {"161", "164", "165"}  # Sumba Chocho, Loja Lasso, Inguil Lazo
 
 
 def _norm_desc(s: str) -> str:
