@@ -44,6 +44,7 @@ FECHA_MIN_INGRESO_FACTURA = (
     os.getenv("TATAMI_FECHA_MIN_INGRESO_FACTURA", "2026-05-29").strip()[:10]
 )
 COL_COSTO_TOTAL_PENDIENTES = "costo_total_xml"
+COD_MP_SIN_CLASIFICAR = "000"
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
