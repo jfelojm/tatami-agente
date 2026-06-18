@@ -9,8 +9,8 @@ from typing import Any
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -32,9 +32,7 @@ def master_spreadsheet_id() -> str:
 
 
 def creds() -> Credentials:
-    return Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-    )
+    return google_credentials(SCOPES)
 
 
 def open_staging() -> gspread.Spreadsheet:

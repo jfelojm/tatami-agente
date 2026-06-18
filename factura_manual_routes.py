@@ -95,6 +95,10 @@ async def recibir_factura_manual(request: Request):
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+
+        tb = traceback.format_exc()
+        print(f"ERROR factura_manual: {tb}")
         raise HTTPException(
             status_code=503,
             detail=f"Error interno factura manual: {type(e).__name__}: {e}",
