@@ -90,6 +90,18 @@ async def recibir_factura_manual(request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON")
 
+    try:
+        return _procesar_factura_manual(payload)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Error interno factura manual: {type(e).__name__}: {e}",
+        ) from e
+
+
+def _procesar_factura_manual(payload: dict):
     proveedor_raw = str(payload.get("proveedor") or "").strip()
     num_factura = str(payload.get("num_factura") or "").strip()
     fecha_factura = str(payload.get("fecha_factura") or "").strip()[:10]
@@ -131,7 +143,11 @@ async def recibir_factura_manual(request: Request):
     # Dedup: misma factura del mismo proveedor ya COMPLETA
     from supabase import create_client
 
-    sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+    sb_url = (os.getenv("SUPABASE_URL") or "").strip()
+    sb_key = (os.getenv("SUPABASE_KEY") or "").strip()
+    if not sb_url or not sb_key:
+        raise HTTPException(status_code=503, detail="Faltan SUPABASE_URL o SUPABASE_KEY en el servidor")
+    sb = create_client(sb_url, sb_key)
     ruc = _ruc_proveedor(cod_proveedor) or f"MANUAL-{cod_proveedor}"
     prev = (
         sb.table("facturas_procesadas")
