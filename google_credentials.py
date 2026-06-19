@@ -7,6 +7,14 @@ import os
 from google.oauth2.service_account import Credentials
 
 
+def has_google_credentials() -> bool:
+    """True si hay JSON en env o ruta a archivo local."""
+    if (os.getenv("GOOGLE_CREDENTIALS_JSON") or "").strip():
+        return True
+    path = (os.getenv("GOOGLE_CREDENTIALS_PATH") or "").strip()
+    return bool(path and os.path.isfile(path))
+
+
 def google_credentials(scopes: list[str]) -> Credentials:
     """
     Orden:
