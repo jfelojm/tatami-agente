@@ -33,6 +33,10 @@ Start-Sleep -Seconds 2
 $libre = -not (Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue)
 if ($libre) {
     Write-Host "Listo: puerto 8000 libre, uvicorn y ngrok detenidos." -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Siguiente paso: en Meta Developer, Callback URL debe ser:" -ForegroundColor Cyan
+    Write-Host "  https://tatami-agente-production.up.railway.app/webhook"
+    Write-Host "  (NO polish-vindicate-smudgy.ngrok-free.dev)"
 } else {
     Write-Host "AVISO: puerto 8000 sigue ocupado. Reintenta este script como administrador." -ForegroundColor Red
 }
