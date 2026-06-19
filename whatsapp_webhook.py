@@ -43,7 +43,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-railway-v15"
+TATAMI_WA_BUILD = "20250619-railway-v16"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -2152,6 +2152,26 @@ def tool_resumen_operativo_hoy(args=None):
     }
 
 
+def _fecha_hoy_ec() -> date:
+    return datetime.now(TZ).date()
+
+
+def _neto_linea_hist_ventas(row: dict) -> float:
+    """Neto por línea: subtotal − descuento, o columna total si faltan las anteriores."""
+    sub = _to_float(row.get("subtotal"), 0.0)
+    desc = _to_float(row.get("descuento_valor"), 0.0)
+    if sub > 0 or desc > 0:
+        return sub - desc
+    return _to_float(row.get("total"), 0.0)
+
+
+def _smartmenu_dia_valido(sm: dict | None) -> bool:
+    """True si Smart Menu devolvió totales reales (no grid vacío por red)."""
+    if not sm:
+        return False
+    return (sm.get("docs") or 0) > 0 or (sm.get("total") or 0) > 0.01
+
+
 def _hist_ventas_sin_anulados(rows):
     """Excluye líneas de documentos anulados (hist_ventas.estado_documento = ANULADO)."""
     return [
@@ -2172,9 +2192,12 @@ def total_smartmenu_dia(fecha_str):
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        return mod.calcular_total_smartmenu(fecha_str, sin_iva=True)
+        result = mod.calcular_total_smartmenu(fecha_str, sin_iva=True)
     except Exception:
         return None  # fallback: indica que Smart Menu no disponible
+    if not _smartmenu_dia_valido(result):
+        return None
+    return result
 
 
 def _total_desde_hist_ventas_docs(fecha_desde: str, fecha_hasta: str) -> tuple[float, int]:
@@ -2187,11 +2210,7 @@ def _total_desde_hist_ventas_docs(fecha_desde: str, fecha_hasta: str) -> tuple[f
     )
     rows = _hist_ventas_sin_anulados(rows)
     docs = set(r.get("num_documento") for r in rows if r.get("num_documento"))
-    # Neto por línea: subtotal − descuento_valor (alineado a ventas netas Smart Menu)
-    total = sum(
-        _to_float(r.get("subtotal"), 0.0) - _to_float(r.get("descuento_valor"), 0.0)
-        for r in rows
-    )
+    total = sum(_neto_linea_hist_ventas(r) for r in rows)
     return round(total, 2), len(docs)
 
 
@@ -2210,9 +2229,7 @@ def _totales_por_dia_hist(fecha_desde: str, fecha_hasta: str) -> dict[str, tuple
         f = (r.get("fecha") or "")[:10]
         if not f:
             continue
-        por_fecha[f]["total"] += _to_float(r.get("subtotal"), 0.0) - _to_float(
-            r.get("descuento_valor"), 0.0
-        )
+        por_fecha[f]["total"] += _neto_linea_hist_ventas(r)
         doc = (r.get("num_documento") or "").strip()
         if doc:
             por_fecha[f]["docs"].add(doc)
@@ -2224,7 +2241,7 @@ def _totales_por_dia_hist(fecha_desde: str, fecha_hasta: str) -> dict[str, tuple
 
 # ── TOOL 1 — ventas hoy ─────────────────────────────────────
 def tool_ventas_hoy():
-    hoy = date.today().isoformat()
+    hoy = _fecha_hoy_ec().isoformat()
     sm = total_smartmenu_dia(hoy)
 
     # Top platos desde hist_ventas (orden por monto total del día)
@@ -2247,7 +2264,7 @@ def tool_ventas_hoy():
             for n, d in top5
         ],
     }
-    if sm is not None:
+    if _smartmenu_dia_valido(sm):
         resultado["total_ventas"] = round(sm.get("total", 0), 2)
         resultado["ventas_brutas"] = round(sm.get("total_bruto", sm.get("total", 0)), 2)
         resultado["descuentos"] = round(sm.get("total_descuentos", 0), 2)
@@ -2262,7 +2279,7 @@ def tool_ventas_hoy():
 
 # ── TOOL 2 — ventas semana ──────────────────────────────────
 def tool_ventas_semana():
-    hoy = date.today()
+    hoy = _fecha_hoy_ec()
     lunes = hoy - timedelta(days=hoy.weekday())
 
     # Total oficial: suma diaria via Smart Menu
@@ -3308,8 +3325,8 @@ def _fecha_consulta_ventas_simple(texto: str) -> str:
     """Fecha ISO para consulta ventas del día (hoy por defecto)."""
     t = re.sub(r"\s+", " ", (texto or "").strip().lower())
     if re.search(r"\bayer\b", t):
-        return (date.today() - timedelta(days=1)).isoformat()
-    return date.today().isoformat()
+        return (_fecha_hoy_ec() - timedelta(days=1)).isoformat()
+    return _fecha_hoy_ec().isoformat()
 
 
 def _es_consulta_ventas_simple(texto: str) -> bool:
@@ -3341,8 +3358,10 @@ def _es_consulta_ventas_simple(texto: str) -> bool:
         "cuanto vendimos hoy",
         "cuánto vendimos hoy",
         "dame las ventas",
+        "dame las ventas de hoy",
         "dame ventas",
         "dime las ventas",
+        "ventas de hoy",
     ):
         return True
     return bool(
@@ -3613,7 +3632,7 @@ def tool_ventas_dia(args):
     }
     if incluir_productos:
         resultado["platos"] = platos
-    if sm is not None:
+    if _smartmenu_dia_valido(sm):
         resultado["total_ventas"] = round(sm.get("total", 0), 2)
         resultado["ventas_brutas"] = round(sm.get("total_bruto", sm.get("total", 0)), 2)
         resultado["descuentos"] = round(sm.get("total_descuentos", 0), 2)
@@ -4213,9 +4232,9 @@ async def _manejar_consulta_ventas_wa(
     incluir_productos: bool = True,
 ) -> None:
     """Ventas del día — directo desde Supabase/Smart Menu, sin LLM."""
-    fecha = _fecha_consulta_ventas_simple(texto)
-    await _feedback_procesando(wa_id, msg)
     try:
+        fecha = _fecha_consulta_ventas_simple(texto)
+        await _feedback_procesando(wa_id, msg)
         r = await asyncio.to_thread(
             tool_ventas_dia,
             {
@@ -4224,18 +4243,17 @@ async def _manejar_consulta_ventas_wa(
                 "limite": 5,
             },
         )
+        out = (r.get("texto_whatsapp") or "").strip() if isinstance(r, dict) else ""
+        if not out:
+            await enviar_mensaje_meta(wa_id, "No hay datos de ventas para hoy.")
+            return
+        await _enviar_texto_largo_wa(wa_id, out)
     except Exception as e:
-        print(f"[Meta] consulta ventas wa_id={wa_id!r} fecha={fecha}: {e}")
+        print(f"[Meta] consulta ventas wa_id={wa_id!r} texto={texto!r}: {e}")
         await enviar_mensaje_meta(
             wa_id,
             "No pude consultar ventas. Intenta de nuevo en un momento.",
         )
-        return
-    out = (r.get("texto_whatsapp") or "").strip() if isinstance(r, dict) else ""
-    if not out:
-        await enviar_mensaje_meta(wa_id, "No hay datos de ventas para hoy.")
-        return
-    await _enviar_texto_largo_wa(wa_id, out)
 
 
 async def _manejar_consulta_receta_plato_wa(
