@@ -161,5 +161,15 @@ class TestTrasladoVsProduccion(unittest.TestCase):
             self.assertIsNone(_resolver_prod_sub("traslada producto", "593999999999"))
 
 
+    def test_raslada_typo_es_traslado(self):
+        from whatsapp_webhook import (
+            _es_mensaje_traslado,
+            _normalizar_texto_comando_wa,
+        )
+
+        self.assertEqual(_normalizar_texto_comando_wa("raslada producto"), "traslada producto")
+        self.assertTrue(_es_mensaje_traslado("raslada producto"))
+
+
 if __name__ == "__main__":
     unittest.main()

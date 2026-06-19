@@ -40,6 +40,9 @@ load_dotenv()
 TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
+# Verificar en producción: GET / debe mostrar este valor tras cada deploy.
+TATAMI_WA_BUILD = "20250619-traslado-v3"
+
 
 def _log_webhook_event(line: str) -> None:
     try:
@@ -3721,9 +3724,17 @@ _TRASLADO_DE_A_RE = re.compile(
 )
 
 
+def _normalizar_texto_comando_wa(texto: str) -> str:
+    """Corrige typos frecuentes antes de enrutar (raslada → traslada)."""
+    t = (texto or "").strip()
+    if not t:
+        return t
+    return re.sub(r"\braslad", "traslad", t, flags=re.I)
+
+
 def _es_mensaje_traslado(texto: str) -> bool:
     """Traslado de MP entre bodegas — no confundir con producción de subreceta."""
-    t = (texto or "").strip()
+    t = _normalizar_texto_comando_wa(texto)
     if not t:
         return False
     if _TRASLADO_VERBS_RE.search(t):
@@ -3733,7 +3744,17 @@ def _es_mensaje_traslado(texto: str) -> bool:
     tl = t.lower()
     if re.search(r"\bmp\b|materia\s+prima", tl) and _TRASLADO_DE_A_RE.search(t):
         return True
+    # «mueve producto», «raslada insumo» sin verbo estándar pero con typo corregido
+    if re.search(r"\b(producto|productos|insumo|insumos)\b", tl) and _TRASLADO_VERBS_RE.search(
+        t
+    ):
+        return True
     return False
+
+
+def _parece_intento_traslado(texto: str) -> bool:
+    """Incluye typos; usar para bloquear produccion_subreceta en el LLM."""
+    return _es_mensaje_traslado(texto)
 
 
 def _es_contexto_bodegas_no_sub(texto: str) -> bool:
@@ -3767,12 +3788,13 @@ def _parse_traslado_bodegas(texto: str) -> dict | None:
 
 
 def _limpiar_ctx_produccion(wa_id: str) -> None:
-    """Evita que un traslado herede pending/last_cods de producción."""
+    """Evita que un traslado herede pending/last_cods/historial de producción."""
     _pending_prod_sub.pop(wa_id, None)
     _limpiar_pick_produccion(wa_id)
     ctx = _pending_prod_ctx.get(wa_id)
     if ctx:
         ctx.pop("last_cods", None)
+    historiales.pop(wa_id, None)
 
 
 _NOMBRES_MP_GENERICOS = frozenset({
@@ -4343,7 +4365,7 @@ def llamar_agente(mensaje, telefono):
                     result = {"error": "No autorizado para esta operación."}
                 elif (
                     tc.name == "produccion_subreceta"
-                    and _es_mensaje_traslado(ultimo_user)
+                    and _parece_intento_traslado(ultimo_user)
                 ):
                     result = {
                         "error": (
@@ -4665,7 +4687,9 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
         mtype = (msg.get("type") or "").strip()
 
         if mtype == "text":
-            texto = (msg.get("text", {}).get("body") or "").strip()
+            texto = _normalizar_texto_comando_wa(
+                (msg.get("text", {}).get("body") or "").strip()
+            )
             if not texto:
                 await _responder_wa(
                     wa_id,
@@ -4673,7 +4697,7 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     "Cocina: PRODUCIR SUB 006 BOD-001 · Barra: PRODUCIR SUB 051 BOD-002",
                 )
                 return
-            print(f"[Meta] {wa_id}: {texto}")
+            print(f"[Meta] {wa_id}: {texto} build={TATAMI_WA_BUILD}")
 
             texto_upper = texto.strip().upper()
 
@@ -5018,7 +5042,7 @@ async def recibir_webhook_meta(request: Request):
                     if mtype == "text":
                         preview = ((msg.get("text") or {}).get("body") or "")[:120]
                     _log_webhook_event(
-                        f"IN from={wa_from} type={mtype} id={msg_id} body={preview!r}"
+                        f"IN from={wa_from} type={mtype} id={msg_id} build={TATAMI_WA_BUILD} body={preview!r}"
                     )
                     if msg_id and mensaje_ya_procesado(msg_id):
                         continue
@@ -5058,4 +5082,10 @@ async def webhook(Body: str = Form(...), From: str = Form(...)):
 
 @app.get("/")
 def health():
-    return {"status": "ok", "agente": "Tatami Bao Bar v4", "tools": len(TOOLS)}
+    return {
+        "status": "ok",
+        "agente": "Tatami Bao Bar v4",
+        "tools": len(TOOLS),
+        "wa_build": TATAMI_WA_BUILD,
+        "git_commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:12],
+    }
