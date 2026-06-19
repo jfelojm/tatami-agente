@@ -42,7 +42,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-receta-v8"
+TATAMI_WA_BUILD = "20250619-traslado-v9"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -3683,7 +3683,7 @@ _COCINA_ALIASES: list[tuple[tuple[str, ...], str]] = [
     (("salsa oriental",), "058"),
     (("salsa drunken",), "059"),
     (("aceite jengibre", "aceite de jengibre"), "044"),
-    (("torta de chocolate", "tortas de chocolate", "torta chocolate"), "010"),
+    (("torta de chocolate", "tortas de chocolate", "torta chocolate", "tortas de choclate", "torta choclate"), "010"),
 ]
 
 
@@ -3799,7 +3799,11 @@ def _parse_producir_sub_comando(texto: str, wa_id: str | None = None) -> dict | 
 
 
 _TRASLADO_VERBS_RE = re.compile(
-    r"\b(traslad|transfi|muev|mové|mueve|mover|pasar|pasa|pase)\w*",
+    r"\b(traslad|transfer|transfi|muev|mové|mueve|mover|pasar|pasa|pase)\w*",
+    re.I,
+)
+_TRASLADO_VERBO_INICIO_RE = re.compile(
+    r"^(?:traslad\w*|transfer\w*|transfi\w*|muev\w*|mové|mueve|mover|pasar?|pasa|pase)\s+",
     re.I,
 )
 _BODEGA_TOKEN = (
@@ -3821,7 +3825,27 @@ def _normalizar_texto_comando_wa(texto: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     t = re.sub(r"\braslad", "traslad", t, flags=re.I)
     t = re.sub(r"\btralsad", "traslad", t, flags=re.I)
+    t = re.sub(r"\bchoclate\b", "chocolate", t, flags=re.I)
     return t
+
+
+def _fragmento_insumo_traslado(texto: str) -> str:
+    """Texto del ítem antes del tramo «de X a Y» (sin verbos de traslado)."""
+    return _texto_item_traslado(_normalizar_texto_comando_wa(texto))
+
+
+def _es_traslado_implicito(texto: str) -> bool:
+    """«5 tortas de chocolate de 005 a 001» sin verbo traslado explícito."""
+    t = _normalizar_texto_comando_wa(texto)
+    if not _parse_traslado_bodegas(t):
+        return False
+    frag = _fragmento_insumo_traslado(t)
+    if not frag:
+        return False
+    norm = _normaliza_busqueda_mp(frag)
+    if norm in _NOMBRES_MP_GENERICOS:
+        return False
+    return True
 
 
 def _es_mensaje_traslado(texto: str) -> bool:
@@ -3843,6 +3867,8 @@ def _es_mensaje_traslado(texto: str) -> bool:
     if re.search(r"\b(producto|productos|insumo|insumos)\b", tl) and _TRASLADO_VERBS_RE.search(
         t
     ):
+        return True
+    if _es_traslado_implicito(t):
         return True
     return False
 
@@ -3913,7 +3939,7 @@ def _extraer_nombre_mp_traslado(texto: str) -> str:
     m_bod = _TRASLADO_DE_A_RE.search(t)
     parte = t[: m_bod.start()].strip() if m_bod else t
     m = re.search(
-        r"(?:traslad\w*|transfi\w*|muev\w*|pasar?|pasa)\s+"
+        r"(?:traslad\w*|transfer\w*|transfi\w*|muev\w*|pasar?|pasa)\s+"
         r"(?:(?:una?|un)\s+)?"
         r"(?:(?:mp|materia\s+prima)\s+)?"
         r"(.+)$",
@@ -3957,13 +3983,29 @@ def _es_traslado_generico_sin_detalle(texto: str) -> bool:
         return False
     return bool(
         re.match(
-            r"^(?:traslad\w*|transfi\w*|muev\w*|pasar?|pasa|pase)\s+"
+            r"^(?:traslad\w*|transfer\w*|transfi\w*|muev\w*|pasar?|pasa|pase)\s+"
             r"(?:(?:una?|un)\s+)?"
             r"(?:mp|materia\s+prima|producto?s?|insumo?s?|semi?s?|subrecetas?)?\s*$",
             t,
             re.I,
         )
     )
+
+
+def _texto_traslado_combinado(wa_id: str, texto: str) -> str:
+    """Combina detalle nuevo con traslado genérico pendiente (ej. transferir producto → 5 tortas…)."""
+    new = _normalizar_texto_comando_wa(texto)
+    ctx = _traslado_ctx_get(wa_id)
+    if not ctx:
+        return new
+    if _es_mensaje_traslado(new) and (_parse_traslado_bodegas(new) or _fragmento_insumo_traslado(new)):
+        return new
+    prev = (ctx.get("texto") or "").strip()
+    if not prev:
+        return new
+    if _parse_traslado_bodegas(new) or _fragmento_insumo_traslado(new):
+        return new
+    return new
 
 
 def _msg_traslado_inicio() -> str:
@@ -3993,12 +4035,7 @@ def _texto_item_traslado(texto: str) -> str:
     m = _TRASLADO_DE_A_RE.search(t)
     if m:
         t = t[: m.start()].strip()
-    t = re.sub(
-        r"^(?:traslad\w*|transfi\w*|muev\w*|pasar?|pasa)\s+",
-        "",
-        t,
-        flags=re.I,
-    )
+    t = _TRASLADO_VERBO_INICIO_RE.sub("", t)
     t = re.sub(r"^(?:(?:una?|un)\s+)?(?:(?:mp|materia\s+prima)\s+)?", "", t, flags=re.I)
     return t.strip(" .,;")
 
@@ -5083,7 +5120,8 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             texto_upper = texto.strip().upper()
 
             # Traslado: limpiar estado de producción antes de cualquier otra ruta
-            if _es_mensaje_traslado(texto):
+            texto_traslado = _texto_traslado_combinado(wa_id, texto)
+            if _es_mensaje_traslado(texto_traslado) or _es_traslado_implicito(texto_traslado):
                 _limpiar_ctx_produccion(wa_id)
 
             # Aclaración «es subreceta» tras un traslado pendiente
@@ -5091,9 +5129,11 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 return
 
             # Traslados MP / subreceta — PRIMERO (antes de estados pendientes de producción)
-            if _es_mensaje_traslado(texto):
+            if _es_mensaje_traslado(texto_traslado) or (
+                _traslado_ctx_get(wa_id) and _es_traslado_implicito(texto_traslado)
+            ):
                 print(f"[Meta] {wa_id}: route=traslado")
-                await _manejar_traslado_mp_wa(wa_id, texto, msg)
+                await _manejar_traslado_mp_wa(wa_id, texto_traslado, msg)
                 return
 
             # Conteo físico — antes que producción (barra/cocina no son batches)

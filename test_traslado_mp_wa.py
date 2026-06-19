@@ -229,5 +229,27 @@ class TestTrasladoVsProduccion(unittest.TestCase):
         self.assertEqual(r["cantidad"], 5270.0)
 
 
+    def test_transferir_producto_generico(self):
+        from whatsapp_webhook import _es_traslado_generico_sin_detalle, _texto_item_traslado
+
+        self.assertTrue(_es_traslado_generico_sin_detalle("Transferir producto"))
+        self.assertEqual(_texto_item_traslado("Transferir producto").lower(), "producto")
+
+    def test_tortas_bodegas_sin_verbo(self):
+        from whatsapp_webhook import (
+            _es_mensaje_traslado,
+            _es_traslado_implicito,
+            _resolver_subreceta_para_traslado,
+        )
+
+        t = "5 tortas de choclate de 005 a 001"
+        self.assertTrue(_es_traslado_implicito(t))
+        self.assertTrue(_es_mensaje_traslado(t))
+        sub = _resolver_subreceta_para_traslado(t)
+        self.assertIsNotNone(sub)
+        self.assertEqual(sub["cod_sub"], "010")
+        self.assertGreater(float(sub["cantidad"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
