@@ -124,5 +124,29 @@ class TestTrasladarPorNombre(unittest.TestCase):
         self.assertNotIn("1224", r.get("mensaje", ""))
 
 
+class TestTrasladoVsProduccion(unittest.TestCase):
+    def test_traslado_no_es_produccion(self):
+        from whatsapp_webhook import _es_mensaje_traslado, _resolver_prod_sub
+
+        texto = "traslada una mp de 005 a 001"
+        self.assertTrue(_es_mensaje_traslado(texto))
+        with patch("whatsapp_webhook._prod_ctx_get", return_value={}):
+            self.assertIsNone(_resolver_prod_sub(texto, "593999999999"))
+
+    def test_bodegas_005_001(self):
+        from whatsapp_webhook import _parse_traslado_bodegas
+
+        r = _parse_traslado_bodegas("traslada una mp de 005 a 001")
+        self.assertIsNotNone(r)
+        self.assertEqual(r["bodega_origen"], "BOD-005")
+        self.assertEqual(r["bodega_destino"], "BOD-001")
+
+    def test_match_sub_no_confunde_bodegas(self):
+        from whatsapp_webhook import _match_sub_codigos_en_texto
+
+        cods = _match_sub_codigos_en_texto("traslada una mp de 005 a 001")
+        self.assertEqual(cods, [])
+
+
 if __name__ == "__main__":
     unittest.main()

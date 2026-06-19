@@ -76,21 +76,347 @@ COMANDOS_OPERATIVO = {
 MSG_NO_AUTORIZADO = "No tienes acceso a este agente."
 MSG_ERROR_PROCESO = (
     "Hubo un error procesando tu mensaje. Intenta de nuevo en un momento.\n"
-    "Para batches de barra: PRODUCIR SUB 051 052 BOD-002 (añade CONFIRMAR para aplicar)."
+    "Cocina: PRODUCIR SUB 006 BOD-001 (pan bao). Barra: PRODUCIR SUB 051 BOD-002. "
+    "Añade CONFIRMAR para aplicar."
 )
 MSG_TIPO_NO_SOPORTADO = (
     "Solo procesamos mensajes de texto (y fotos/PDF de facturas).\n"
-    "Para registrar batch de barra escribe exactamente:\n"
-    "PRODUCIR SUB 053 BOD-002\n"
+    "Para producir una subreceta escribe por ejemplo:\n"
+    "PRODUCIR SUB 006 BOD-001 (cocina) o PRODUCIR SUB 051 BOD-002 (barra)\n"
     "(simula) o añade CONFIRMAR al final para aplicar."
 )
 MSG_PROCESANDO = "Recibí tu mensaje, dame un momento..."
-MSG_BATCH_NO_IDENTIFICADO = (
-    "Entiendo que quieres registrar un batch de barra, pero no identifiqué cuál.\n"
-    "Dime el nombre o el código:\n"
-    "051 Negroni | 052 Tokio Mule | 053 Ron Banana Negroni | 054 Mojito coco\n"
-    "Ejemplo: preparar 1100 ml batch ron banana negroni"
-)
+
+def _msg_menu_produccion_area(area: str) -> str:
+    if area == "cocina":
+        return (
+            "Producción *cocina* (BOD-001). Dime el nombre o código:\n"
+            "• pan bao (006) | salsa ponzu (016) | kimchi (036)\n"
+            "• mayonesa ponzu (017) | salsa gochuyan (009) | char siu (055)\n"
+            "Ejemplo: PRODUCIR SUB 006 BOD-001\n"
+            "o: preparar pan bao"
+        )
+    return (
+        "Producción *barra* (BOD-002). Dime el nombre o código:\n"
+        "• 051 Negroni | 052 Tokio Mule | 053 Ron Banana | 054 Mojito coco\n"
+        "Ejemplo: PRODUCIR SUB 053 BOD-002\n"
+        "o: preparar 1100 ml batch ron banana negroni"
+    )
+
+
+def _msg_batch_preguntar_area() -> str:
+    return (
+        "¿La subreceta es de *barra* o de *cocina*?\n"
+        "Responde: BARRA o COCINA\n\n"
+        "• Barra (BOD-002): batches 051–054\n"
+        "• Cocina (BOD-001): salsas, pan bao, kimchi… (002–050, 055–059)"
+    )
+
+
+def _msg_batch_no_identificado(wa_id: str, area: str | None = None) -> str:
+    from estrategia_config import phone_roles, primary_role
+
+    if area in ("barra", "cocina"):
+        return _msg_menu_produccion_area(area)
+
+    rol = primary_role(wa_id) or ""
+    roles = phone_roles(wa_id)
+    solo_cocina = roles <= {"STAFF_COCINA", "JEFE_COCINA"} and bool(roles)
+    solo_barra = roles <= {"STAFF_BARRA", "JEFE_BARRA"} and bool(roles)
+    if rol in ("STAFF_COCINA", "JEFE_COCINA") and (solo_cocina or not roles & {"STAFF_BARRA", "JEFE_BARRA"}):
+        return _msg_menu_produccion_area("cocina")
+    if rol in ("STAFF_BARRA", "JEFE_BARRA") and (solo_barra or not roles & {"STAFF_COCINA", "JEFE_COCINA"}):
+        return _msg_menu_produccion_area("barra")
+    return _msg_batch_preguntar_area()
+
+
+def _parse_area_produccion(texto: str) -> str | None:
+    t = (texto or "").strip().lower()
+    if not t:
+        return None
+    if t in ("barra", "de barra", "en barra", "1", "b"):
+        return "barra"
+    if t in ("cocina", "de cocina", "en cocina", "2", "c"):
+        return "cocina"
+    if re.search(r"\bbarra\b", t) and not re.search(r"\bcocina\b", t):
+        return "barra"
+    if re.search(r"\bcocina\b", t) and not re.search(r"\bbarra\b", t):
+        return "cocina"
+    return None
+
+
+def _bodega_por_area(area: str | None) -> str | None:
+    if area == "barra":
+        return "BOD-002"
+    if area == "cocina":
+        return "BOD-001"
+    return None
+
+
+def _prod_ctx_get(wa_id: str | None) -> dict:
+    if not wa_id:
+        return {}
+    ctx = _pending_prod_ctx.get(wa_id)
+    if not ctx:
+        return {}
+    if time.monotonic() - ctx.get("at", 0) > _PROD_CTX_TTL_SEC:
+        _pending_prod_ctx.pop(wa_id, None)
+        return {}
+    return ctx
+
+
+def _prod_ctx_touch(wa_id: str, **updates) -> None:
+    ctx = _prod_ctx_get(wa_id) or {}
+    ctx.update(updates)
+    ctx["at"] = time.monotonic()
+    _pending_prod_ctx[wa_id] = ctx
+    area = updates.get("area") or ctx.get("area")
+    if area in ("barra", "cocina"):
+        _pending_prod_area[wa_id] = area
+
+
+def _inferir_area_desde_cods(cods: list[str]) -> str | None:
+    if not cods:
+        return None
+    from codigos_subreceta import cod_sub_canonico
+    from subrecetas_bodegas_stock import SUBRECETAS_BARRA
+
+    areas: set[str] = set()
+    for c in cods:
+        if cod_sub_canonico(c) in SUBRECETAS_BARRA:
+            areas.add("barra")
+        else:
+            areas.add("cocina")
+    return areas.pop() if len(areas) == 1 else None
+
+
+def _resolver_area_produccion(
+    wa_id: str | None,
+    texto: str,
+    cods: list[str] | None = None,
+    area_hint: str | None = None,
+) -> str | None:
+    area = area_hint or _parse_area_produccion(texto)
+    if not area and cods:
+        area = _inferir_area_desde_cods(cods)
+    if not area and wa_id:
+        area = _prod_ctx_get(wa_id).get("area")
+    if not area and wa_id:
+        pa = _pending_prod_area.get(wa_id)
+        if pa in ("barra", "cocina"):
+            area = pa
+    return area
+
+
+def _msg_pedir_nombre_sub(area: str) -> str:
+    bod = _bodega_por_area(area) or "BOD-001"
+    return (
+        f"Producción *{area}* ({bod}). Dime nombre o código y cantidad.\n"
+        f"Ejemplo: preparar aceite jengibre 200gr\n"
+        f"o: PRODUCIR SUB 044 {bod}"
+    )
+
+
+def _conteo_ctx_get(wa_id: str | None) -> dict:
+    if not wa_id:
+        return {}
+    ctx = _pending_conteo_ctx.get(wa_id)
+    if not ctx:
+        return {}
+    if time.monotonic() - ctx.get("at", 0) > _CONTEO_CTX_TTL_SEC:
+        _pending_conteo_ctx.pop(wa_id, None)
+        return {}
+    return ctx
+
+
+def _conteo_ctx_touch(wa_id: str, **updates) -> None:
+    ctx = _conteo_ctx_get(wa_id) or {}
+    ctx.update(updates)
+    ctx["at"] = time.monotonic()
+    _pending_conteo_ctx[wa_id] = ctx
+
+
+def _limpiar_ctx_conteo(wa_id: str) -> None:
+    _pending_conteo_ctx.pop(wa_id, None)
+
+
+def _limpiar_pick_produccion(wa_id: str) -> None:
+    if _pending_prod_area.get(wa_id) == "pick":
+        _pending_prod_area.pop(wa_id, None)
+
+
+def _ultima_linea_usuario(texto: str) -> str:
+    lines = [ln.strip() for ln in (texto or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else (texto or "").strip()
+
+
+def _parse_bodega_conteo(texto: str) -> str | None:
+    m = re.search(r"\b(bod-\d{3})\b", (texto or ""), re.I)
+    if m:
+        return m.group(1).upper()
+    area = _parse_area_produccion(texto)
+    return _bodega_por_area(area)
+
+
+def _es_mensaje_conteo(texto: str, wa_id: str | None = None) -> bool:
+    raw = (texto or "").strip()
+    if not raw:
+        return False
+    t = raw.lower()
+    ultima = _ultima_linea_usuario(raw).lower()
+    if re.search(r"\bconteo", t):
+        return True
+    if re.search(r"inventario\s+f[ií]sico", t):
+        return True
+    if re.search(r"\b(iniciar|nuevo|empezar|crear)\s+conteo\b", t):
+        return True
+    if "conteo_barra" in t or "borrador_conteo" in t or "ciclo de conteo" in t:
+        return True
+    ctx = _conteo_ctx_get(wa_id) if wa_id else {}
+    if not ctx.get("active"):
+        return False
+    for fragment in (ultima, t):
+        if len(fragment) <= 48 and _parse_bodega_conteo(fragment):
+            return True
+    if re.search(r"\b(revisar|iniciar|nuevo|enviar|aprobar)\b", ultima):
+        return True
+    return False
+
+
+def _texto_resumen_conteo_wa(ciclos: list[dict], *, bod: str | None = None) -> str:
+    if bod:
+        ciclos = [c for c in ciclos if (c.get("cod_bodega") or "").upper() == bod.upper()]
+    lines: list[str] = []
+    if not ciclos:
+        if bod:
+            lines.append(f"No hay ciclos de conteo abiertos en {bod}.")
+        else:
+            lines.append("No hay ciclos de conteo abiertos.")
+    else:
+        lines.append(f"Ciclos de conteo abiertos ({len(ciclos)}):\n")
+        for c in ciclos:
+            lines.append(
+                f"*{c.get('sheet_name') or '?'}* ({c.get('cod_bodega')})\n"
+                f"- Estado: {c.get('estado')}\n"
+                f"- Semana: {c.get('semana_iso')} de {c.get('anio')}\n"
+                f"- ID: {c.get('ciclo_id')}\n"
+            )
+    lines.append(
+        "Qué puedes hacer:\n"
+        "• INICIAR CONTEO BOD-001 (cocina) o INICIAR CONTEO BOD-002 (barra)\n"
+        "• Captura en Sheets → menú Conteo → Enviar a Tatami\n"
+        "• Tras envío: APROBAR TODO"
+    )
+    return "\n".join(lines)
+
+
+async def _manejar_mensaje_conteo(wa_id: str, texto: str) -> None:
+    if not (
+        autorizado_tool(wa_id, "conteo_ciclos_abiertos")
+        or autorizado_tool(wa_id, "conteo_iniciar")
+    ):
+        await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+        return
+    _limpiar_pick_produccion(wa_id)
+    _conteo_ctx_touch(wa_id, active=True)
+    t = texto.lower()
+    ultima = _ultima_linea_usuario(texto)
+    bod = _parse_bodega_conteo(texto) or _parse_bodega_conteo(ultima)
+    quiere_iniciar = bool(re.search(r"\b(iniciar|nuevo|empezar|crear)\b", t))
+    if quiere_iniciar and bod:
+        if not autorizado_tool(wa_id, "conteo_iniciar"):
+            await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+            return
+        try:
+            r = await asyncio.to_thread(iniciar_conteo_wa, bod, sobreescribir_hoja=True)
+            out = (
+                f"Conteo iniciado — {r['cod_bodega']} W{r['semana_iso']}/{r['anio']}\n"
+                f"ciclo_id: {r['ciclo_id']}\n"
+                f"Hoja: {r['sheet_name']} ({r['mps_en_snapshot']} MPs)\n"
+                f"URL: {r.get('url_hoja', '')}\n\n"
+                "Pasos:\n" + "\n".join(f"• {x}" for x in r.get("instrucciones", []))
+            )
+        except ConteoOperacionError as e:
+            out = f"No se pudo iniciar conteo: {e.message}"
+        except Exception as e:
+            out = f"Error: {e}"
+        await enviar_mensaje_meta(wa_id, out)
+        return
+    r = await asyncio.to_thread(tool_conteo_ciclos_abiertos, {})
+    ciclos = r.get("ciclos") or []
+    await enviar_mensaje_meta(wa_id, _texto_resumen_conteo_wa(ciclos, bod=bod))
+
+
+def _tokens_sub_nombre(s: str) -> list[str]:
+    t = _normaliza_busqueda_mp(s)
+    t = re.sub(r"[^\w\s]", " ", t)
+    return [w for w in t.split() if len(w) >= 2 and w not in _SUB_STOPWORDS]
+
+
+def _texto_sin_cantidad_sub(texto: str) -> str:
+    sin = re.sub(
+        r"\d[\d.,]*\s*(?:ml|mililitros?|gr|gramos?|g\b|uni|unidades?)",
+        " ",
+        texto or "",
+        flags=re.I,
+    )
+    return re.sub(r"\s+", " ", sin).strip()
+
+
+def _coincide_nombre_sub(nombre: str, texto: str) -> bool:
+    nt = _tokens_sub_nombre(nombre)
+    tt = set(_tokens_sub_nombre(_texto_sin_cantidad_sub(texto)))
+    if not nt or not tt:
+        return False
+    if all(tok in tt for tok in nt):
+        return True
+    nf = "".join(nt)
+    tf = "".join(_tokens_sub_nombre(_texto_sin_cantidad_sub(texto)))
+    return len(nf) >= 4 and nf in tf
+
+
+def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | None:
+    """Cantidad en unidad base (gr/ml) o None → lote estándar en producción."""
+    from unidades_operativas import (
+        parse_cantidad_explicita_base,
+        resolver_cantidad_produccion_sub,
+    )
+
+    expl = parse_cantidad_explicita_base(texto)
+    if expl is not None:
+        return expl
+    if cod_sub:
+        r = resolver_cantidad_produccion_sub(cod_sub, None, texto=texto)
+        if r.get("cantidad_base") is not None:
+            return float(r["cantidad_base"])
+    t = (texto or "").lower()
+    mc2 = re.search(r"\b(\d{4,5})\b", t)
+    if mc2:
+        return float(mc2.group(1).replace(",", "."))
+    return None
+
+
+def _es_pedido_nombres_mp_produccion(texto: str) -> bool:
+    t = (texto or "").lower()
+    if re.search(r"\b(nombre|nombres|bobre|bobres)\b", t) and re.search(r"\bmp", t):
+        return True
+    return bool(re.search(r"\b(muestra|dame|lista|detalle)\b", t) and re.search(r"\b(mp|insumo|ingrediente)", t))
+
+
+def _es_intento_produccion(texto: str, wa_id: str | None = None) -> bool:
+    if _es_mensaje_conteo(texto, wa_id):
+        return False
+    if _es_consulta_lista_subrecetas(texto):
+        return False
+    t = (texto or "").lower()
+    return bool(re.search(r"\b(produc|prepar|registrar|hacer|batch)\w*", t))
+
+
+def _es_orden_produccion_afirmativa(texto: str) -> bool:
+    t = (texto or "").lower().strip()
+    if re.search(r"\b(prepar|produc)\w*", t):
+        return True
+    return bool(t.startswith("si ") and re.search(r"\b(prepar|produc|haz|hacer)\w*", t))
 
 
 def autorizado_tool(telefono: str, tool_name: str) -> bool:
@@ -122,6 +448,15 @@ _wa_locks: dict[str, asyncio.Lock] = {}
 _wa_pending: dict[str, deque] = defaultdict(deque)
 # Última simulación PRODUCIR SUB por wa_id (para "si confirmo" / "confirmo")
 _pending_prod_sub: dict[str, dict] = {}
+# Tras "producir subreceta" sin detalle: "pick" | "barra" | "cocina"
+_pending_prod_area: dict[str, str] = {}
+# Contexto de producción por usuario (área, última sub, catálogo visto)
+_pending_prod_ctx: dict[str, dict] = {}
+_PROD_CTX_TTL_SEC = 900
+_SUB_STOPWORDS = frozenset({"de", "del", "la", "el", "los", "las", "un", "una", "en", "y", "con"})
+# Contexto de conteo físico (no confundir barra/cocina con producción)
+_pending_conteo_ctx: dict[str, dict] = {}
+_CONTEO_CTX_TTL_SEC = 900
 _wa_cola_avisado: set[str] = set()
 MSG_COLA_ESPERA = (
     "Un momento, estoy procesando tu mensaje anterior. Te respondo en seguida."
@@ -145,6 +480,7 @@ from factura_manual_routes import router as factura_manual_router
 app.include_router(factura_manual_router, prefix="/api/factura_manual")
 
 from dashboard_routes import router as dashboard_router
+from google_credentials import google_credentials
 app.include_router(dashboard_router)
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -228,7 +564,6 @@ def conectar_supabase():
 def conectar_sheets():
     global _sheet_workbook
     if _sheet_workbook is None:
-        from google_credentials import google_credentials
 
         creds = google_credentials(SCOPES)
         _sheet_workbook = gspread.Client(auth=creds).open_by_key(
@@ -2225,6 +2560,19 @@ def tool_trasladar_mp(args):
     cod_mp = res_mp["cod_mp"]
     nombre_mp_resuelto = res_mp.get("nombre_mp", "")
 
+    from unidades_operativas import resolver_cantidad_traslado_mp
+
+    conv = resolver_cantidad_traslado_mp(
+        cod_mp,
+        cantidad,
+        unidad_base="",
+        texto=(args.get("texto_original") or args.get("texto") or ""),
+        cantidad_presentacion=args.get("cantidad_presentacion"),
+        unidad_presentacion=(args.get("unidad_presentacion") or args.get("unidad_pedida") or ""),
+    )
+    cantidad = float(conv.get("cantidad_base") or 0)
+    interpretacion_cant = conv.get("interpretacion") or ""
+
     if cantidad <= 0:
         return {"error": "La cantidad debe ser mayor que cero."}
     if not traslado_permitido(bodega_origen, bodega_destino):
@@ -2300,13 +2648,16 @@ def tool_trasladar_mp(args):
 
     if not confirmado:
         etiqueta = (nombre_mp or nombre_mp_resuelto or cod_mp).strip()
+        det_cant = f" ({interpretacion_cant})" if interpretacion_cant else ""
         return {
             "requiere_confirmacion": True,
             "cod_mp_sistema": cod_mp,
             "nombre_mp": etiqueta,
             "stock_origen": round(stock_origen, 4),
+            "cantidad_interpretada": round(cantidad, 4),
+            "interpretacion_cantidad": interpretacion_cant,
             "mensaje": (
-                f"Confirmas trasladar {cantidad} {unidad_base} de {etiqueta} "
+                f"Confirmas trasladar {cantidad:g} {unidad_base} de {etiqueta}{det_cant} "
                 f"de {nombre_bodega(bodega_origen)} "
                 f"a {nombre_bodega(bodega_destino)}? "
                 f"Stock en origen: {round(stock_origen, 4)} {unidad_base}. "
@@ -2813,6 +3164,112 @@ def _buscar_subrecetas(
     return []
 
 
+def _es_consulta_lista_subrecetas(texto: str) -> bool:
+    """Pregunta informativa (catálogo), no comando de producción."""
+    t = re.sub(r"\s+", " ", (texto or "").strip().lower())
+    if not re.search(r"\bsub[- ]?recetas?\b", t):
+        return False
+    if re.search(r"\b(producir|preparar|registrar|confirmar|simular)\b", t):
+        return False
+    if re.search(r"\bproducci", t):
+        return False
+    if re.search(r"\b(costo|precio|ingredientes?|receta de|detalle de)\b", t):
+        if not re.search(
+            r"\b(lista|listado|catalogo|catálogo|todas?|completa|cuales|cuáles|hay|existen)\b",
+            t,
+        ):
+            return False
+    return bool(
+        re.search(r"\b(lista|listado|catalogo|catálogo)\b", t)
+        or re.search(r"\b(cuales|cuáles|que|qué)\s+.*\bsub", t)
+        or re.search(r"\bsubrecetas?\b.*\b(hay|existen|tenemos|disponibles?|todas?)\b", t)
+        or re.search(r"\b(listar|enumera|muestra|dame|entrega)\b.*\bsub", t)
+        or re.search(r"\bsubrecetas?\b.*\b(completa|completo)\b", t)
+        or re.search(r"\btodas?\s+las?\s+subrecetas?\b", t)
+    )
+
+
+def _texto_lista_subrecetas_whatsapp(area: str | None = None) -> str:
+    """Catálogo completo de subrecetas activas en BD_SUBRECETAS."""
+    from codigos_subreceta import cod_sub_sin_prefijo
+    from subrecetas_bodegas_stock import SUBRECETAS_BARRA
+    from subrecetas_detalle import cargar_bd_subrecetas
+
+    cab = cargar_bd_subrecetas(conectar_sheets())
+    barra: list[tuple[str, dict]] = []
+    cocina: list[tuple[str, dict]] = []
+    for cod, info in cab.items():
+        if (info.get("activa") or "SI").strip().upper() == "NO":
+            continue
+        if cod in SUBRECETAS_BARRA:
+            barra.append((cod, info))
+        else:
+            cocina.append((cod, info))
+    barra.sort(key=lambda x: cod_sub_sin_prefijo(x[0]))
+    cocina.sort(key=lambda x: cod_sub_sin_prefijo(x[0]))
+
+    def _linea(cod: str, info: dict) -> str:
+        num = cod_sub_sin_prefijo(cod)
+        nom = (info.get("nombre_subreceta") or "").strip()
+        rend = (info.get("rendimiento_estandar") or "").strip()
+        un = (info.get("unidad") or info.get("unidad_base") or "").strip()
+        if rend and un:
+            return f"• {num} {nom} — {rend} {un}"
+        if rend:
+            return f"• {num} {nom} — {rend}"
+        return f"• {num} {nom}"
+
+    parts: list[str] = []
+    if area in (None, "barra") and barra:
+        lines = [_linea(c, i) for c, i in barra]
+        parts.append(f"*Barra* (BOD-002) — {len(lines)} batches\n" + "\n".join(lines))
+    if area in (None, "cocina") and cocina:
+        lines = [_linea(c, i) for c, i in cocina]
+        parts.append(
+            f"*Cocina* (BOD-001 / BOD-005) — {len(lines)} subrecetas\n" + "\n".join(lines)
+        )
+    if not parts:
+        return "No hay subrecetas activas en BD_SUBRECETAS."
+    if area == "barra":
+        n = len(barra)
+    elif area == "cocina":
+        n = len(cocina)
+    else:
+        n = len(barra) + len(cocina)
+    intro = f"Catálogo de subrecetas activas ({n}):\n\n"
+    footer = (
+        "\n\nPara producir: PRODUCIR SUB <código> BOD-00x\n"
+        "Para costo de una sub: pregunta por nombre o código."
+    )
+    return intro + "\n\n".join(parts) + footer
+
+
+def tool_listar_subrecetas(args):
+    area = (args.get("area") or "").strip().lower() or None
+    if area not in ("barra", "cocina"):
+        area = _parse_area_produccion((args.get("texto") or "")) or area
+    if area not in ("barra", "cocina"):
+        area = None
+    texto = _texto_lista_subrecetas_whatsapp(area=area)
+    from subrecetas_bodegas_stock import SUBRECETAS_BARRA
+    from subrecetas_detalle import cargar_bd_subrecetas
+
+    cab = cargar_bd_subrecetas(conectar_sheets())
+    activas = [
+        c
+        for c, i in cab.items()
+        if (i.get("activa") or "SI").strip().upper() != "NO"
+    ]
+    return {
+        "area": area or "todas",
+        "total_activas": len(activas),
+        "total_barra": sum(1 for c in activas if c in SUBRECETAS_BARRA),
+        "total_cocina": sum(1 for c in activas if c not in SUBRECETAS_BARRA),
+        "texto_whatsapp": texto,
+        "nota": "Copia texto_whatsapp tal cual; no omitas filas.",
+    }
+
+
 def tool_costo_subreceta(args):
     """Costo teórico del lote estándar de una subreceta (MPs + hijos) con desglose."""
     from calcular_costo_subrecetas import (
@@ -3051,24 +3508,161 @@ def tool_produccion_subreceta(args):
         cods = [str(c).strip() for c in cods_raw if str(c).strip()]
     if not cods and args.get("cod_subreceta"):
         cods = [str(args.get("cod_subreceta")).strip()]
+    wa = (args.get("_wa_id") or args.get("registrado_por") or "").strip()
+    from estrategia_config import bodega_default_produccion_sub, validar_bodega_produccion_sub
+
+    bodega = (args.get("bodega") or "").strip().upper()
+    if not bodega and wa:
+        bodega = bodega_default_produccion_sub(wa)
+    if not bodega:
+        bodega = "BOD-002"
+    if wa:
+        err = validar_bodega_produccion_sub(wa, bodega)
+        if err:
+            return {"ok": False, "error": "BODEGA", "mensaje": err}
+    from unidades_operativas import resolver_cantidad_produccion_sub
+
+    texto_orig = (args.get("texto_original") or args.get("texto") or "").strip()
+    cant_raw = float(args["cantidad"]) if args.get("cantidad") is not None else None
+    cant_lotes = args.get("cantidad_lotes")
+    if cant_lotes is not None:
+        try:
+            cant_lotes = float(cant_lotes)
+        except (TypeError, ValueError):
+            cant_lotes = None
+    cantidad_resuelta = None
+    interpretaciones: list[str] = []
+    if cods:
+        conv = resolver_cantidad_produccion_sub(
+            cods[0],
+            cant_raw,
+            texto=texto_orig,
+            cantidad_lotes=cant_lotes,
+        )
+        if conv.get("cantidad_base") is not None:
+            cantidad_resuelta = float(conv["cantidad_base"])
+        if conv.get("interpretacion"):
+            interpretaciones.append(str(conv["interpretacion"]))
     try:
-        return producir_subreceta_wa(
+        out = producir_subreceta_wa(
             cods,
-            bodega=(args.get("bodega") or "BOD-002").strip(),
-            cantidad=float(args["cantidad"]) if args.get("cantidad") is not None else None,
+            bodega=bodega,
+            cantidad=cantidad_resuelta if cantidad_resuelta is not None else cant_raw,
             registrado_por=(args.get("registrado_por") or "WhatsApp").strip(),
             simular=bool(args.get("simular", True)),
             forzar=bool(args.get("forzar")),
             recalcular=bool(args.get("recalcular", True)),
         )
+        if interpretaciones and isinstance(out, dict):
+            tw = (out.get("texto_whatsapp") or "").strip()
+            nota = "Cantidad: " + "; ".join(interpretaciones)
+            out["texto_whatsapp"] = (nota + "\n\n" + tw) if tw else nota
+        return out
     except SubrecetaOperacionError as e:
         return {"ok": False, "error": e.code, "mensaje": e.message}
     except Exception as e:
         return {"ok": False, "error": "ERROR", "mensaje": str(e)}
 
 
-def _parse_producir_sub_comando(texto: str) -> dict | None:
-    """PRODUCIR SUB 051 [1100 ML] BOD-002 CONFIRMAR → plan o registro."""
+_sub_alias_cache: list[tuple[str, str]] | None = None
+_sub_alias_cache_at: float = 0.0
+_SUB_ALIAS_TTL_SEC = 300
+
+_BATCH_ALIASES: list[tuple[tuple[str, ...], str]] = [
+    (("ron banana", "banana negroni", "run banana", "ron ban"), "053"),
+    (("tokio mule", "tokio"), "052"),
+    (("mojito de coco", "mojito coco", "coconut mojito", "coco mojito"), "054"),
+    (("classic negroni", "batch negroni", "negroni"), "051"),
+]
+
+_COCINA_ALIASES: list[tuple[tuple[str, ...], str]] = [
+    (("pan bao",), "006"),
+    (("salsa ponzu", "ponzu"), "016"),
+    (("mayonesa ponzu",), "017"),
+    (("salsa gochuyan", "gochujang"), "009"),
+    (("kimchi caramelizado",), "037"),
+    (("kimchi",), "036"),
+    (("salsa de miso", "salsa miso"), "002"),
+    (("salsa char siu", "char siu"), "055"),
+    (("costillas char siu",), "056"),
+    (("mayonesa siracha", "sriracha"), "015"),
+    (("ensalada de col", "cole slaw"), "012"),
+    (("cebolla curtida", "cebollas curtidas"), "018"),
+    (("huevos ajitama", "ajitama"), "040"),
+    (("salsa agridulce",), "039"),
+    (("salsa tonkatsu",), "042"),
+    (("salsa oriental",), "058"),
+    (("salsa drunken",), "059"),
+    (("aceite jengibre", "aceite de jengibre"), "044"),
+]
+
+
+def _aliases_subrecetas() -> list[tuple[str, str]]:
+    """(frase en minúsculas, código 3 dígitos) — frases largas primero."""
+    global _sub_alias_cache, _sub_alias_cache_at
+    now = time.monotonic()
+    if _sub_alias_cache and (now - _sub_alias_cache_at) < _SUB_ALIAS_TTL_SEC:
+        return _sub_alias_cache
+    pairs: list[tuple[str, str]] = []
+    for groups, cod in _BATCH_ALIASES + _COCINA_ALIASES:
+        for g in groups:
+            pairs.append((g.lower(), cod))
+    try:
+        from codigos_subreceta import cod_sub_canonico
+        from subrecetas_detalle import cargar_bd_subrecetas
+
+        cab = cargar_bd_subrecetas(conectar_sheets())
+        for cod_raw, info in cab.items():
+            if (info.get("activa") or "SI").strip().upper() == "NO":
+                continue
+            cod = cod_sub_canonico(cod_raw).replace("SUB-", "").zfill(3)
+            nom = (info.get("nombre_subreceta") or "").strip().lower()
+            if len(nom) >= 3:
+                pairs.append((nom, cod))
+    except Exception as e:
+        print(f"WARN aliases subrecetas: {e}")
+    seen: set[str] = set()
+    uniq: list[tuple[str, str]] = []
+    for phrase, cod in sorted(pairs, key=lambda x: (-len(x[0]), x[0])):
+        key = f"{phrase}|{cod}"
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append((phrase, cod))
+    _sub_alias_cache = uniq
+    _sub_alias_cache_at = now
+    return uniq
+
+
+def _match_sub_codigos_en_texto(texto: str) -> list[str]:
+    t_clean = _texto_sin_cantidad_sub((texto or "").lower())
+    hits: list[tuple[int, str]] = []
+    for phrase, cod in _aliases_subrecetas():
+        if phrase in t_clean:
+            hits.append((len(phrase) + 100, cod))
+    if not hits:
+        for phrase, cod in _aliases_subrecetas():
+            if _coincide_nombre_sub(phrase, t_clean):
+                hits.append((len(_tokens_sub_nombre(phrase)) * 10 + len(phrase), cod))
+    if not hits and not _es_contexto_bodegas_no_sub(texto):
+        for m in re.finditer(r"(?:sub[- ]?)?(0\d{2})\b", t_clean, re.I):
+            hits.append((3, m.group(1).zfill(3)))
+    if not hits:
+        return []
+    hits.sort(key=lambda x: (-x[0], x[1]))
+    out: list[str] = []
+    seen: set[str] = set()
+    for _, cod in hits:
+        if cod not in seen:
+            seen.add(cod)
+            out.append(cod)
+    return out
+
+
+def _parse_producir_sub_comando(texto: str, wa_id: str | None = None) -> dict | None:
+    """PRODUCIR SUB 006 [500 GR] BOD-001 CONFIRMAR → plan o registro."""
+    from estrategia_config import bodega_default_produccion_sub
+
     raw = (texto or "").strip()
     upper = raw.upper()
     prefix = None
@@ -3082,7 +3676,10 @@ def _parse_producir_sub_comando(texto: str) -> dict | None:
     confirmar = "CONFIRMAR" in upper
     limpio = resto.upper().replace("CONFIRMAR", " ").strip()
     tokens = [t for t in limpio.split() if t]
-    bodega = "BOD-002"
+    bodega = bodega_default_produccion_sub(wa_id) if wa_id else "BOD-002"
+    area = _resolver_area_produccion(wa_id, resto, cods=[])
+    if area:
+        bodega = _bodega_por_area(area) or bodega
     cods: list[str] = []
     cantidad: float | None = None
     _units = {"ML", "GR", "G", "L", "LT", "LITRO", "LITROS", "UNI", "UNIDAD", "UNIDADES", "UND"}
@@ -3097,7 +3694,6 @@ def _parse_producir_sub_comando(texto: str) -> dict | None:
         if not num.isdigit():
             continue
         val = float(tok.replace(",", "."))
-        # Códigos SUB son 3 dígitos (051); cantidades suelen ser >=100 o 4+ dígitos (1100 ml)
         if len(num) >= 4 or val >= 100:
             cantidad = val
         elif not cods:
@@ -3112,12 +3708,63 @@ def _parse_producir_sub_comando(texto: str) -> dict | None:
     return out
 
 
-_BATCH_ALIASES: list[tuple[tuple[str, ...], str]] = [
-    (("ron banana", "banana negroni", "run banana", "ron ban"), "053"),
-    (("tokio mule", "tokio"), "052"),
-    (("mojito de coco", "mojito coco", "coconut mojito", "coco mojito"), "054"),
-    (("classic negroni", "batch negroni", "negroni"), "051"),
-]
+_TRASLADO_VERBS_RE = re.compile(
+    r"\b(traslad|transfi|muev|mové|mueve|mover|pasar|pasa|pase)\w*",
+    re.I,
+)
+_BODEGA_TOKEN = (
+    r"(?:bod[- ]?)?0?\d{3}|cocina|barra|consignacion|consignación|externa|bodega\s+externa"
+)
+_TRASLADO_DE_A_RE = re.compile(
+    rf"\b(?:de|desde)\s+({_BODEGA_TOKEN})\b.*?\b(?:a|hacia|para)\s+({_BODEGA_TOKEN})\b",
+    re.I,
+)
+
+
+def _es_mensaje_traslado(texto: str) -> bool:
+    """Traslado de MP entre bodegas — no confundir con producción de subreceta."""
+    t = (texto or "").strip()
+    if not t:
+        return False
+    if _TRASLADO_VERBS_RE.search(t):
+        return True
+    if re.search(r"\b(traslado|transferencia)\b", t, re.I):
+        return True
+    tl = t.lower()
+    if re.search(r"\bmp\b|materia\s+prima", tl) and _TRASLADO_DE_A_RE.search(t):
+        return True
+    return False
+
+
+def _es_contexto_bodegas_no_sub(texto: str) -> bool:
+    """Los 0xx en «de 005 a 001» son bodegas, no códigos SUB."""
+    if _TRASLADO_DE_A_RE.search(texto or ""):
+        return True
+    t = (texto or "").lower()
+    if re.search(r"\b(?:bod[- ]?)?0\d{2,3}\b", t) and re.search(
+        r"\b(?:de|desde|a|hacia)\b", t
+    ):
+        return True
+    return False
+
+
+def _parse_traslado_bodegas(texto: str) -> dict | None:
+    from bodegas_config import nombre_bodega, resolver_cod_bodega
+
+    m = _TRASLADO_DE_A_RE.search(texto or "")
+    if not m:
+        return None
+    orig = resolver_cod_bodega(m.group(1))
+    dest = resolver_cod_bodega(m.group(2))
+    if not orig or not dest:
+        return None
+    return {
+        "bodega_origen": orig,
+        "bodega_destino": dest,
+        "nombre_origen": nombre_bodega(orig) or orig,
+        "nombre_destino": nombre_bodega(dest) or dest,
+    }
+
 
 _BATCH_KEYWORDS = (
     "batch",
@@ -3125,7 +3772,10 @@ _BATCH_KEYWORDS = (
     "sub receta",
     "sub-0",
     "semi",
-    "barra",
+    "salsa",
+    "pan bao",
+    "bao",
+    "masa",
     "prepar",
     "produc",
     "registr",
@@ -3135,51 +3785,120 @@ _BATCH_KEYWORDS = (
 )
 
 
-def _parse_batch_lenguaje_natural(texto: str) -> dict | None:
-    """Detecta pedidos de batch en lenguaje natural (barra)."""
+def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict | None:
+    """Detecta pedidos de producción en lenguaje natural (barra o cocina)."""
+    from estrategia_config import bodega_default_produccion_sub
+
     raw = (texto or "").strip()
     if not raw:
         return None
+    if _es_mensaje_conteo(raw, wa_id):
+        return None
+    if _es_consulta_lista_subrecetas(raw):
+        return None
+    if _es_mensaje_traslado(raw):
+        return None
     t = raw.lower()
-    cods: list[str] = []
-    for keywords, cod in _BATCH_ALIASES:
-        if any(k in t for k in keywords):
-            cods.append(cod)
-            break
-    if not cods:
-        m = re.search(r"(?:sub[- ]?)(0?5[1-4])\b", t, re.I)
-        if m:
-            cods.append(m.group(1).zfill(3))
-        else:
-            m2 = re.search(r"\b(0?5[1-4])\b", t)
-            if m2:
-                cods.append(m2.group(1).zfill(3))
-    parece_batch = any(k in t for k in _BATCH_KEYWORDS) or bool(cods)
+    cods = _match_sub_codigos_en_texto(raw)
+    parece_batch = (
+        any(k in t for k in _BATCH_KEYWORDS)
+        or bool(cods)
+        or (
+            _es_intento_produccion(raw, wa_id)
+            and bool(_prod_ctx_get(wa_id or "").get("area"))
+        )
+    )
     if not parece_batch:
         return None
+    area = _resolver_area_produccion(wa_id, raw, cods=cods)
+    bod = _bodega_por_area(area) or (
+        bodega_default_produccion_sub(wa_id) if wa_id else "BOD-002"
+    )
     if not cods:
-        return {"cods": [], "bodega": "BOD-002", "confirmar": False, "ambiguo": True}
-    cantidad: float | None = None
-    mc = re.search(r"(\d[\d.,]*)\s*(?:ml|mililitros?|gr|gramos?|g\b)", t, re.I)
-    if mc:
-        cantidad = float(mc.group(1).replace(",", "."))
-    else:
-        mc2 = re.search(r"\b(\d{4,5})\b", t)
-        if mc2:
-            cantidad = float(mc2.group(1).replace(",", "."))
+        return {
+            "cods": [],
+            "bodega": bod,
+            "confirmar": False,
+            "ambiguo": True,
+            "area": area,
+        }
+    cantidad = _extraer_cantidad_sub(raw, cod_sub=cods[0] if cods else None)
     confirmar = any(
         w in t
         for w in ("confirmar", "confirmo", "aplicar", "de verdad", "en serio")
     )
-    return {"cods": cods, "bodega": "BOD-002", "confirmar": confirmar, "cantidad": cantidad}
+    m = re.search(r"\b(bod-\d{3})\b", raw, re.I)
+    if m:
+        bod = m.group(1).upper()
+    area = _resolver_area_produccion(wa_id, raw, cods=cods, area_hint=area)
+    if area:
+        bod = _bodega_por_area(area) or bod
+    return {
+        "cods": cods,
+        "bodega": bod,
+        "confirmar": confirmar,
+        "cantidad": cantidad,
+        "area": area,
+    }
+
+
+def _prod_ctx_update_from_parse(wa_id: str, texto: str, prod_sub: dict) -> None:
+    cods = prod_sub.get("cods") or []
+    area = _resolver_area_produccion(wa_id, texto, cods=cods, area_hint=prod_sub.get("area"))
+    upd: dict = {}
+    if area:
+        upd["area"] = area
+    if cods:
+        upd["last_cods"] = cods
+    if upd:
+        _prod_ctx_touch(wa_id, **upd)
 
 
 def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
+    if _es_mensaje_traslado(texto):
+        return None
+    ctx = _prod_ctx_get(wa_id)
+
     if _es_confirmacion_produccion(texto) and wa_id in _pending_prod_sub:
         return {**_pending_prod_sub[wa_id], "confirmar": True}
-    prod_sub = _parse_producir_sub_comando(texto)
+
+    prod_sub = _parse_producir_sub_comando(texto, wa_id)
     if prod_sub is None:
-        prod_sub = _parse_batch_lenguaje_natural(texto)
+        prod_sub = _parse_batch_lenguaje_natural(texto, wa_id)
+
+    if (prod_sub is None or not prod_sub.get("cods")) and _es_orden_produccion_afirmativa(texto):
+        from estrategia_config import bodega_default_produccion_sub
+
+        cods = _match_sub_codigos_en_texto(texto) or list(ctx.get("last_cods") or [])
+        if cods:
+            area = _resolver_area_produccion(wa_id, texto, cods=cods)
+            cantidad = _extraer_cantidad_sub(texto, cod_sub=cods[0])
+            prod_sub = {
+                "cods": cods,
+                "bodega": _bodega_por_area(area)
+                or (bodega_default_produccion_sub(wa_id) if wa_id else "BOD-002"),
+                "cantidad": cantidad,
+                "confirmar": False,
+                "area": area,
+            }
+
+    if prod_sub is None and ctx.get("area"):
+        from estrategia_config import bodega_default_produccion_sub
+
+        cods = _match_sub_codigos_en_texto(texto)
+        cantidad = _extraer_cantidad_sub(texto, cod_sub=cods[0])
+        if cods and (cantidad is not None or _es_intento_produccion(texto)):
+            area = _resolver_area_produccion(wa_id, texto, cods=cods)
+            prod_sub = {
+                "cods": cods,
+                "bodega": _bodega_por_area(area) or _bodega_por_area(ctx["area"]),
+                "cantidad": cantidad,
+                "confirmar": False,
+                "area": area or ctx.get("area"),
+            }
+
+    if prod_sub is not None:
+        _prod_ctx_update_from_parse(wa_id, texto, prod_sub)
     return prod_sub
 
 
@@ -3239,7 +3958,7 @@ TOOLS = [
     {"name": "pedidos_hoy", "description": "Pedidos que corresponde hacer hoy segun ventana de cada proveedor.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "plato_top_semana", "description": "Top 10 platos mas vendidos esta semana por cantidad.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "buscar_bodega", "description": "En que bodega esta un insumo. Busca por nombre_mp (como lo dice el usuario). Si hay varios parecidos devuelve requiere_eleccion: pregunta al usuario por NOMBRE, sin pedir codigos.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
-    {"name": "trasladar_mp", "description": "Trasladar insumo entre bodegas. Usa nombre_mp (obligatorio salvo que ya resolviste el producto en el turno anterior). NUNCA inventes cod_mp_sistema. Si requiere_eleccion, pregunta al usuario cual producto por nombre. confirmado=false primero, luego true tras confirmacion.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string", "description": "Nombre del producto como lo dice el usuario (ej. Buchanan 18, papa)"}, "cod_mp_sistema": {"type": "string", "description": "Solo si la tool anterior devolvio opciones y ya eligio el usuario; no inventar"}, "bodega_origen": {"type": "string"}, "bodega_destino": {"type": "string"}, "cantidad": {"type": "number"}, "confirmado": {"type": "boolean"}}, "required": ["nombre_mp","bodega_origen","bodega_destino","cantidad","confirmado"]}},
+    {"name": "trasladar_mp", "description": "Trasladar insumo entre bodegas. Usa nombre_mp (obligatorio salvo que ya resolviste el producto en el turno anterior). NUNCA inventes cod_mp_sistema. Si requiere_eleccion, pregunta al usuario cual producto por nombre. confirmado=false primero, luego true tras confirmacion. CANTIDADES: el inventario está en unidad_base (gr/ml/uni). Si el usuario dice botella/caja/pack/lata o un número pequeño de unidades de compra (ej. «una botella de Buchanan's Master»), pasa cantidad=1 (o N) y unidad_presentacion=botella; el sistema convierte con factor_conversion del catálogo (ej. 750 ml). Si dice ml/gr explícitos, pasa esa cantidad en unidad base.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string", "description": "Nombre del producto como lo dice el usuario (ej. Buchanan 18, papa)"}, "cod_mp_sistema": {"type": "string", "description": "Solo si la tool anterior devolvio opciones y ya eligio el usuario; no inventar"}, "bodega_origen": {"type": "string"}, "bodega_destino": {"type": "string"}, "cantidad": {"type": "number", "description": "Cantidad pedida (unidad base o unidades de compra si va con unidad_presentacion)"}, "cantidad_presentacion": {"type": "number", "description": "Ej. 1 para «una botella», 6 para «6 cajas»"}, "unidad_presentacion": {"type": "string", "description": "botella, caja, pack, lata, etc."}, "unidad_pedida": {"type": "string", "description": "Alias de unidad_presentacion"}, "texto_original": {"type": "string", "description": "Frase del usuario para interpretar cantidades naturales"}, "confirmado": {"type": "boolean"}}, "required": ["nombre_mp","bodega_origen","bodega_destino","cantidad","confirmado"]}},
     {"name": "ventas_por_plato", "description": "Ventas al cliente (hist_ventas): total del periodo + ranking SOLO productos en BD_PRODUCTOS (carta) si incluir_productos=true. Para un mes pasado usa mes_nombre (ej. mayo) + anio, o fecha_ini/fecha_fin ISO — NO uses periodo=mes (eso es solo el mes calendario en curso). periodo hoy/semana/mes actual. Devuelve texto_whatsapp: copialo tal cual.", "input_schema": {"type": "object", "properties": {"periodo": {"type": "string", "enum": ["hoy","semana","mes"]}, "fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}, "anio": {"type": "integer"}, "mes": {"type": "integer", "description": "1-12"}, "mes_nombre": {"type": "string", "description": "ej. mayo, junio"}, "orden": {"type": "string", "enum": ["usd", "cantidad"]}, "limite": {"type": "integer"}, "incluir_productos": {"type": "boolean", "description": "Si false: responde solo total del periodo y pregunta si quiere detalle de productos."}, "sin_truncar": {"type": "boolean", "description": "Si true: incluye todos los productos (sin '... y N más')."}}, "required": []}},
     {"name": "rotacion_baja", "description": "Productos con nula o baja rotacion en los ultimos N dias.", "input_schema": {"type": "object", "properties": {"dias": {"type": "integer"}, "umbral_unidades": {"type": "number"}}, "required": []}},
     {"name": "stock_ingrediente", "description": "Stock de un insumo por nombre_mp (como lo dice el usuario). Si varios parecidos: requiere_eleccion y pregunta por nombre, sin codigos MP.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
@@ -3247,13 +3966,14 @@ TOOLS = [
     {"name": "costo_plato", "description": "Costo teorico en USD de preparar 1 plato vendido (food cost estandar): suma MPs y subrecetas en BD_RECETAS_DETALLE. Por defecto devuelve texto_whatsapp con desglose; si incluir_ingredientes=false responde solo el total y pregunta si quieres ingredientes.", "input_schema": {"type": "object", "properties": {"cod_receta": {"type": "string"}, "nombre_plato": {"type": "string"}, "nombre_receta": {"type": "string"}, "variedad_smart_menu": {"type": "string"}, "variedad": {"type": "string"}, "incluir_ingredientes": {"type": "boolean"}, "top": {"type": "integer", "description": "Cuantos ingredientes principales listar cuando incluir_ingredientes=true (default 25)."}}, "required": []}},
     {"name": "receta_ingredientes", "description": "Ingredientes y costos de un plato vendido (cantidades por 1 unidad + USD por linea y total). Misma logica que costo_plato; usar cuando pidan receta, ingredientes, gramajes o desglose de un plato (ej. TARTA VASCA, BAO). cod_receta o nombre_plato; opcional variedad.", "input_schema": {"type": "object", "properties": {"cod_receta": {"type": "string"}, "nombre_plato": {"type": "string"}, "nombre_receta": {"type": "string"}, "variedad_smart_menu": {"type": "string"}, "variedad": {"type": "string"}}, "required": []}},
     {"name": "costo_subreceta", "description": "Costo teorico del lote estandar de una subreceta (BD_SUBRECETAS_DETALLE): MPs y subrecetas hijas con cantidades, unidad_base, costo_unitario y costo_linea; total lote y costo por unidad de rendimiento. Usar para salsas, masas, rellenos, etc. Pasa cod_subreceta (ej. 010) o nombre_subreceta (substring).", "input_schema": {"type": "object", "properties": {"cod_subreceta": {"type": "string"}, "nombre_subreceta": {"type": "string"}}, "required": []}},
+    {"name": "listar_subrecetas", "description": "Lista COMPLETA de subrecetas activas en BD_SUBRECETAS (barra batches 051-054 en BOD-002 y cocina 002-050/055-059 en BOD-001). Usar cuando pregunten que subrecetas hay, catalogo, lista completa, todas las subs. Devuelve texto_whatsapp: copialo tal cual sin omitir filas. area opcional: barra o cocina.", "input_schema": {"type": "object", "properties": {"area": {"type": "string", "enum": ["barra", "cocina"]}, "texto": {"type": "string", "description": "Mensaje original del usuario para inferir area"}}, "required": []}},
     {"name": "auditar_costos_recetas", "description": "Auditoria de costos de platos inflados y lineas MP sospechosas en recetas (precio/kg mal como USD/gr, garnish caro en bebidas, sin costo). Usar cuando pidan revisar costos de carta, platos raros caros, o validar recetas vs costos. Devuelve top platos_inflados y lineas_mp_sospechosas con flags.", "input_schema": {"type": "object", "properties": {"umbral_plato": {"type": "number"}, "umbral_linea": {"type": "number"}, "top_platos": {"type": "integer"}, "top_lineas": {"type": "integer"}}, "required": []}},
     {"name": "ventas_dia", "description": "Ventas de un dia (fecha YYYY-MM-DD; default hoy): total oficial, tickets, dia_semana y etiqueta_fecha calculados. Devuelve texto_whatsapp: copialo tal cual. Si incluir_productos=false (default): solo total + pregunta si quiere detalle de platos. Si incluir_productos=true: incluye ranking en platos (orden total_usd desc; limite si piden top N).", "input_schema": {"type": "object", "properties": {"fecha": {"type": "string"}, "limite": {"type": "integer"}, "incluir_productos": {"type": "boolean", "description": "Si false: solo total del dia y pregunta si quiere detalle de productos/platos."}}, "required": []}},
     {"name": "ventas_por_dia", "description": "Desglose de ventas POR CADA DIA en un mes o rango: total diario y tickets. Usar cuando pidan valor por dia, desglose diario, ventas dia a dia de un mes (ej. mayo). Pasa mes_nombre=mayo + anio, o fecha_ini/fecha_fin (2026-05-01 a 2026-05-31). Devuelve texto_whatsapp: copialo tal cual. NO usar ventas_por_plato para esto.", "input_schema": {"type": "object", "properties": {"fecha_ini": {"type": "string"}, "fecha_fin": {"type": "string"}, "anio": {"type": "integer"}, "mes": {"type": "integer"}, "mes_nombre": {"type": "string"}, "periodo": {"type": "string", "enum": ["hoy","semana","mes"], "description": "Solo mes/semana/hoy actual si no pasas mes_nombre ni fechas."}, "incluir_dias_cero": {"type": "boolean", "description": "Si true, lista dias sin ventas con 0 USD."}}, "required": []}},
     {"name": "conteo_iniciar", "description": "Inicia inventario físico cíclico: crea conteo_ciclo en Supabase, carga snapshot de MPs de la bodega y genera pestaña CONTEO/CONTEO_BARRA en el maestro Sheets. Usar cuando pidan empezar conteo, toma de inventario, inventario físico de cocina o barra. cod_bodega obligatorio (BOD-001 cocina, BOD-002 barra). semana_iso/anio opcionales (default semana ISO actual). Devuelve ciclo_id, URL de la hoja e instrucciones.", "input_schema": {"type": "object", "properties": {"cod_bodega": {"type": "string"}, "anio": {"type": "integer"}, "semana_iso": {"type": "integer"}, "sheet_name": {"type": "string"}, "reemplazar_snapshot": {"type": "boolean"}, "sobreescribir_hoja": {"type": "boolean"}, "responsable_nombre": {"type": "string"}, "notas": {"type": "string"}}, "required": ["cod_bodega"]}},
     {"name": "conteo_listar_ciclos", "description": "Lista ciclos de inventario físico en Supabase (conteo_ciclo). Filtros opcionales estado y cod_bodega.", "input_schema": {"type": "object", "properties": {"estado": {"type": "string"}, "cod_bodega": {"type": "string"}, "limit": {"type": "integer"}}, "required": []}},
     {"name": "conteo_ciclos_abiertos", "description": "Resumen de ciclos de conteo que NO están CONTABILIZADO ni ANULADO (borradores activos).", "input_schema": {"type": "object", "properties": {}, "required": []}},
-    {"name": "produccion_subreceta", "description": "Registra preparación/producción de subreceta(s) en barra o cocina: baja MPs del detalle y entra stock del semi (SUB-xxx) en mov_inventario. Por defecto SIMULA (no escribe); usar simular=false o comando con CONFIRMAR para aplicar. Eduardo barra: bodega BOD-002, subs 051-054. cod_subreceta puede ser lista o string. Devuelve texto_whatsapp.", "input_schema": {"type": "object", "properties": {"cod_subreceta": {"type": "array", "items": {"type": "string"}, "description": "Códigos 051 052 etc."}, "codigos": {"type": "array", "items": {"type": "string"}}, "bodega": {"type": "string", "description": "BOD-002 barra (default) o BOD-001 cocina"}, "cantidad": {"type": "number", "description": "ml/gr/unidades producidas; default rendimiento estándar del lote"}, "simular": {"type": "boolean", "description": "true=solo muestra plan (default true para evaluar)"}, "forzar": {"type": "boolean", "description": "true=registrar aunque falte stock MP"}, "confirmar": {"type": "boolean"}, "registrado_por": {"type": "string"}, "recalcular": {"type": "boolean"}}, "required": ["cod_subreceta"]}},
+    {"name": "produccion_subreceta", "description": "Registra preparación/producción de subreceta(s) en barra o cocina: baja MPs del detalle y entra stock del semi (SUB-xxx) en mov_inventario. Por defecto SIMULA (no escribe); usar simular=false o comando con CONFIRMAR para aplicar. Eduardo barra: bodega BOD-002, subs 051-054. cod_subreceta puede ser lista o string. CANTIDADES: inventario del semi en gr/ml según rendimiento_estandar del lote. Si el usuario dice «una torta», «6 tortas de chocolate» o «un lote», pasa cantidad_lotes o cantidad=N y el sistema multiplica por rendimiento_estandar (ej. torta chocolate 1054 gr). Si dice gr/ml explícitos, pasa cantidad en unidad base. Sin cantidad → un lote estándar. Devuelve texto_whatsapp.", "input_schema": {"type": "object", "properties": {"cod_subreceta": {"type": "array", "items": {"type": "string"}, "description": "Códigos 051 052 etc."}, "codigos": {"type": "array", "items": {"type": "string"}}, "bodega": {"type": "string", "description": "BOD-002 barra (default) o BOD-001 cocina"}, "cantidad": {"type": "number", "description": "ml/gr/unidades producidas; o número de lotes si es entero pequeño"}, "cantidad_lotes": {"type": "number", "description": "Ej. 6 para «6 tortas»"}, "texto_original": {"type": "string"}, "simular": {"type": "boolean", "description": "true=solo muestra plan (default true para evaluar)"}, "forzar": {"type": "boolean", "description": "true=registrar aunque falte stock MP"}, "confirmar": {"type": "boolean"}, "registrado_por": {"type": "string"}, "recalcular": {"type": "boolean"}}, "required": ["cod_subreceta"]}},
 ]
 
 TOOL_FNS = {
@@ -3280,6 +4000,7 @@ TOOL_FNS = {
     "costo_plato": tool_costo_plato,
     "receta_ingredientes": tool_receta_ingredientes,
     "costo_subreceta": tool_costo_subreceta,
+    "listar_subrecetas": tool_listar_subrecetas,
     "auditar_costos_recetas": lambda a: tool_auditar_costos_recetas(a),
     "ventas_dia":        tool_ventas_dia,
     "ventas_por_dia":    tool_ventas_por_dia,
@@ -3320,13 +4041,15 @@ Si preguntan cuanto cuesta hacer/preparar un plato (food cost, costo de receta, 
 - Si piden ingredientes/detalle/desglose: llama costo_plato con incluir_ingredientes=true (opcional top) y responde con el texto_whatsapp.
 Si piden ingredientes, gramajes, cantidades o desglose con costos de un plato (receta de venta), usa receta_ingredientes (o costo_plato; mismo resultado).
 Si preguntan costo, ingredientes o cantidades de una subreceta o semi (salsa, masa, relleno), usa costo_subreceta con cod_subreceta o nombre_subreceta; enumera todas las lineas del desglose (MP y SUB hijo) con cantidad, unidad y USD.
+Si preguntan que subrecetas hay, catalogo, lista completa o todas las subs (barra y cocina), usa listar_subrecetas y copia texto_whatsapp completo sin resumir.
 Si piden revisar platos con costos muy altos, bebidas caras en costo, o MPs mal valorados en recetas, usa auditar_costos_recetas.
 Inventario físico / conteo cíclico: para INICIAR un nuevo conteo (crear ciclo + snapshot + hoja Sheets), usa conteo_iniciar con cod_bodega BOD-001 (cocina, hoja CONTEO) o BOD-002 (barra, hoja CONTEO_BARRA). No pidas ejecutar scripts de terminal al usuario. Para ver borradores activos usa conteo_ciclos_abiertos. Tras capturar en Sheets, el envío es menú Conteo → Enviar a Tatami; la aprobación por WA es APROBAR TODO cuando exista sesión de revisión.
 Comando directo (sin tool): el usuario puede escribir INICIAR CONTEO BOD-001.
-Producción subrecetas (barra/cocina): tool produccion_subreceta o comando PRODUCIR SUB 051 052 053 054 BOD-002 (simula). Para aplicar de verdad: añadir CONFIRMAR al final del mensaje. Inventario del semi vive en BD_MP_SISTEMA como SUB-051, SUB-052… por bodega (stock 0 hasta producir o contar).
+Producción subrecetas (barra/cocina): tool produccion_subreceta o comando PRODUCIR SUB <código> [cantidad] BOD-00x (simula). Cocina (Jacky/staff): BOD-001, subs 002-050 y 055-059 (ej. 006 pan bao, 016 salsa ponzu). Barra (Eduardo): BOD-002, subs 051-054. También por nombre: «preparar pan bao» o «producir salsa ponzu». Para aplicar: CONFIRMAR al final. Inventario del semi = SUB-xxx en BD_MP_SISTEMA por bodega.
 No uses markdown, asteriscos ni negritas. Solo texto plano.
 Materias primas e inventario: el personal NO conoce codigos MP. Siempre trabaja por NOMBRE del producto. NUNCA inventes cod_mp_sistema ni uses codigos de factura/catalogo. Si hay varios productos parecidos (ej. varios Buchanan), la tool devuelve requiere_eleccion: pregunta al usuario cual es, listando nombres y stock por bodega. No menciones codigos MP al usuario salvo que el mismo los pida.
-Traslados: trasladar_mp con nombre_mp (ej. Buchanan 18). Bodegas: cocina, barra, consignacion, externa (o BOD-001/002/003/005). Rutas: cocina<->barra<->externa; consignacion<->barra. confirmado=false para preview, luego true si confirma.
+Traslados: trasladar_mp con nombre_mp (ej. Buchanan 18). Bodegas: cocina, barra, consignacion, externa (o BOD-001/002/003/005; también «005»=externa, «001»=cocina). «de 005 a 001» o «de externa a cocina» son BODEGAS, no códigos de subreceta. Si dicen «traslada una mp de 005 a 001» sin nombrar el producto, pregunta QUÉ insumo (por nombre). Rutas: cocina<->barra<->externa; consignacion<->barra. confirmado=false para preview, luego true si confirma. CANTIDADES en traslados: el stock está en unidad_base (gr/ml). Si piden «una botella», «2 cajas», etc., pasa cantidad=N y unidad_presentacion (botella/caja/pack); el sistema usa factor_conversion del catálogo (botella 750 ml → 750). Si piden ml/gr explícitos, pasa esa cantidad. En la confirmación explica la conversión si hubo.
+Producción subrecetas — cantidades: rendimiento_estandar = 1 lote (ej. torta chocolate 1054 gr). «Producir una torta» o «6 tortas» → cantidad_lotes=1 o 6 (o cantidad=6 si es entero pequeño); el sistema multiplica por rendimiento. Sin cantidad → un lote estándar.
 Stock y PAR: el stock es por bodega; el par_level es global por materia prima (suma stock en todas las bodegas para comparar).
 Descargo de ventas solo afecta cocina o barra segun cod_bodega en la receta.
 Cuando la fuente sea hist_ventas aclaralo como aproximado.
@@ -3482,6 +4205,11 @@ def llamar_agente(mensaje, telefono):
         messages.append({"role": "assistant", "content": response.content})
         tool_results = []
         texto_ventas_directo = ""
+        ultimo_user = ""
+        for m in reversed(messages):
+            if m.get("role") == "user" and isinstance(m.get("content"), str):
+                ultimo_user = m["content"]
+                break
         for tc in tool_calls:
             fn = TOOL_FNS.get(tc.name)
             try:
@@ -3491,6 +4219,11 @@ def llamar_agente(mensaje, telefono):
                     inp = dict(tc.input or {})
                     if tc.name in ("costo_plato", "receta_ingredientes", "costo_subreceta"):
                         inp["_ocultar_costos"] = not puede_ver_costos(telefono)
+                    if tc.name == "produccion_subreceta":
+                        inp["_wa_id"] = telefono
+                        inp.setdefault("registrado_por", telefono)
+                    if tc.name in ("trasladar_mp", "produccion_subreceta") and ultimo_user:
+                        inp.setdefault("texto_original", ultimo_user)
                     result = fn(inp) if fn else {"error": f"Tool {tc.name} no encontrada"}
             except Exception as e:
                 result = {"error": str(e)}
@@ -3500,6 +4233,7 @@ def llamar_agente(mensaje, telefono):
                     "ventas_dia",
                     "ventas_por_dia",
                     "compras_facturas_rango",
+                    "listar_subrecetas",
                 )
                 and isinstance(result, dict)
                 and (result.get("texto_whatsapp") or "").strip()
@@ -3551,6 +4285,56 @@ async def _responder_wa(wa_id: str, texto: str) -> bool:
     if not ok:
         print(f"[Meta] _responder_wa fallo wa_id={wa_id!r} len={len(out)}")
     return ok
+
+
+async def _enviar_texto_largo_wa(wa_id: str, texto: str) -> bool:
+    """Envía texto largo en varios mensajes si hace falta."""
+    partes = _partir_mensajes_whatsapp(texto)
+    ok = True
+    for i, parte in enumerate(partes, 1):
+        out = _asegurar_texto_whatsapp(parte)
+        if not await enviar_mensaje_meta(wa_id, out):
+            print(f"[Meta] _enviar_texto_largo_wa fallo parte {i}/{len(partes)} wa_id={wa_id!r}")
+            ok = False
+            break
+    return ok
+
+
+async def enviar_typing_meta(telefono: str, message_id: str) -> bool:
+    """Marca leído y muestra «escribiendo…» (hasta 25 s o hasta enviar respuesta)."""
+    phone_number_id = (os.getenv("WHATSAPP_PHONE_NUMBER_ID") or "").strip()
+    token = (os.getenv("WHATSAPP_ACCESS_TOKEN") or "").strip()
+    if not phone_number_id or not token or not (message_id or "").strip():
+        return False
+
+    url = f"https://graph.facebook.com/v25.0/{phone_number_id}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id.strip(),
+        "typing_indicator": {"type": "text"},
+    }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+        if resp.status_code == 200:
+            return True
+        print(f"[Meta] typing fallo {resp.status_code}: {resp.text[:300]}")
+    except Exception as e:
+        print(f"[Meta] typing error: {e}")
+    return False
+
+
+async def _feedback_procesando(wa_id: str, msg: dict | None = None) -> None:
+    """Indicador de escritura si hay message_id; si no, mensaje de espera."""
+    message_id = ((msg or {}).get("id") or "").strip()
+    if message_id and await enviar_typing_meta(wa_id, message_id):
+        return
+    await enviar_mensaje_meta(wa_id, MSG_PROCESANDO)
 
 
 async def enviar_mensaje_meta(telefono: str, texto: str) -> bool:
@@ -3663,14 +4447,42 @@ async def _wa_runner(wa_id: str) -> None:
                 asyncio.create_task(_wa_runner(wa_id))
 
 
-async def _manejar_produccion_sub(wa_id: str, prod_sub: dict) -> None:
+async def _manejar_produccion_sub(wa_id: str, prod_sub: dict, msg: dict | None = None) -> None:
+    from estrategia_config import bodega_default_produccion_sub, validar_bodega_produccion_sub
+
     if not _autorizado_produccion_sub(wa_id):
         await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
         return
     if prod_sub.get("ambiguo") or not prod_sub.get("cods"):
-        await enviar_mensaje_meta(wa_id, MSG_BATCH_NO_IDENTIFICADO)
+        area = _resolver_area_produccion(
+            wa_id,
+            "",
+            cods=prod_sub.get("cods"),
+            area_hint=prod_sub.get("area"),
+        )
+        ctx = _prod_ctx_get(wa_id)
+        if area in ("barra", "cocina"):
+            _prod_ctx_touch(wa_id, area=area)
+            if ctx.get("catalog_seen"):
+                await enviar_mensaje_meta(wa_id, _msg_pedir_nombre_sub(area))
+            else:
+                await enviar_mensaje_meta(wa_id, _msg_menu_produccion_area(area))
+            return
+        msg = _msg_batch_no_identificado(wa_id)
+        if msg == _msg_batch_preguntar_area():
+            _pending_prod_area[wa_id] = "pick"
+        await enviar_mensaje_meta(wa_id, msg)
         return
-    await enviar_mensaje_meta(wa_id, MSG_PROCESANDO)
+    area = _resolver_area_produccion(wa_id, "", cods=prod_sub.get("cods"))
+    _prod_ctx_touch(wa_id, area=area, last_cods=prod_sub.get("cods"))
+    _limpiar_ctx_conteo(wa_id)
+    bodega = (prod_sub.get("bodega") or bodega_default_produccion_sub(wa_id)).strip().upper()
+    err = validar_bodega_produccion_sub(wa_id, bodega)
+    if err:
+        await enviar_mensaje_meta(wa_id, err)
+        return
+    prod_sub = {**prod_sub, "bodega": bodega}
+    await _feedback_procesando(wa_id, msg)
     try:
         r = await asyncio.to_thread(
             producir_subreceta_wa,
@@ -3684,6 +4496,7 @@ async def _manejar_produccion_sub(wa_id: str, prod_sub: dict) -> None:
         out = r.get("texto_whatsapp") or str(r)
         if prod_sub["confirmar"]:
             _pending_prod_sub.pop(wa_id, None)
+            _pending_prod_area.pop(wa_id, None)
         else:
             _pending_prod_sub[wa_id] = {
                 "cods": prod_sub["cods"],
@@ -3705,6 +4518,9 @@ async def _manejar_produccion_sub(wa_id: str, prod_sub: dict) -> None:
 async def procesar_mensaje(wa_id: str, msg: dict) -> None:
     """Procesa un mensaje de Meta en background (POST /webhook ya respondió 200)."""
     try:
+        from wa_chat_guard import touch_wa_chat
+
+        touch_wa_chat(wa_id)
         if get_rol(wa_id) is None:
             await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
             return
@@ -3716,19 +4532,63 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             if not texto:
                 await _responder_wa(
                     wa_id,
-                    "No recibí texto en el mensaje. Escribe tu consulta o usa "
-                    "PRODUCIR SUB 051 BOD-002 para batch de barra.",
+                    "No recibí texto en el mensaje. Escribe tu consulta o, para producir:\n"
+                    "Cocina: PRODUCIR SUB 006 BOD-001 · Barra: PRODUCIR SUB 051 BOD-002",
                 )
                 return
             print(f"[Meta] {wa_id}: {texto}")
 
             texto_upper = texto.strip().upper()
 
-            # Batch / producción — primero (lenguaje natural o PRODUCIR SUB)
-            prod_sub = _resolver_prod_sub(texto, wa_id)
-            if prod_sub is not None:
-                await _manejar_produccion_sub(wa_id, prod_sub)
+            # Conteo físico — antes que producción (barra/cocina no son batches)
+            if _es_mensaje_conteo(texto, wa_id):
+                await _manejar_mensaje_conteo(wa_id, texto)
                 return
+
+            # Respuesta BARRA / COCINA tras "producir subreceta" sin detalle
+            if _pending_prod_area.get(wa_id) == "pick":
+                area = _parse_area_produccion(texto)
+                if area:
+                    _prod_ctx_touch(wa_id, area=area)
+                    ctx = _prod_ctx_get(wa_id)
+                    if ctx.get("catalog_seen"):
+                        await enviar_mensaje_meta(wa_id, _msg_pedir_nombre_sub(area))
+                    else:
+                        await enviar_mensaje_meta(wa_id, _msg_menu_produccion_area(area))
+                    return
+
+            # Catálogo de subrecetas (no confundir con producción)
+            if _es_consulta_lista_subrecetas(texto):
+                _pending_prod_sub.pop(wa_id, None)
+                ctx = _prod_ctx_get(wa_id)
+                area = _parse_area_produccion(texto) or ctx.get("area")
+                _prod_ctx_touch(wa_id, catalog_seen=True, area=area or ctx.get("area"))
+                lista = await asyncio.to_thread(_texto_lista_subrecetas_whatsapp, area)
+                await _enviar_texto_largo_wa(wa_id, lista)
+                return
+
+            # Re-mostrar simulación con nombres de MP (tras pedido explícito)
+            if _es_pedido_nombres_mp_produccion(texto) and wa_id in _pending_prod_sub:
+                await _manejar_produccion_sub(
+                    wa_id, {**_pending_prod_sub[wa_id], "confirmar": False}, msg
+                )
+                return
+
+            # Batch / producción — no si el mensaje es traslado entre bodegas
+            prod_sub = None if _es_mensaje_traslado(texto) else _resolver_prod_sub(texto, wa_id)
+            if prod_sub is not None:
+                await _manejar_produccion_sub(wa_id, prod_sub, msg)
+                return
+
+            # Recordar subreceta mencionada aunque el mensaje vaya al LLM
+            cods_men = [] if _es_mensaje_traslado(texto) else _match_sub_codigos_en_texto(texto)
+            if cods_men:
+                ctx0 = _prod_ctx_get(wa_id)
+                _prod_ctx_touch(
+                    wa_id,
+                    last_cods=cods_men,
+                    area=_inferir_area_desde_cods(cods_men) or ctx0.get("area"),
+                )
 
             # Comandos de conteo físico (solo si el mensaje ES un comando de conteo)
             sesion_conteo = get_sesion_activa(wa_id)
@@ -3922,7 +4782,7 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     return
 
             # Agente general
-            await enviar_mensaje_meta(wa_id, MSG_PROCESANDO)
+            await _feedback_procesando(wa_id, msg)
             try:
                 respuesta = await asyncio.to_thread(llamar_agente, texto, wa_id)
             except Exception as e:
