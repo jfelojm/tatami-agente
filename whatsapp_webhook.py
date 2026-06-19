@@ -41,7 +41,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-traslado-v4"
+TATAMI_WA_BUILD = "20250619-traslado-v5"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -420,6 +420,11 @@ def _es_intento_produccion(texto: str, wa_id: str | None = None) -> bool:
         t,
     ):
         return False
+    if re.search(r"\b(subreceta|semi)\b", t) and not re.search(
+        r"\b(producir|preparar|registrar|hacer|batch)\w*",
+        t,
+    ):
+        return False
     return bool(
         re.search(
             r"\b(producir|produccion|producción|preparar|preparacion|preparación|registrar|hacer|batch)\w*",
@@ -473,7 +478,9 @@ _SUB_STOPWORDS = frozenset({"de", "del", "la", "el", "los", "las", "un", "una", 
 # Contexto de conteo físico (no confundir barra/cocina con producción)
 _pending_conteo_ctx: dict[str, dict] = {}
 _CONTEO_CTX_TTL_SEC = 900
-_wa_cola_avisado: set[str] = set()
+# Contexto de traslado pendiente (insumo/bodegas incompletos o aclaración sub)
+_pending_traslado: dict[str, dict] = {}
+_TRASLADO_CTX_TTL_SEC = 900
 MSG_COLA_ESPERA = (
     "Un momento, estoy procesando tu mensaje anterior. Te respondo en seguida."
 )
@@ -3610,6 +3617,7 @@ _COCINA_ALIASES: list[tuple[tuple[str, ...], str]] = [
     (("salsa oriental",), "058"),
     (("salsa drunken",), "059"),
     (("aceite jengibre", "aceite de jengibre"), "044"),
+    (("torta de chocolate", "tortas de chocolate", "torta chocolate"), "010"),
 ]
 
 
@@ -3851,77 +3859,225 @@ def _extraer_nombre_mp_traslado(texto: str) -> str:
     return cand
 
 
-async def _manejar_traslado_mp_wa(wa_id: str, texto: str, msg: dict | None) -> None:
-    """Traslados MP: ruta directa (sin producción ni LLM con historial confuso)."""
+def _traslado_ctx_get(wa_id: str) -> dict:
+    ctx = _pending_traslado.get(wa_id)
+    if not ctx:
+        return {}
+    if time.monotonic() - ctx.get("at", 0) > _TRASLADO_CTX_TTL_SEC:
+        _pending_traslado.pop(wa_id, None)
+        return {}
+    return ctx
+
+
+def _traslado_ctx_touch(wa_id: str, **updates) -> None:
+    ctx = _traslado_ctx_get(wa_id) or {}
+    ctx.update(updates)
+    ctx["at"] = time.monotonic()
+    _pending_traslado[wa_id] = ctx
+
+
+def _texto_item_traslado(texto: str) -> str:
+    """Fragmento con el ítem, sin verbos ni tramo de bodegas."""
+    t = (texto or "").strip()
+    m = _TRASLADO_DE_A_RE.search(t)
+    if m:
+        t = t[: m.start()].strip()
+    t = re.sub(
+        r"^(?:traslad\w*|transfi\w*|muev\w*|pasar?|pasa)\s+",
+        "",
+        t,
+        flags=re.I,
+    )
+    t = re.sub(r"^(?:(?:una?|un)\s+)?(?:(?:mp|materia\s+prima)\s+)?", "", t, flags=re.I)
+    return t.strip(" .,;")
+
+
+def _es_aclaracion_traslado_sub(texto: str) -> bool:
+    t = (texto or "").strip().lower()
+    if not t:
+        return False
+    if t in ("subreceta", "semi", "es sub", "es subreceta", "es una subreceta", "es un semi"):
+        return True
+    return bool(
+        re.search(r"\b(es\s+)?(una?\s+)?(subreceta|sub|semi)\b", t)
+        and not re.search(r"\b(producir|preparar)\w*", t)
+    )
+
+
+def _resolver_subreceta_para_traslado(texto: str) -> dict | None:
+    """Subreceta semi (SUB-xxx) + cantidad en unidad base para traslado entre bodegas."""
+    from descargo_subreceta import pseudo_mp_cod
+    from unidades_operativas import resolver_cantidad_produccion_sub
+
+    frag = _texto_item_traslado(texto)
+    if not frag or _normaliza_busqueda_mp(frag) in _NOMBRES_MP_GENERICOS:
+        frag = _texto_item_traslado(texto) or (texto or "")
+
+    cods = _match_sub_codigos_en_texto(frag) or _match_sub_codigos_en_texto(texto)
+    if not cods:
+        return None
+
+    cod = cods[0]
+    conv = resolver_cantidad_produccion_sub(cod, None, texto=texto)
+    cant = conv.get("cantidad_base")
+    if cant is None:
+        rend = float(conv.get("rendimiento_estandar") or 0)
+        cant = rend if rend > 0 else None
+
+    nombre = cod
+    unidad = "gr"
+    try:
+        from codigos_subreceta import cod_sub_canonico
+        from subrecetas_detalle import cargar_bd_subrecetas
+
+        info = cargar_bd_subrecetas(conectar_sheets()).get(cod_sub_canonico(cod), {})
+        nombre = (info.get("nombre_subreceta") or cod).strip()
+        unidad = (info.get("unidad") or info.get("unidad_base") or "gr").strip()
+    except Exception:
+        pass
+
+    return {
+        "cod_sub": cod,
+        "cod_mp": pseudo_mp_cod(cod),
+        "nombre": nombre,
+        "cantidad": cant,
+        "unidad": unidad,
+        "interpretacion": conv.get("interpretacion") or "",
+    }
+
+
+async def _manejar_aclaracion_traslado(wa_id: str, texto: str, msg: dict | None) -> bool:
+    if not _es_aclaracion_traslado_sub(texto):
+        return False
+    ctx = _traslado_ctx_get(wa_id)
+    if not ctx:
+        return False
+    texto_orig = (ctx.get("texto") or ctx.get("nombre") or "").strip()
+    if not texto_orig:
+        return False
+    await _manejar_traslado_mp_wa(wa_id, texto_orig, msg, forzar_sub=True)
+    return True
+
+
+async def _manejar_traslado_mp_wa(
+    wa_id: str,
+    texto: str,
+    msg: dict | None,
+    *,
+    forzar_sub: bool = False,
+) -> None:
+    """Traslados MP o subreceta semi (SUB-xxx) — sin LLM."""
     from unidades_operativas import parse_cantidad_explicita_base, parse_cantidad_presentacion
 
     _limpiar_ctx_produccion(wa_id)
+    texto = _normalizar_texto_comando_wa(texto)
     bod = _parse_traslado_bodegas(texto)
+    sub = _resolver_subreceta_para_traslado(texto)
+    if not sub and forzar_sub:
+        sub = _resolver_subreceta_para_traslado(_texto_item_traslado(texto))
     nombre = _extraer_nombre_mp_traslado(texto)
+    if sub:
+        nombre = ""
+
+    _traslado_ctx_touch(wa_id, texto=texto, bod=bod, nombre=nombre, sub=sub)
 
     await _feedback_procesando(wa_id, msg)
 
-    if not bod and not nombre:
+    if not bod and not nombre and not sub:
         out = (
             "Para trasladar dime:\n"
-            "1. Qué insumo (nombre, ej. papa, buchanans master)\n"
-            "2. De qué bodega a cuál (ej. de 005 a 001 = externa → cocina)\n\n"
-            "Ejemplo: Traslada papa de externa a cocina"
-        )
-        await enviar_mensaje_meta(wa_id, out)
-        return
-
-    if not nombre:
-        out = (
-            f"Traslado {bod['nombre_origen']} → {bod['nombre_destino']}.\n"
-            "¿Qué insumo quieres mover? Dime el nombre (ej. papa, buchanans master)."
+            "1. Qué insumo o subreceta (ej. papa, torta de chocolate, SUB-010)\n"
+            "2. De qué bodega a cuál (ej. de cocina a externa, o de 005 a 001)\n"
+            "3. Cantidad (ej. 5 tortas, 1 botella, 750 ml)\n\n"
+            "Ejemplo: Traslada 5 tortas de chocolate de cocina a externa"
         )
         await enviar_mensaje_meta(wa_id, out)
         return
 
     if not bod:
+        etiqueta = (sub or {}).get("nombre") or nombre or "el producto"
         out = (
-            f"Insumo: {nombre}.\n"
-            "¿De qué bodega a cuál? Ej: de 005 a 001 (externa → cocina) "
+            f"Insumo/subreceta: {etiqueta}.\n"
+            "¿De qué bodega a cuál? Ej: de cocina a externa "
             "o de consignación a barra."
         )
         await enviar_mensaje_meta(wa_id, out)
         return
 
+    if not nombre and not sub:
+        out = (
+            f"Traslado {bod['nombre_origen']} → {bod['nombre_destino']}.\n"
+            "¿Qué mueves? Nombre de MP o subreceta (ej. papa, torta de chocolate)."
+        )
+        await enviar_mensaje_meta(wa_id, out)
+        return
+
+    cod_mp = None
+    nombre_mp = nombre
+    interpretacion = ""
     cantidad = 1.0
-    expl = parse_cantidad_explicita_base(texto)
-    pres = parse_cantidad_presentacion(texto)
-    if expl is not None:
-        cantidad = expl
-    elif pres:
-        cantidad = pres[0]
+
+    if sub:
+        cod_mp = sub["cod_mp"]
+        nombre_mp = sub["nombre"]
+        if sub.get("cantidad"):
+            cantidad = float(sub["cantidad"])
+        interpretacion = sub.get("interpretacion") or ""
+    else:
+        expl = parse_cantidad_explicita_base(texto)
+        pres = parse_cantidad_presentacion(texto)
+        if expl is not None:
+            cantidad = expl
+        elif pres:
+            cantidad = pres[0]
+
+    args: dict = {
+        "bodega_origen": bod["bodega_origen"],
+        "bodega_destino": bod["bodega_destino"],
+        "cantidad": cantidad,
+        "confirmado": False,
+        "texto_original": texto,
+    }
+    if cod_mp:
+        args["cod_mp_sistema"] = cod_mp
+        args["nombre_mp"] = nombre_mp
+    else:
+        args["nombre_mp"] = nombre_mp
 
     try:
-        r = await asyncio.to_thread(
-            tool_trasladar_mp,
-            {
-                "nombre_mp": nombre,
-                "bodega_origen": bod["bodega_origen"],
-                "bodega_destino": bod["bodega_destino"],
-                "cantidad": cantidad,
-                "confirmado": False,
-                "texto_original": texto,
-            },
-        )
+        r = await asyncio.to_thread(tool_trasladar_mp, args)
     except Exception as e:
         await enviar_mensaje_meta(wa_id, f"Error al planificar traslado: {e}")
+        return
+
+    if r.get("error") and not sub:
+        sub2 = _resolver_subreceta_para_traslado(texto) or _resolver_subreceta_para_traslado(
+            nombre or ""
+        )
+        if sub2:
+            await _manejar_traslado_mp_wa(wa_id, texto, msg, forzar_sub=True)
+            return
+        out = (
+            f"No encontré «{nombre_mp}» como materia prima.\n"
+            "Si es una *subreceta* (semi en inventario), responde: es subreceta\n"
+            "o repite con el nombre exacto de BD_SUBRECETAS (ej. torta de chocolate)."
+        )
+        await enviar_mensaje_meta(wa_id, out)
         return
 
     if r.get("requiere_eleccion"):
         out = r.get("mensaje") or "Varios productos coinciden; indica cuál por nombre."
     elif r.get("requiere_confirmacion"):
         out = r.get("mensaje") or "Confirma el traslado."
+        if interpretacion and interpretacion not in out:
+            out = f"{interpretacion}\n\n{out}"
     elif r.get("error"):
         out = str(r.get("error"))
     elif r.get("mensaje"):
         out = r["mensaje"]
     else:
         out = str(r)
+    _pending_traslado.pop(wa_id, None)
     await enviar_mensaje_meta(wa_id, out)
 
 
@@ -4207,7 +4363,7 @@ Comando directo (sin tool): el usuario puede escribir INICIAR CONTEO BOD-001.
 Producción subrecetas (barra/cocina): tool produccion_subreceta o comando PRODUCIR SUB <código> [cantidad] BOD-00x (simula). Cocina (Jacky/staff): BOD-001, subs 002-050 y 055-059 (ej. 006 pan bao, 016 salsa ponzu). Barra (Eduardo): BOD-002, subs 051-054. También por nombre: «preparar pan bao» o «producir salsa ponzu». Para aplicar: CONFIRMAR al final. Inventario del semi = SUB-xxx en BD_MP_SISTEMA por bodega.
 No uses markdown, asteriscos ni negritas. Solo texto plano.
 Materias primas e inventario: el personal NO conoce codigos MP. Siempre trabaja por NOMBRE del producto. NUNCA inventes cod_mp_sistema ni uses codigos de factura/catalogo. Si hay varios productos parecidos (ej. varios Buchanan), la tool devuelve requiere_eleccion: pregunta al usuario cual es, listando nombres y stock por bodega. No menciones codigos MP al usuario salvo que el mismo los pida.
-Traslados: trasladar_mp con nombre_mp (ej. Buchanan 18). Bodegas: cocina, barra, consignacion, externa (o BOD-001/002/003/005; también «005»=externa, «001»=cocina). «de 005 a 001» o «de externa a cocina» son BODEGAS, no códigos de subreceta. Si dicen «traslada una mp de 005 a 001» sin nombrar el producto, pregunta QUÉ insumo (por nombre). Rutas: cocina<->barra<->externa; consignacion<->barra. confirmado=false para preview, luego true si confirma. CANTIDADES en traslados: el stock está en unidad_base (gr/ml). Si piden «una botella», «2 cajas», etc., pasa cantidad=N y unidad_presentacion (botella/caja/pack); el sistema usa factor_conversion del catálogo (botella 750 ml → 750). Si piden ml/gr explícitos, pasa esa cantidad. En la confirmación explica la conversión si hubo.
+Traslados: trasladar_mp con nombre_mp (ej. Buchanan 18). Bodegas: cocina, barra, consignacion, externa (o BOD-001/002/003/005; también «005»=externa, «001»=cocina). «de 005 a 001» o «de externa a cocina» son BODEGAS, no códigos de subreceta. Subrecetas (semis SUB-xxx) también se trasladan entre bodegas: «5 tortas de chocolate de cocina a externa» = cantidad en gr/ml según rendimiento × lotes. NO uses produccion_subreceta para trasladar stock ya producido. Si dicen «es subreceta» tras un traslado, es aclaración de tipo, no pedido de producir.
 Producción subrecetas — cantidades: rendimiento_estandar = 1 lote (ej. torta chocolate 1054 gr). «Producir una torta» o «6 tortas» → cantidad_lotes=1 o 6 (o cantidad=6 si es entero pequeño); el sistema multiplica por rendimiento. Sin cantidad → un lote estándar.
 Stock y PAR: el stock es por bodega; el par_level es global por materia prima (suma stock en todas las bodegas para comparar).
 Descargo de ventas solo afecta cocina o barra segun cod_bodega en la receta.
@@ -4712,7 +4868,11 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             texto_upper = texto.strip().upper()
 
-            # Traslados MP — PRIMERO (antes de estados pendientes de producción)
+            # Aclaración «es subreceta» tras un traslado pendiente
+            if await _manejar_aclaracion_traslado(wa_id, texto, msg):
+                return
+
+            # Traslados MP / subreceta — PRIMERO (antes de estados pendientes de producción)
             if _es_mensaje_traslado(texto):
                 await _manejar_traslado_mp_wa(wa_id, texto, msg)
                 return
@@ -4958,7 +5118,11 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     await enviar_mensaje_meta(wa_id, out)
                     return
 
-            # Agente general
+            # Agente general — nunca LLM si el mensaje es traslado
+            if _parece_intento_traslado(texto):
+                await _manejar_traslado_mp_wa(wa_id, texto, msg)
+                return
+
             await _feedback_procesando(wa_id, msg)
             try:
                 respuesta = await asyncio.to_thread(llamar_agente, texto, wa_id)

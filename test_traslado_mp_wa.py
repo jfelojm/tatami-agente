@@ -184,5 +184,40 @@ class TestTrasladoVsProduccion(unittest.TestCase):
             self.assertIsNone(_resolver_prod_sub("trasladar producto", "59399"))
 
 
+    def test_es_subreceta_no_es_produccion(self):
+        from whatsapp_webhook import _es_intento_produccion, _es_aclaracion_traslado_sub
+
+        self.assertFalse(_es_intento_produccion("es una subreceta"))
+        self.assertTrue(_es_aclaracion_traslado_sub("es una subreceta"))
+
+    def test_resolver_sub_torta_cantidad(self):
+        from whatsapp_webhook import _resolver_subreceta_para_traslado
+
+        with patch(
+            "whatsapp_webhook._match_sub_codigos_en_texto",
+            return_value=["010"],
+        ):
+            with patch(
+                "whatsapp_webhook.conectar_sheets",
+                side_effect=RuntimeError("offline"),
+            ):
+                with patch(
+                    "unidades_operativas.cargar_rendimiento_subrecetas",
+                    return_value={
+                        "SUB-010": {
+                            "rendimiento_estandar": 1054.0,
+                            "unidad": "gr",
+                            "nombre_subreceta": "Torta de chocolate",
+                        }
+                    },
+                ):
+                    r = _resolver_subreceta_para_traslado(
+                        "trasladar 5 tortas de chocolate de cocina a externa"
+                    )
+        self.assertIsNotNone(r)
+        self.assertEqual(r["cod_sub"], "010")
+        self.assertEqual(r["cantidad"], 5270.0)
+
+
 if __name__ == "__main__":
     unittest.main()
