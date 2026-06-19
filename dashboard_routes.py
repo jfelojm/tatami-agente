@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import time
+import traceback
 import unicodedata
 from collections import defaultdict
 from datetime import date
@@ -93,7 +95,7 @@ def _norm_punto_venta(raw: str) -> str:
 
 
 def _parse_punto_venta_query(punto_venta: list[str] | None) -> set[str] | None:
-    if not punto_venta:
+    if not punto_venta or not isinstance(punto_venta, (list, tuple)):
         return None
     pv_filtros: set[str] = set()
     for raw in punto_venta:
@@ -957,36 +959,45 @@ def dashboard_rentabilidad(
     plato: list[str] | None = Query(default=None),
 ):
     _check_token(token)
-    sb = _get_sb()
-    catalogo = _cargar_catalogo()
-    desde = _sanitize_fecha(desde)
-    hasta = _sanitize_fecha(hasta)
-    if not desde or not hasta:
-        raise HTTPException(status_code=400, detail="desde y hasta son obligatorios")
-    pv_filtros = _parse_punto_venta_query(punto_venta)
-    cat_filtros = [_norm_key(c) for c in _parse_list_query(categoria)]
-    platos_filtro = _parse_list_query(plato)
-    ventas = _filtrar_ventas_catalogo(
-        _query_hist_ventas(sb, desde=desde, hasta=hasta),
-        catalogo,
-        pv_filtros=pv_filtros,
-        cat_filtros=cat_filtros,
-        platos_filtro=platos_filtro,
-    )
-    entradas = [
-        m for m in _query_mov_inventario(sb, desde=desde, hasta=hasta)
-        if (m.get("tipo_mov") or "") in ("ENTRADA", "ENTRADA_COSTO_HIST")
-    ]
-    return build_rentabilidad_from_catalog(
-        rows_ventas=ventas,
-        rows_entrada=entradas,
-        catalogo=catalogo,
-        resolver=_resolver_producto,
-        neto_fn=_neto_linea,
-        desde=date.fromisoformat(desde),
-        hasta=date.fromisoformat(hasta),
-        agrup=agrup,
-    )
+    try:
+        sb = _get_sb()
+        catalogo = _cargar_catalogo()
+        desde = _sanitize_fecha(desde)
+        hasta = _sanitize_fecha(hasta)
+        if not desde or not hasta:
+            raise HTTPException(status_code=400, detail="desde y hasta son obligatorios")
+        pv_filtros = _parse_punto_venta_query(punto_venta)
+        cat_filtros = [_norm_key(c) for c in _parse_list_query(categoria)]
+        platos_filtro = _parse_list_query(plato)
+        ventas = _filtrar_ventas_catalogo(
+            _query_hist_ventas(sb, desde=desde, hasta=hasta),
+            catalogo,
+            pv_filtros=pv_filtros,
+            cat_filtros=cat_filtros,
+            platos_filtro=platos_filtro,
+        )
+        entradas = [
+            m for m in _query_mov_inventario(sb, desde=desde, hasta=hasta)
+            if (m.get("tipo_mov") or "") in ("ENTRADA", "ENTRADA_COSTO_HIST")
+        ]
+        return build_rentabilidad_from_catalog(
+            rows_ventas=ventas,
+            rows_entrada=entradas,
+            catalogo=catalogo,
+            resolver=_resolver_producto,
+            neto_fn=_neto_linea,
+            desde=date.fromisoformat(desde),
+            hasta=date.fromisoformat(hasta),
+            agrup=agrup,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[dashboard] rentabilidad ERROR: {e}\n{traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error calculando rentabilidad: {e!s}"[:500],
+        ) from e
 
 
 @router.get("/api/dashboard/roturas")

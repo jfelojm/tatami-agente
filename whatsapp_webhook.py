@@ -42,7 +42,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-traslado-v9"
+TATAMI_WA_BUILD = "20250619-dash-v10"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -5540,10 +5540,14 @@ async def webhook(Body: str = Form(...), From: str = Form(...)):
 
 @app.get("/")
 def health():
+    from google_credentials import has_google_credentials
+
     return {
         "status": "ok",
         "agente": "Tatami Bao Bar v4",
         "tools": len(TOOLS),
         "wa_build": TATAMI_WA_BUILD,
         "git_commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:12],
+        "anthropic_key_set": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip()),
+        "google_creds_set": has_google_credentials(),
     }

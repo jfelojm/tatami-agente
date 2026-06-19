@@ -2,12 +2,51 @@
 
 from __future__ import annotations
 
+import time
 from collections import defaultdict
 from datetime import date
 
 from dashboard_services.periodos import acumulado_anio, periodo_anterior, resumen_comparativo
 from matching_productos import cargar_bd_productos
 from recetas_detalle import agrupar_por_plato, cargar_bd_recetas_detalle, clave_plato
+
+_RENT_CACHE_TTL_SEC = 300
+_recetas_por_plato_cache: dict[str, list] | None = None
+_recetas_cache_at: float = 0.0
+_costo_sub_cache: dict[str, float] | None = None
+_costo_sub_cache_at: float = 0.0
+
+
+def _recetas_por_plato_cached() -> dict[str, list]:
+    global _recetas_por_plato_cache, _recetas_cache_at
+    now = time.monotonic()
+    if _recetas_por_plato_cache is not None and (now - _recetas_cache_at) < _RENT_CACHE_TTL_SEC:
+        return _recetas_por_plato_cache
+    recetas = cargar_bd_recetas_detalle()
+    _recetas_por_plato_cache = agrupar_por_plato(recetas)
+    _recetas_cache_at = now
+    return _recetas_por_plato_cache
+
+
+def _costo_sub_cached() -> dict[str, float]:
+    global _costo_sub_cache, _costo_sub_cache_at
+    now = time.monotonic()
+    if _costo_sub_cache is not None and (now - _costo_sub_cache_at) < _RENT_CACHE_TTL_SEC:
+        return _costo_sub_cache
+    try:
+        from calcular_costo_subrecetas import calcular_costos, cargar_contexto_subrecetas
+
+        cab, por_padre, costos_mp, _ = cargar_contexto_subrecetas()
+        resultados, _ = calcular_costos(cab, por_padre, costos_mp)
+        _costo_sub_cache = {
+            k: v.get("costo_unitario_estandar") or v.get("costo_unitario") or 0
+            for k, v in resultados.items()
+        }
+    except Exception as e:
+        print(f"WARN costo_sub rentabilidad: {e}")
+        _costo_sub_cache = {}
+    _costo_sub_cache_at = now
+    return _costo_sub_cache
 
 
 def _to_float(v: object, default: float = 0.0) -> float:
@@ -129,17 +168,10 @@ def build_rentabilidad_from_catalog(
     hasta: date,
     agrup: str = "mes",
 ) -> dict:
-    recetas = cargar_bd_recetas_detalle()
-    recetas_por_plato = agrupar_por_plato(recetas)
+    recetas_por_plato = _recetas_por_plato_cached()
     costo_mp_global = costo_promedio_mp_periodo(rows_entrada)
     costo_mp_buckets = costo_mp_por_buckets(rows_entrada, agrup)
-
-    try:
-        from calcular_costo_subrecetas import calcular_costos
-
-        costo_sub = {k: v.get("costo_unitario_estandar", 0) for k, v in calcular_costos().items()}
-    except Exception:
-        costo_sub = {}
+    costo_sub = _costo_sub_cached()
 
     platos: dict[str, dict] = {}
     costo_cache: dict[str, dict[str, float]] = {}
