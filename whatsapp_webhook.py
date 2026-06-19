@@ -42,7 +42,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-traslado-v7"
+TATAMI_WA_BUILD = "20250619-receta-v8"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -400,7 +400,64 @@ def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | Non
     return None
 
 
+def _es_consulta_receta_plato(texto: str) -> bool:
+    """Ingredientes/receta de plato vendido (BD_RECETAS), no producción de semi."""
+    if _es_mensaje_traslado(texto) or _es_consulta_lista_subrecetas(texto):
+        return False
+    t = (texto or "").lower()
+    if re.search(r"\b(producir|produccion|producción|preparar|registrar|hacer|batch)\w*", t):
+        return False
+    if re.search(r"\b(subreceta|semi)\b", t) and not re.search(
+        r"\b(plato|fuerte|carta|menu|venta)\b", t
+    ):
+        return False
+    if re.search(r"\bplato\s+fuerte\b", t) and re.search(r"\b(receta|ingredientes?)\b", t):
+        return True
+    if re.search(r"\b(receta|ingredientes?|gramajes?|composición|composicion)\b", t):
+        if re.search(r"\b(plato|fuerte|carta|menu|venta|bowl|ramen|sushi|bao|tarta)\b", t):
+            return True
+        if re.search(r"\b(de|del)\s+\S", t):
+            return True
+        if re.search(r"\b(dame|dime|lista|muéstrame|muestrame|quiero\s+saber)\b", t):
+            return True
+    return False
+
+
+_GENERICO_NOMBRE_PLATO = frozenset({
+    "un plato fuerte",
+    "plato fuerte",
+    "un plato",
+    "plato",
+    "la receta",
+    "receta",
+    "los ingredientes",
+    "ingredientes",
+    "un plato de la carta",
+    "la carta",
+})
+
+
+def _extraer_nombre_plato_receta(texto: str) -> str:
+    t = (texto or "").strip()
+    if not t:
+        return ""
+    patterns = (
+        r"(?:ingredientes?|receta|gramajes?)\s+(?:de|del)\s+(?:la?\s+)?(.+?)[\?\.]*$",
+        r"(?:dame|dime|muéstrame|muestrame)\s+(?:los\s+)?(?:ingredientes?|receta)\s+(?:de|del)\s+(?:la?\s+)?(.+?)[\?\.]*$",
+        r"quiero\s+saber\s+(?:la\s+)?receta\s+(?:de|del)\s+(?:la?\s+)?(.+?)[\?\.]*$",
+    )
+    for pat in patterns:
+        m = re.search(pat, t, re.I)
+        if m:
+            cand = m.group(1).strip(" .,;")
+            if cand.lower() not in _GENERICO_NOMBRE_PLATO:
+                return cand
+    return ""
+
+
 def _es_pedido_nombres_mp_produccion(texto: str) -> bool:
+    if _es_consulta_receta_plato(texto):
+        return False
     t = (texto or "").lower()
     if re.search(r"\b(nombre|nombres|bobre|bobres)\b", t) and re.search(r"\bmp", t):
         return True
@@ -414,8 +471,9 @@ def _es_intento_produccion(texto: str, wa_id: str | None = None) -> bool:
         return False
     if _es_consulta_lista_subrecetas(texto):
         return False
+    if _es_consulta_receta_plato(texto):
+        return False
     t = (texto or "").lower()
-    # «trasladar producto» no es producción (evitar \bproduc\w* → producto)
     if re.search(r"\bproducto?s?\b", t) and not re.search(
         r"\b(producir|produccion|producción|preparar|preparacion|preparación)\w*",
         t,
@@ -4012,6 +4070,68 @@ async def _manejar_aclaracion_traslado(wa_id: str, texto: str, msg: dict | None)
     return True
 
 
+async def _manejar_consulta_receta_plato_wa(
+    wa_id: str, texto: str, msg: dict | None
+) -> None:
+    """Receta / ingredientes de plato fuerte — directo desde Sheets, sin LLM."""
+    nombre = _extraer_nombre_plato_receta(texto)
+    if not nombre:
+        await enviar_mensaje_meta(
+            wa_id,
+            "¿De qué plato quieres la receta o los ingredientes?\n"
+            "Ej: bibimbap, bao de langosta, tarta vasca, negroni",
+        )
+        return
+
+    await _feedback_procesando(wa_id, msg)
+    ocultar = not puede_ver_costos(wa_id)
+    try:
+        r = await asyncio.to_thread(
+            tool_receta_ingredientes,
+            {
+                "nombre_plato": nombre,
+                "incluir_ingredientes": True,
+                "_ocultar_costos": ocultar,
+            },
+        )
+    except Exception as e:
+        print(f"[Meta] consulta receta plato wa_id={wa_id!r}: {e}")
+        await enviar_mensaje_meta(
+            wa_id,
+            f"No pude consultar la receta de «{nombre}». Intenta con el nombre exacto del menú.",
+        )
+        return
+
+    if not isinstance(r, dict):
+        await enviar_mensaje_meta(wa_id, "No pude interpretar la consulta de receta.")
+        return
+
+    texto_out = (r.get("texto_whatsapp") or "").strip()
+    if texto_out:
+        await _enviar_texto_largo_wa(wa_id, texto_out)
+        return
+
+    if r.get("ambiguo") and r.get("opciones"):
+        lines = [f"Varias coincidencias para «{nombre}»:", ""]
+        for op in r["opciones"][:12]:
+            nom = (op.get("nombre_receta") or "").strip()
+            var = (op.get("variedad_smart_menu") or "").strip()
+            cod = (op.get("cod_receta") or "").strip()
+            line = f"• {nom}" + (f" ({var})" if var else "")
+            if cod:
+                line += f" [{cod}]"
+            lines.append(line)
+        lines.append("\nRepite con el nombre exacto o la variedad.")
+        await enviar_mensaje_meta(wa_id, "\n".join(lines))
+        return
+
+    await enviar_mensaje_meta(
+        wa_id,
+        (r.get("mensaje") or r.get("error") or f"No encontré «{nombre}» en BD_RECETAS_DETALLE.")
+        + "\n\nPrueba otro nombre del menú (ej. BIBIMBAP COREANO).",
+    )
+
+
 async def _manejar_traslado_mp_wa(
     wa_id: str,
     texto: str,
@@ -4154,8 +4274,6 @@ _BATCH_KEYWORDS = (
     "produc",
     "registr",
     "hacer",
-    "necesito",
-    "quiero",
 )
 
 
@@ -4169,6 +4287,8 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
     if _es_mensaje_conteo(raw, wa_id):
         return None
     if _es_consulta_lista_subrecetas(raw):
+        return None
+    if _es_consulta_receta_plato(raw):
         return None
     if _es_mensaje_traslado(raw):
         return None
@@ -4538,6 +4658,17 @@ def _system_completo() -> str:
     return SYSTEM + "\n\n" + _contexto_fechas_ecuador()
 
 def llamar_agente(mensaje, telefono):
+    try:
+        return _llamar_agente_inner(mensaje, telefono)
+    except Exception as e:
+        print(f"[Agente] llamar_agente fatal telefono={telefono!r}: {e}")
+        return (
+            "Error al contactar el modelo. "
+            f"Detalle técnico: {e!s}. Intenta en unos minutos."
+        )
+
+
+def _llamar_agente_inner(mensaje, telefono):
     if get_rol(telefono) is None:
         return MSG_NO_AUTORIZADO
     client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -4968,6 +5099,12 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             # Conteo físico — antes que producción (barra/cocina no son batches)
             if _es_mensaje_conteo(texto, wa_id):
                 await _manejar_mensaje_conteo(wa_id, texto)
+                return
+
+            # Receta / ingredientes de plato fuerte — sin LLM
+            if _es_consulta_receta_plato(texto):
+                print(f"[Meta] {wa_id}: route=receta_plato")
+                await _manejar_consulta_receta_plato_wa(wa_id, texto, msg)
                 return
 
             # Respuesta BARRA / COCINA tras "producir subreceta" sin detalle
