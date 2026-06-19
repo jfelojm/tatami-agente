@@ -43,7 +43,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-railway-v16"
+TATAMI_WA_BUILD = "20250619-railway-v17"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -3332,18 +3332,27 @@ def _fecha_consulta_ventas_simple(texto: str) -> str:
 def _es_consulta_ventas_simple(texto: str) -> bool:
     """Ventas de hoy/ayer o total del día — sin LLM."""
     t = re.sub(r"\s+", " ", (texto or "").strip().lower())
+    t = t.replace("ó", "o").replace("í", "i").replace("ú", "u").replace("é", "e").replace("á", "a")
     if not t:
         return False
-    if not re.search(r"\b(ventas?|vendimos|facturacion|facturación|facturado)\b", t):
+    tiene_ventas = bool(
+        re.search(
+            r"\b(ventas?|vendimos|vendio|vendido|facturacion|facturado|facturo)\b",
+            t,
+        )
+        or re.search(r"\bse vend", t)
+        or re.search(r"\bvendid", t)
+    )
+    if not tiene_ventas:
         return False
     if re.search(
-        r"\b(por plato|por dia|por día|ranking|productos|platos|semana|mes|"
+        r"\b(por plato|por dia|por dia|ranking|productos|platos|semana|mes|"
         r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|"
         r"octubre|noviembre|diciembre|desglose)\b",
         t,
     ):
         return False
-    if re.search(r"\b(hoy|ayer|del dia|del día|de hoy|de ayer)\b", t) and len(t.split()) <= 12:
+    if re.search(r"\b(hoy|ayer|del dia|de hoy|de ayer)\b", t) and len(t.split()) <= 12:
         return True
     if t in (
         "ventas",
@@ -3354,18 +3363,19 @@ def _es_consulta_ventas_simple(texto: str) -> bool:
         "vendimos",
         "vendimos hoy",
         "cuanto vendimos",
-        "cuánto vendimos",
         "cuanto vendimos hoy",
-        "cuánto vendimos hoy",
         "dame las ventas",
         "dame las ventas de hoy",
         "dame ventas",
         "dime las ventas",
         "ventas de hoy",
+        "cuanto se vendio",
+        "cuanto se vendio hoy",
+        "que se vendio hoy",
     ):
         return True
     return bool(
-        re.search(r"\b(cuanto|cuánto|total|dame|dime|muestrame|muéstrame|quiero saber)\b", t)
+        re.search(r"\b(cuanto|total|dame|dime|muestrame|quiero saber)\b", t)
         and len(t.split()) <= 8
     )
 
