@@ -43,7 +43,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-railway-v14"
+TATAMI_WA_BUILD = "20250619-railway-v15"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -3304,20 +3304,30 @@ def _es_palabra_subreceta_sola(texto: str) -> bool:
     return t in ("subreceta", "subrecetas", "sub receta", "sub recetas")
 
 
+def _fecha_consulta_ventas_simple(texto: str) -> str:
+    """Fecha ISO para consulta ventas del día (hoy por defecto)."""
+    t = re.sub(r"\s+", " ", (texto or "").strip().lower())
+    if re.search(r"\bayer\b", t):
+        return (date.today() - timedelta(days=1)).isoformat()
+    return date.today().isoformat()
+
+
 def _es_consulta_ventas_simple(texto: str) -> bool:
-    """Ventas de hoy / total del día — sin LLM."""
+    """Ventas de hoy/ayer o total del día — sin LLM."""
     t = re.sub(r"\s+", " ", (texto or "").strip().lower())
     if not t:
         return False
-    if not re.search(r"\b(ventas?|vendimos|facturacion|facturación)\b", t):
+    if not re.search(r"\b(ventas?|vendimos|facturacion|facturación|facturado)\b", t):
         return False
     if re.search(
         r"\b(por plato|por dia|por día|ranking|productos|platos|semana|mes|"
         r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|"
-        r"octubre|noviembre|diciembre)\b",
+        r"octubre|noviembre|diciembre|desglose)\b",
         t,
     ):
         return False
+    if re.search(r"\b(hoy|ayer|del dia|del día|de hoy|de ayer)\b", t) and len(t.split()) <= 12:
+        return True
     if t in (
         "ventas",
         "venta",
@@ -3330,9 +3340,15 @@ def _es_consulta_ventas_simple(texto: str) -> bool:
         "cuánto vendimos",
         "cuanto vendimos hoy",
         "cuánto vendimos hoy",
+        "dame las ventas",
+        "dame ventas",
+        "dime las ventas",
     ):
         return True
-    return bool(re.search(r"\b(cuanto|cuánto|total)\b", t) and len(t.split()) <= 6)
+    return bool(
+        re.search(r"\b(cuanto|cuánto|total|dame|dime|muestrame|muéstrame|quiero saber)\b", t)
+        and len(t.split()) <= 8
+    )
 
 
 def _es_consulta_lista_subrecetas(texto: str) -> bool:
@@ -4190,20 +4206,29 @@ async def _manejar_aclaracion_traslado(wa_id: str, texto: str, msg: dict | None)
 
 
 async def _manejar_consulta_ventas_wa(
-    wa_id: str, msg: dict | None, *, incluir_productos: bool = True
+    wa_id: str,
+    msg: dict | None,
+    texto: str = "",
+    *,
+    incluir_productos: bool = True,
 ) -> None:
     """Ventas del día — directo desde Supabase/Smart Menu, sin LLM."""
+    fecha = _fecha_consulta_ventas_simple(texto)
     await _feedback_procesando(wa_id, msg)
     try:
         r = await asyncio.to_thread(
             tool_ventas_dia,
-            {"incluir_productos": incluir_productos, "limite": 5},
+            {
+                "fecha": fecha,
+                "incluir_productos": incluir_productos,
+                "limite": 5,
+            },
         )
     except Exception as e:
-        print(f"[Meta] consulta ventas wa_id={wa_id!r}: {e}")
+        print(f"[Meta] consulta ventas wa_id={wa_id!r} fecha={fecha}: {e}")
         await enviar_mensaje_meta(
             wa_id,
-            "No pude consultar ventas de hoy. Intenta de nuevo en un momento.",
+            "No pude consultar ventas. Intenta de nuevo en un momento.",
         )
         return
     out = (r.get("texto_whatsapp") or "").strip() if isinstance(r, dict) else ""
@@ -5256,7 +5281,7 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             # Ventas de hoy — sin LLM
             if _es_consulta_ventas_simple(texto):
                 print(f"[Meta] {wa_id}: route=ventas_hoy")
-                await _manejar_consulta_ventas_wa(wa_id, msg)
+                await _manejar_consulta_ventas_wa(wa_id, msg, texto)
                 return
 
             # Solo "subreceta" — menú de ayuda (no producción ambigua ni LLM)
