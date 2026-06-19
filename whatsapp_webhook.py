@@ -42,7 +42,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-railway-v11"
+TATAMI_WA_BUILD = "20250619-railway-v12"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -5581,17 +5581,19 @@ def health():
     try:
         from google_credentials import has_google_credentials
 
+        tools_n = len(TOOLS)
+    except Exception as e:
         return {
             "status": "ok",
-            "agente": "Tatami Bao Bar v4",
-            "tools": len(TOOLS),
             "wa_build": TATAMI_WA_BUILD,
-            "git_commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:12],
-            "anthropic_key_set": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip()),
-            "google_creds_set": has_google_credentials(),
+            "tools_error": str(e),
         }
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={"status": "error", "wa_build": TATAMI_WA_BUILD, "detail": str(e)},
-        )
+    return {
+        "status": "ok",
+        "agente": "Tatami Bao Bar v4",
+        "tools": tools_n,
+        "wa_build": TATAMI_WA_BUILD,
+        "git_commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:12],
+        "anthropic_key_set": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip()),
+        "google_creds_set": has_google_credentials(),
+    }
