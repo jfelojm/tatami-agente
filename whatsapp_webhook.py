@@ -19,7 +19,7 @@ import anthropic
 import pytz
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from twilio.twiml.messaging_response import MessagingResponse
 
 from sesiones_factura import hay_sesion_activa
@@ -42,7 +42,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-dash-v10"
+TATAMI_WA_BUILD = "20250619-railway-v11"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -518,6 +518,45 @@ SCOPES = [
 ]
 app = FastAPI()
 
+
+@app.get("/ping")
+def ping():
+    return {"ok": True, "build": TATAMI_WA_BUILD}
+
+
+@app.middleware("http")
+async def _log_unhandled_errors(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        import traceback
+
+        print(f"[HTTP 500] {request.method} {request.url.path}: {e}\n{traceback.format_exc()}")
+        raise
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    import traceback
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    if isinstance(exc, (HTTPException, StarletteHTTPException)):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+        )
+
+    print(f"[HTTP 500] {request.method} {request.url.path}: {exc}\n{traceback.format_exc()}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": str(exc),
+            "type": type(exc).__name__,
+            "path": str(request.url.path),
+            "wa_build": TATAMI_WA_BUILD,
+        },
+    )
+
 # Dedup webhook Meta (msg_id) con TTL — evita reprocesar y crece sin límite
 _mensajes_procesados: OrderedDict[str, float] = OrderedDict()
 MSG_DEDUP_TTL_SEC = 86400
@@ -569,7 +608,6 @@ from factura_manual_routes import router as factura_manual_router
 app.include_router(factura_manual_router, prefix="/api/factura_manual")
 
 from dashboard_routes import router as dashboard_router
-from google_credentials import google_credentials
 app.include_router(dashboard_router)
 
 # ── Helpers ──────────────────────────────────────────────────
@@ -5540,14 +5578,20 @@ async def webhook(Body: str = Form(...), From: str = Form(...)):
 
 @app.get("/")
 def health():
-    from google_credentials import has_google_credentials
+    try:
+        from google_credentials import has_google_credentials
 
-    return {
-        "status": "ok",
-        "agente": "Tatami Bao Bar v4",
-        "tools": len(TOOLS),
-        "wa_build": TATAMI_WA_BUILD,
-        "git_commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:12],
-        "anthropic_key_set": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip()),
-        "google_creds_set": has_google_credentials(),
-    }
+        return {
+            "status": "ok",
+            "agente": "Tatami Bao Bar v4",
+            "tools": len(TOOLS),
+            "wa_build": TATAMI_WA_BUILD,
+            "git_commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:12],
+            "anthropic_key_set": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip()),
+            "google_creds_set": has_google_credentials(),
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"status": "error", "wa_build": TATAMI_WA_BUILD, "detail": str(e)},
+        )
