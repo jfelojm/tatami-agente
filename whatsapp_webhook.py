@@ -41,7 +41,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-traslado-v3"
+TATAMI_WA_BUILD = "20250619-traslado-v4"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -407,12 +407,25 @@ def _es_pedido_nombres_mp_produccion(texto: str) -> bool:
 
 
 def _es_intento_produccion(texto: str, wa_id: str | None = None) -> bool:
+    if _es_mensaje_traslado(texto):
+        return False
     if _es_mensaje_conteo(texto, wa_id):
         return False
     if _es_consulta_lista_subrecetas(texto):
         return False
     t = (texto or "").lower()
-    return bool(re.search(r"\b(produc|prepar|registrar|hacer|batch)\w*", t))
+    # «trasladar producto» no es producción (evitar \bproduc\w* → producto)
+    if re.search(r"\bproducto?s?\b", t) and not re.search(
+        r"\b(producir|produccion|producción|preparar|preparacion|preparación)\w*",
+        t,
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(producir|produccion|producción|preparar|preparacion|preparación|registrar|hacer|batch)\w*",
+            t,
+        )
+    )
 
 
 def _es_orden_produccion_afirmativa(texto: str) -> bool:
@@ -3790,10 +3803,8 @@ def _parse_traslado_bodegas(texto: str) -> dict | None:
 def _limpiar_ctx_produccion(wa_id: str) -> None:
     """Evita que un traslado herede pending/last_cods/historial de producción."""
     _pending_prod_sub.pop(wa_id, None)
-    _limpiar_pick_produccion(wa_id)
-    ctx = _pending_prod_ctx.get(wa_id)
-    if ctx:
-        ctx.pop("last_cods", None)
+    _pending_prod_area.pop(wa_id, None)
+    _pending_prod_ctx.pop(wa_id, None)
     historiales.pop(wa_id, None)
 
 
@@ -4701,6 +4712,11 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             texto_upper = texto.strip().upper()
 
+            # Traslados MP — PRIMERO (antes de estados pendientes de producción)
+            if _es_mensaje_traslado(texto):
+                await _manejar_traslado_mp_wa(wa_id, texto, msg)
+                return
+
             # Conteo físico — antes que producción (barra/cocina no son batches)
             if _es_mensaje_conteo(texto, wa_id):
                 await _manejar_mensaje_conteo(wa_id, texto)
@@ -4726,11 +4742,6 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 _prod_ctx_touch(wa_id, catalog_seen=True, area=area or ctx.get("area"))
                 lista = await asyncio.to_thread(_texto_lista_subrecetas_whatsapp, area)
                 await _enviar_texto_largo_wa(wa_id, lista)
-                return
-
-            # Traslados MP — ruta directa (no producción ni LLM con historial 005/001)
-            if _es_mensaje_traslado(texto):
-                await _manejar_traslado_mp_wa(wa_id, texto, msg)
                 return
 
             # Re-mostrar simulación con nombres de MP (tras pedido explícito)

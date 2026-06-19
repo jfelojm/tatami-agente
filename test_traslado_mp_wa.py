@@ -171,5 +171,18 @@ class TestTrasladoVsProduccion(unittest.TestCase):
         self.assertTrue(_es_mensaje_traslado("raslada producto"))
 
 
+    def test_trasladar_producto_no_batch_con_ctx_cocina(self):
+        from whatsapp_webhook import (
+            _es_intento_produccion,
+            _parse_batch_lenguaje_natural,
+            _resolver_prod_sub,
+        )
+
+        with patch("whatsapp_webhook._prod_ctx_get", return_value={"area": "cocina"}):
+            self.assertFalse(_es_intento_produccion("trasladar producto"))
+            self.assertIsNone(_parse_batch_lenguaje_natural("trasladar producto", "59399"))
+            self.assertIsNone(_resolver_prod_sub("trasladar producto", "59399"))
+
+
 if __name__ == "__main__":
     unittest.main()
