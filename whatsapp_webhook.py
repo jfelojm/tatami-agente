@@ -36,13 +36,14 @@ from conteo_operaciones import (
     semana_iso_actual,
 )
 from kardex_inventario import get_kardex, formatear_kardex_wa, generar_xlsx
+from google_credentials import google_credentials
 
 load_dotenv()
 TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-railway-v12"
+TATAMI_WA_BUILD = "20250619-railway-v14"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -79,9 +80,15 @@ COMANDOS_OPERATIVO = {
 
 MSG_NO_AUTORIZADO = "No tienes acceso a este agente."
 MSG_ERROR_PROCESO = (
-    "Hubo un error procesando tu mensaje. Intenta de nuevo en un momento.\n"
-    "Cocina: PRODUCIR SUB 006 BOD-001 (pan bao). Barra: PRODUCIR SUB 051 BOD-002. "
-    "Añade CONFIRMAR para aplicar."
+    "Hubo un error procesando tu mensaje. Intenta de nuevo en un momento."
+)
+MSG_AYUDA_SUBRECETA = (
+    "Subrecetas — ¿qué necesitas?\n"
+    "• *Catálogo:* lista subrecetas\n"
+    "• *Producir cocina:* PRODUCIR SUB 006 BOD-001 (pan bao)\n"
+    "• *Producir barra:* PRODUCIR SUB 051 BOD-002\n"
+    "• *Costo:* costo de salsa ponzu\n"
+    "Responde *BARRA* o *COCINA* para elegir área de producción."
 )
 MSG_TIPO_NO_SOPORTADO = (
     "Solo procesamos mensajes de texto (y fotos/PDF de facturas).\n"
@@ -3291,6 +3298,43 @@ def _buscar_subrecetas(
     return []
 
 
+def _es_palabra_subreceta_sola(texto: str) -> bool:
+    """Solo la palabra subreceta(s), sin verbo de producción ni otra intención."""
+    t = re.sub(r"\s+", " ", (texto or "").strip().lower())
+    return t in ("subreceta", "subrecetas", "sub receta", "sub recetas")
+
+
+def _es_consulta_ventas_simple(texto: str) -> bool:
+    """Ventas de hoy / total del día — sin LLM."""
+    t = re.sub(r"\s+", " ", (texto or "").strip().lower())
+    if not t:
+        return False
+    if not re.search(r"\b(ventas?|vendimos|facturacion|facturación)\b", t):
+        return False
+    if re.search(
+        r"\b(por plato|por dia|por día|ranking|productos|platos|semana|mes|"
+        r"enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|"
+        r"octubre|noviembre|diciembre)\b",
+        t,
+    ):
+        return False
+    if t in (
+        "ventas",
+        "venta",
+        "las ventas",
+        "ventas hoy",
+        "hoy ventas",
+        "vendimos",
+        "vendimos hoy",
+        "cuanto vendimos",
+        "cuánto vendimos",
+        "cuanto vendimos hoy",
+        "cuánto vendimos hoy",
+    ):
+        return True
+    return bool(re.search(r"\b(cuanto|cuánto|total)\b", t) and len(t.split()) <= 6)
+
+
 def _es_consulta_lista_subrecetas(texto: str) -> bool:
     """Pregunta informativa (catálogo), no comando de producción."""
     t = re.sub(r"\s+", " ", (texto or "").strip().lower())
@@ -4143,6 +4187,30 @@ async def _manejar_aclaracion_traslado(wa_id: str, texto: str, msg: dict | None)
         return False
     await _manejar_traslado_mp_wa(wa_id, texto_orig, msg, forzar_sub=True)
     return True
+
+
+async def _manejar_consulta_ventas_wa(
+    wa_id: str, msg: dict | None, *, incluir_productos: bool = True
+) -> None:
+    """Ventas del día — directo desde Supabase/Smart Menu, sin LLM."""
+    await _feedback_procesando(wa_id, msg)
+    try:
+        r = await asyncio.to_thread(
+            tool_ventas_dia,
+            {"incluir_productos": incluir_productos, "limite": 5},
+        )
+    except Exception as e:
+        print(f"[Meta] consulta ventas wa_id={wa_id!r}: {e}")
+        await enviar_mensaje_meta(
+            wa_id,
+            "No pude consultar ventas de hoy. Intenta de nuevo en un momento.",
+        )
+        return
+    out = (r.get("texto_whatsapp") or "").strip() if isinstance(r, dict) else ""
+    if not out:
+        await enviar_mensaje_meta(wa_id, "No hay datos de ventas para hoy.")
+        return
+    await _enviar_texto_largo_wa(wa_id, out)
 
 
 async def _manejar_consulta_receta_plato_wa(
@@ -5183,6 +5251,18 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             if _es_consulta_receta_plato(texto):
                 print(f"[Meta] {wa_id}: route=receta_plato")
                 await _manejar_consulta_receta_plato_wa(wa_id, texto, msg)
+                return
+
+            # Ventas de hoy — sin LLM
+            if _es_consulta_ventas_simple(texto):
+                print(f"[Meta] {wa_id}: route=ventas_hoy")
+                await _manejar_consulta_ventas_wa(wa_id, msg)
+                return
+
+            # Solo "subreceta" — menú de ayuda (no producción ambigua ni LLM)
+            if _es_palabra_subreceta_sola(texto):
+                print(f"[Meta] {wa_id}: route=ayuda_subreceta")
+                await enviar_mensaje_meta(wa_id, MSG_AYUDA_SUBRECETA)
                 return
 
             # Respuesta BARRA / COCINA tras "producir subreceta" sin detalle
