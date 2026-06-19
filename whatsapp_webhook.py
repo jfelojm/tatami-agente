@@ -1,5 +1,6 @@
 # whatsapp_webhook.py v4 — sin dependencia de consultas_chat_extendidas ni agente_chat
 import asyncio
+import contextvars
 import hashlib
 import hmac
 import os
@@ -41,7 +42,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-traslado-v6"
+TATAMI_WA_BUILD = "20250619-traslado-v7"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -467,6 +468,13 @@ MSG_DEDUP_MAX = 50_000
 # Cola por número: un mensaje activo + pendientes (Lock + drain)
 _wa_locks: dict[str, asyncio.Lock] = {}
 _wa_pending: dict[str, deque] = defaultdict(deque)
+_wa_runner_active: set[str] = set()
+_wa_cola_avisado: set[str] = set()
+# Si ya enviamos respuesta al usuario en este turno, no mandar MSG_ERROR_PROCESO
+_wa_procesando_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "wa_procesando_id", default=None
+)
+_wa_ya_respondio_turno: dict[str, bool] = {}
 # Última simulación PRODUCIR SUB por wa_id (para "si confirmo" / "confirmo")
 _pending_prod_sub: dict[str, dict] = {}
 # Tras "producir subreceta" sin detalle: "pick" | "barra" | "cocina"
@@ -4026,9 +4034,11 @@ async def _manejar_traslado_mp_wa(
 
     _traslado_ctx_touch(wa_id, texto=texto, bod=bod, nombre=nombre, sub=sub)
 
-    await _feedback_procesando(wa_id, msg)
+    generico = not bod and not nombre and not sub
+    if not generico:
+        await _feedback_procesando(wa_id, msg)
 
-    if not bod and not nombre and not sub:
+    if generico:
         out = (
             _msg_traslado_inicio()
             if _es_traslado_generico_sin_detalle(texto)
@@ -4736,6 +4746,9 @@ async def enviar_mensaje_meta(telefono: str, texto: str) -> bool:
                 resp = await client.post(url, json=payload, headers=headers)
             print(f"[Meta] Enviado a {telefono}: {resp.status_code} (intento {intento})")
             if resp.status_code == 200:
+                proc_wa = _wa_procesando_id.get()
+                if proc_wa and _norm_tel(proc_wa) == _norm_tel(telefono):
+                    _wa_ya_respondio_turno[_norm_tel(telefono)] = True
                 return True
             print(f"[Meta] Error body: {resp.text[:500]}")
         except Exception as e:
@@ -4796,30 +4809,37 @@ MENSAJE_PROCESANDO_FACTURA = "Procesando factura... ⏳"
 
 async def encolar_wa_mensaje(wa_id: str, msg: dict) -> None:
     """
-    Serializa procesamiento por wa_id: Lock + cola de pendientes.
-    Si ya hay uno en curso, avisa una vez y encola el resto.
+    Serializa procesamiento por wa_id: cola + un solo drain activo.
     """
     _wa_pending[wa_id].append(msg)
-    lock = _wa_locks.setdefault(wa_id, asyncio.Lock())
-    if lock.locked():
+    if wa_id in _wa_runner_active:
         if wa_id not in _wa_cola_avisado and len(_wa_pending[wa_id]) > 1:
             _wa_cola_avisado.add(wa_id)
             await enviar_mensaje_meta(wa_id, MSG_COLA_ESPERA)
         return
-    await _wa_runner(wa_id)
+    await _wa_drain(wa_id)
 
 
-async def _wa_runner(wa_id: str) -> None:
+async def _wa_drain(wa_id: str) -> None:
+    if wa_id in _wa_runner_active:
+        return
+    _wa_runner_active.add(wa_id)
     lock = _wa_locks.setdefault(wa_id, asyncio.Lock())
-    async with lock:
-        try:
+    try:
+        async with lock:
             while _wa_pending[wa_id]:
                 msg = _wa_pending[wa_id].popleft()
                 await procesar_mensaje(wa_id, msg)
-        finally:
-            _wa_cola_avisado.discard(wa_id)
-            if _wa_pending[wa_id]:
-                asyncio.create_task(_wa_runner(wa_id))
+    finally:
+        _wa_runner_active.discard(wa_id)
+        _wa_cola_avisado.discard(wa_id)
+        if _wa_pending[wa_id]:
+            asyncio.create_task(_wa_drain(wa_id))
+
+
+async def _wa_runner(wa_id: str) -> None:
+    """Compat: delega en _wa_drain."""
+    await _wa_drain(wa_id)
 
 
 async def _manejar_produccion_sub(
@@ -4903,6 +4923,9 @@ async def _manejar_produccion_sub(
 
 async def procesar_mensaje(wa_id: str, msg: dict) -> None:
     """Procesa un mensaje de Meta en background (POST /webhook ya respondió 200)."""
+    wa_key = _norm_tel(wa_id)
+    ctx_token = _wa_procesando_id.set(wa_key)
+    _wa_ya_respondio_turno.pop(wa_key, None)
     try:
         from wa_chat_guard import touch_wa_chat
 
@@ -5238,11 +5261,20 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
         await _responder_wa(wa_id, MSG_TIPO_NO_SOPORTADO)
     except Exception as e:
+        import traceback
+
         print(f"[Meta] procesar_mensaje wa_id={wa_id!r}: {e}")
-        try:
-            await _responder_wa(wa_id, MSG_ERROR_PROCESO)
-        except Exception as e2:
-            print(f"[Meta] no se pudo enviar fallback de error: {e2}")
+        print(traceback.format_exc())
+        if not _wa_ya_respondio_turno.get(wa_key):
+            try:
+                await _responder_wa(wa_id, MSG_ERROR_PROCESO)
+            except Exception as e2:
+                print(f"[Meta] no se pudo enviar fallback de error: {e2}")
+        else:
+            print(f"[Meta] error tras respuesta enviada wa_id={wa_id!r}; sin MSG_ERROR_PROCESO")
+    finally:
+        _wa_procesando_id.reset(ctx_token)
+        _wa_ya_respondio_turno.pop(wa_key, None)
 
 
 async def _lanzar_procesamiento_wa(wa_id: str, msg: dict) -> None:
