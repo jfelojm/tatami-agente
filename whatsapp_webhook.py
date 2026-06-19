@@ -3766,6 +3766,132 @@ def _parse_traslado_bodegas(texto: str) -> dict | None:
     }
 
 
+def _limpiar_ctx_produccion(wa_id: str) -> None:
+    """Evita que un traslado herede pending/last_cods de producción."""
+    _pending_prod_sub.pop(wa_id, None)
+    _limpiar_pick_produccion(wa_id)
+    ctx = _pending_prod_ctx.get(wa_id)
+    if ctx:
+        ctx.pop("last_cods", None)
+
+
+_NOMBRES_MP_GENERICOS = frozenset({
+    "mp",
+    "mps",
+    "materia",
+    "prima",
+    "materia prima",
+    "producto",
+    "productos",
+    "insumo",
+    "insumos",
+    "item",
+    "articulo",
+})
+
+
+def _extraer_nombre_mp_traslado(texto: str) -> str:
+    """Nombre del insumo en «traslada papa de 005 a 001»; vacío si es genérico."""
+    t = (texto or "").strip()
+    if not t:
+        return ""
+    m_bod = _TRASLADO_DE_A_RE.search(t)
+    parte = t[: m_bod.start()].strip() if m_bod else t
+    m = re.search(
+        r"(?:traslad\w*|transfi\w*|muev\w*|pasar?|pasa)\s+"
+        r"(?:(?:una?|un)\s+)?"
+        r"(?:(?:mp|materia\s+prima)\s+)?"
+        r"(.+)$",
+        parte,
+        re.I,
+    )
+    if not m:
+        return ""
+    cand = m.group(1).strip(" .,;")
+    if not cand:
+        return ""
+    norm = _normaliza_busqueda_mp(cand)
+    if norm in _NOMBRES_MP_GENERICOS:
+        return ""
+    if norm.split()[0] in _NOMBRES_MP_GENERICOS and len(norm.split()) <= 2:
+        return ""
+    return cand
+
+
+async def _manejar_traslado_mp_wa(wa_id: str, texto: str, msg: dict | None) -> None:
+    """Traslados MP: ruta directa (sin producción ni LLM con historial confuso)."""
+    from unidades_operativas import parse_cantidad_explicita_base, parse_cantidad_presentacion
+
+    _limpiar_ctx_produccion(wa_id)
+    bod = _parse_traslado_bodegas(texto)
+    nombre = _extraer_nombre_mp_traslado(texto)
+
+    await _feedback_procesando(wa_id, msg)
+
+    if not bod and not nombre:
+        out = (
+            "Para trasladar dime:\n"
+            "1. Qué insumo (nombre, ej. papa, buchanans master)\n"
+            "2. De qué bodega a cuál (ej. de 005 a 001 = externa → cocina)\n\n"
+            "Ejemplo: Traslada papa de externa a cocina"
+        )
+        await enviar_mensaje_meta(wa_id, out)
+        return
+
+    if not nombre:
+        out = (
+            f"Traslado {bod['nombre_origen']} → {bod['nombre_destino']}.\n"
+            "¿Qué insumo quieres mover? Dime el nombre (ej. papa, buchanans master)."
+        )
+        await enviar_mensaje_meta(wa_id, out)
+        return
+
+    if not bod:
+        out = (
+            f"Insumo: {nombre}.\n"
+            "¿De qué bodega a cuál? Ej: de 005 a 001 (externa → cocina) "
+            "o de consignación a barra."
+        )
+        await enviar_mensaje_meta(wa_id, out)
+        return
+
+    cantidad = 1.0
+    expl = parse_cantidad_explicita_base(texto)
+    pres = parse_cantidad_presentacion(texto)
+    if expl is not None:
+        cantidad = expl
+    elif pres:
+        cantidad = pres[0]
+
+    try:
+        r = await asyncio.to_thread(
+            tool_trasladar_mp,
+            {
+                "nombre_mp": nombre,
+                "bodega_origen": bod["bodega_origen"],
+                "bodega_destino": bod["bodega_destino"],
+                "cantidad": cantidad,
+                "confirmado": False,
+                "texto_original": texto,
+            },
+        )
+    except Exception as e:
+        await enviar_mensaje_meta(wa_id, f"Error al planificar traslado: {e}")
+        return
+
+    if r.get("requiere_eleccion"):
+        out = r.get("mensaje") or "Varios productos coinciden; indica cuál por nombre."
+    elif r.get("requiere_confirmacion"):
+        out = r.get("mensaje") or "Confirma el traslado."
+    elif r.get("error"):
+        out = str(r.get("error"))
+    elif r.get("mensaje"):
+        out = r["mensaje"]
+    else:
+        out = str(r)
+    await enviar_mensaje_meta(wa_id, out)
+
+
 _BATCH_KEYWORDS = (
     "batch",
     "subreceta",
@@ -4215,6 +4341,17 @@ def llamar_agente(mensaje, telefono):
             try:
                 if not autorizado_tool(telefono, tc.name):
                     result = {"error": "No autorizado para esta operación."}
+                elif (
+                    tc.name == "produccion_subreceta"
+                    and _es_mensaje_traslado(ultimo_user)
+                ):
+                    result = {
+                        "error": (
+                            "El usuario pidió TRASLADO de MP entre bodegas, "
+                            "no producción de subreceta. Usa trasladar_mp con nombre_mp. "
+                            "005/001 en el chat son bodegas (BOD-005/BOD-001), no subs."
+                        )
+                    }
                 else:
                     inp = dict(tc.input or {})
                     if tc.name in ("costo_plato", "receta_ingredientes", "costo_subreceta"):
@@ -4567,6 +4704,11 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 await _enviar_texto_largo_wa(wa_id, lista)
                 return
 
+            # Traslados MP — ruta directa (no producción ni LLM con historial 005/001)
+            if _es_mensaje_traslado(texto):
+                await _manejar_traslado_mp_wa(wa_id, texto, msg)
+                return
+
             # Re-mostrar simulación con nombres de MP (tras pedido explícito)
             if _es_pedido_nombres_mp_produccion(texto) and wa_id in _pending_prod_sub:
                 await _manejar_produccion_sub(
@@ -4574,14 +4716,14 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 )
                 return
 
-            # Batch / producción — no si el mensaje es traslado entre bodegas
-            prod_sub = None if _es_mensaje_traslado(texto) else _resolver_prod_sub(texto, wa_id)
+            # Batch / producción
+            prod_sub = _resolver_prod_sub(texto, wa_id)
             if prod_sub is not None:
                 await _manejar_produccion_sub(wa_id, prod_sub, msg)
                 return
 
             # Recordar subreceta mencionada aunque el mensaje vaya al LLM
-            cods_men = [] if _es_mensaje_traslado(texto) else _match_sub_codigos_en_texto(texto)
+            cods_men = _match_sub_codigos_en_texto(texto)
             if cods_men:
                 ctx0 = _prod_ctx_get(wa_id)
                 _prod_ctx_touch(

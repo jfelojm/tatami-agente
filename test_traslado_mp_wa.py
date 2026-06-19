@@ -147,6 +147,19 @@ class TestTrasladoVsProduccion(unittest.TestCase):
         cods = _match_sub_codigos_en_texto("traslada una mp de 005 a 001")
         self.assertEqual(cods, [])
 
+    def test_traslada_producto_sin_nombre(self):
+        from whatsapp_webhook import _extraer_nombre_mp_traslado
+
+        self.assertEqual(_extraer_nombre_mp_traslado("traslada producto"), "")
+        self.assertEqual(_extraer_nombre_mp_traslado("traslada papa de 005 a 001"), "papa")
+
+    def test_traslada_producto_no_es_produccion(self):
+        from whatsapp_webhook import _es_mensaje_traslado, _resolver_prod_sub
+
+        self.assertTrue(_es_mensaje_traslado("traslada producto"))
+        with patch("whatsapp_webhook._prod_ctx_get", return_value={"last_cods": ["005", "001"]}):
+            self.assertIsNone(_resolver_prod_sub("traslada producto", "593999999999"))
+
 
 if __name__ == "__main__":
     unittest.main()
