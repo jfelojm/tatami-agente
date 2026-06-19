@@ -41,7 +41,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-traslado-v5"
+TATAMI_WA_BUILD = "20250619-traslado-v6"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -3746,11 +3746,16 @@ _TRASLADO_DE_A_RE = re.compile(
 
 
 def _normalizar_texto_comando_wa(texto: str) -> str:
-    """Corrige typos frecuentes antes de enrutar (raslada → traslada)."""
+    """Corrige typos y caracteres invisibles de WhatsApp antes de enrutar."""
     t = (texto or "").strip()
     if not t:
         return t
-    return re.sub(r"\braslad", "traslad", t, flags=re.I)
+    t = unicodedata.normalize("NFKC", t)
+    t = re.sub(r"[\u200b-\u200f\u2060\ufeff\u00ad]", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"\braslad", "traslad", t, flags=re.I)
+    t = re.sub(r"\btralsad", "traslad", t, flags=re.I)
+    return t
 
 
 def _es_mensaje_traslado(texto: str) -> bool:
@@ -3758,11 +3763,14 @@ def _es_mensaje_traslado(texto: str) -> bool:
     t = _normalizar_texto_comando_wa(texto)
     if not t:
         return False
+    tl = t.lower()
+    # Prefiltro tolerante (typos, unicode raro en móvil)
+    if re.search(r"traslad|tralsad|transfer|transfi", tl):
+        return True
     if _TRASLADO_VERBS_RE.search(t):
         return True
     if re.search(r"\b(traslado|transferencia)\b", t, re.I):
         return True
-    tl = t.lower()
     if re.search(r"\bmp\b|materia\s+prima", tl) and _TRASLADO_DE_A_RE.search(t):
         return True
     # «mueve producto», «raslada insumo» sin verbo estándar pero con typo corregido
@@ -3867,6 +3875,43 @@ def _traslado_ctx_get(wa_id: str) -> dict:
         _pending_traslado.pop(wa_id, None)
         return {}
     return ctx
+
+
+def _es_traslado_generico_sin_detalle(texto: str) -> bool:
+    """«trasladar producto/mp/materia prima» sin insumo ni bodegas concretas."""
+    t = _normalizar_texto_comando_wa(texto).lower().strip(" .,;")
+    if not _es_mensaje_traslado(t):
+        return False
+    if _parse_traslado_bodegas(t):
+        return False
+    if _resolver_subreceta_para_traslado(t):
+        return False
+    frag = _texto_item_traslado(t)
+    if frag and _normaliza_busqueda_mp(frag) not in _NOMBRES_MP_GENERICOS:
+        return False
+    return bool(
+        re.match(
+            r"^(?:traslad\w*|transfi\w*|muev\w*|pasar?|pasa|pase)\s+"
+            r"(?:(?:una?|un)\s+)?"
+            r"(?:mp|materia\s+prima|producto?s?|insumo?s?|semi?s?|subrecetas?)?\s*$",
+            t,
+            re.I,
+        )
+    )
+
+
+def _msg_traslado_inicio() -> str:
+    return (
+        "*Traslado entre bodegas* (sin usar el modelo de IA).\n\n"
+        "Dime en un mensaje:\n"
+        "1. Qué mueves (MP, subreceta o semi)\n"
+        "2. Cantidad (ej. 5 tortas, 1 botella, 750 ml)\n"
+        "3. Origen y destino (ej. de cocina a externa, de 005 a 001)\n\n"
+        "Ejemplos:\n"
+        "• Traslada papa 10 kg de cocina a externa\n"
+        "• Traslada 5 tortas de chocolate de cocina a externa\n"
+        "• Mueve whisky Buchanan de consignación a barra 750 ml"
+    )
 
 
 def _traslado_ctx_touch(wa_id: str, **updates) -> None:
@@ -3985,11 +4030,15 @@ async def _manejar_traslado_mp_wa(
 
     if not bod and not nombre and not sub:
         out = (
-            "Para trasladar dime:\n"
-            "1. Qué insumo o subreceta (ej. papa, torta de chocolate, SUB-010)\n"
-            "2. De qué bodega a cuál (ej. de cocina a externa, o de 005 a 001)\n"
-            "3. Cantidad (ej. 5 tortas, 1 botella, 750 ml)\n\n"
-            "Ejemplo: Traslada 5 tortas de chocolate de cocina a externa"
+            _msg_traslado_inicio()
+            if _es_traslado_generico_sin_detalle(texto)
+            else (
+                "Para trasladar dime:\n"
+                "1. Qué insumo o subreceta (ej. papa, torta de chocolate, SUB-010)\n"
+                "2. De qué bodega a cuál (ej. de cocina a externa, o de 005 a 001)\n"
+                "3. Cantidad (ej. 5 tortas, 1 botella, 750 ml)\n\n"
+                "Ejemplo: Traslada 5 tortas de chocolate de cocina a externa"
+            )
         )
         await enviar_mensaje_meta(wa_id, out)
         return
@@ -4773,8 +4822,19 @@ async def _wa_runner(wa_id: str) -> None:
                 asyncio.create_task(_wa_runner(wa_id))
 
 
-async def _manejar_produccion_sub(wa_id: str, prod_sub: dict, msg: dict | None = None) -> None:
+async def _manejar_produccion_sub(
+    wa_id: str,
+    prod_sub: dict,
+    msg: dict | None = None,
+    *,
+    texto: str = "",
+) -> None:
     from estrategia_config import bodega_default_produccion_sub, validar_bodega_produccion_sub
+
+    if texto and _es_mensaje_traslado(texto):
+        print(f"[Meta] {wa_id}: produccion bloqueada → traslado texto={texto!r}")
+        await _manejar_traslado_mp_wa(wa_id, texto, msg)
+        return
 
     if not _autorizado_produccion_sub(wa_id):
         await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
@@ -4868,12 +4928,17 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             texto_upper = texto.strip().upper()
 
+            # Traslado: limpiar estado de producción antes de cualquier otra ruta
+            if _es_mensaje_traslado(texto):
+                _limpiar_ctx_produccion(wa_id)
+
             # Aclaración «es subreceta» tras un traslado pendiente
             if await _manejar_aclaracion_traslado(wa_id, texto, msg):
                 return
 
             # Traslados MP / subreceta — PRIMERO (antes de estados pendientes de producción)
             if _es_mensaje_traslado(texto):
+                print(f"[Meta] {wa_id}: route=traslado")
                 await _manejar_traslado_mp_wa(wa_id, texto, msg)
                 return
 
@@ -4884,6 +4949,10 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             # Respuesta BARRA / COCINA tras "producir subreceta" sin detalle
             if _pending_prod_area.get(wa_id) == "pick":
+                if _es_mensaje_traslado(texto):
+                    print(f"[Meta] {wa_id}: route=traslado (cancela pick producción)")
+                    await _manejar_traslado_mp_wa(wa_id, texto, msg)
+                    return
                 area = _parse_area_produccion(texto)
                 if area:
                     _prod_ctx_touch(wa_id, area=area)
@@ -4907,14 +4976,17 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             # Re-mostrar simulación con nombres de MP (tras pedido explícito)
             if _es_pedido_nombres_mp_produccion(texto) and wa_id in _pending_prod_sub:
                 await _manejar_produccion_sub(
-                    wa_id, {**_pending_prod_sub[wa_id], "confirmar": False}, msg
+                    wa_id,
+                    {**_pending_prod_sub[wa_id], "confirmar": False},
+                    msg,
+                    texto=texto,
                 )
                 return
 
             # Batch / producción
             prod_sub = _resolver_prod_sub(texto, wa_id)
             if prod_sub is not None:
-                await _manejar_produccion_sub(wa_id, prod_sub, msg)
+                await _manejar_produccion_sub(wa_id, prod_sub, msg, texto=texto)
                 return
 
             # Recordar subreceta mencionada aunque el mensaje vaya al LLM
@@ -5120,9 +5192,11 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             # Agente general — nunca LLM si el mensaje es traslado
             if _parece_intento_traslado(texto):
+                print(f"[Meta] {wa_id}: route=traslado (fallback pre-LLM)")
                 await _manejar_traslado_mp_wa(wa_id, texto, msg)
                 return
 
+            print(f"[Meta] {wa_id}: route=llm")
             await _feedback_procesando(wa_id, msg)
             try:
                 respuesta = await asyncio.to_thread(llamar_agente, texto, wa_id)
