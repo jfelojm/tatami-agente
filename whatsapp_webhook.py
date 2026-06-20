@@ -3810,7 +3810,7 @@ _COCINA_ALIASES: list[tuple[tuple[str, ...], str]] = [
     (("salsa oriental",), "058"),
     (("salsa drunken",), "059"),
     (("aceite jengibre", "aceite de jengibre"), "044"),
-    (("torta de chocolate", "tortas de chocolate", "torta chocolate", "tortas de choclate", "torta choclate"), "010"),
+    (("torta de chocolate", "tortas de chocolate", "torta chocolate", "tortas de choclate", "torta choclate"), "061"),
 ]
 
 

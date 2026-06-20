@@ -205,7 +205,7 @@ class TestTrasladoVsProduccion(unittest.TestCase):
 
         with patch(
             "whatsapp_webhook._match_sub_codigos_en_texto",
-            return_value=["010"],
+            return_value=["061"],
         ):
             with patch(
                 "whatsapp_webhook.conectar_sheets",
@@ -214,10 +214,10 @@ class TestTrasladoVsProduccion(unittest.TestCase):
                 with patch(
                     "unidades_operativas.cargar_rendimiento_subrecetas",
                     return_value={
-                        "SUB-010": {
+                        "SUB-061": {
                             "rendimiento_estandar": 1054.0,
                             "unidad": "gr",
-                            "nombre_subreceta": "Torta de chocolate",
+                            "nombre_subreceta": "torta de chocolate",
                         }
                     },
                 ):
@@ -225,7 +225,7 @@ class TestTrasladoVsProduccion(unittest.TestCase):
                         "trasladar 5 tortas de chocolate de cocina a externa"
                     )
         self.assertIsNotNone(r)
-        self.assertEqual(r["cod_sub"], "010")
+        self.assertEqual(r["cod_sub"], "061")
         self.assertEqual(r["cantidad"], 5270.0)
 
 
@@ -247,8 +247,8 @@ class TestTrasladoVsProduccion(unittest.TestCase):
         self.assertTrue(_es_mensaje_traslado(t))
         sub = _resolver_subreceta_para_traslado(t)
         self.assertIsNotNone(sub)
-        self.assertEqual(sub["cod_sub"], "010")
-        self.assertGreater(float(sub["cantidad"]), 0)
+        self.assertEqual(sub["cod_sub"], "061")
+        self.assertAlmostEqual(float(sub["cantidad"]), 5270.0)
 
 
 if __name__ == "__main__":
