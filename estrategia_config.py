@@ -263,6 +263,79 @@ def _autorizado_produccion_sub(telefono: str) -> bool:
     return bool(phone_roles(telefono) & roles_con_permiso("perm_producir_sub_roles"))
 
 
+_BODEGA_DEFAULT_PROD_SUB: dict[str, str] = {
+    "STAFF_COCINA": "BOD-001",
+    "JEFE_COCINA": "BOD-001",
+    "STAFF_BARRA": "BOD-002",
+    "JEFE_BARRA": "BOD-002",
+}
+
+_BODEGAS_PROD_SUB_FALLBACK: dict[str, set[str]] = {
+    "STAFF_COCINA": {"BOD-001"},
+    "JEFE_COCINA": {"BOD-001", "BOD-005"},
+    "STAFF_BARRA": {"BOD-002"},
+    "JEFE_BARRA": {"BOD-002"},
+}
+
+
+def bodega_default_produccion_sub(telefono: str) -> str:
+    """Bodega por defecto al producir subrecetas según rol del usuario."""
+    rol = primary_role(telefono)
+    if rol and rol in _BODEGA_DEFAULT_PROD_SUB:
+        return _BODEGA_DEFAULT_PROD_SUB[rol]
+    roles = phone_roles(telefono)
+    if roles & {"STAFF_COCINA", "JEFE_COCINA"}:
+        return "BOD-001"
+    return "BOD-002"
+
+
+def bodegas_permitidas_produccion_sub(telefono: str) -> set[str]:
+    """Bodegas donde el usuario puede registrar producción de subrecetas."""
+    roles = phone_roles(telefono)
+    if "ADMIN" in roles:
+        return {"BOD-001", "BOD-002", "BOD-005"}
+    allowed: set[str] = set()
+    for rol in roles:
+        key = f"perm_producir_sub_bodegas_{rol}"
+        bods = _cfg_tokens(key)
+        if not bods and rol in _BODEGAS_PROD_SUB_FALLBACK:
+            bods = set(_BODEGAS_PROD_SUB_FALLBACK[rol])
+        allowed |= bods
+    if not allowed:
+        allowed.add(bodega_default_produccion_sub(telefono))
+    return allowed
+
+
+def validar_bodega_produccion_sub(telefono: str, bodega: str) -> str | None:
+    """None si OK; mensaje de error si la bodega no está permitida para el rol."""
+    bod = (bodega or "").strip().upper()
+    if not bod.startswith("BOD-"):
+        return f"Bodega inválida: '{bodega}'"
+    permitidas = bodegas_permitidas_produccion_sub(telefono)
+    if bod in permitidas:
+        return None
+    return (
+        f"No puedes producir en {bod}. "
+        f"Bodegas permitidas: {', '.join(sorted(permitidas))}."
+    )
+
+
+def periodo_pruebas_cocina_activo() -> bool:
+    """Pruebas operativas: cocina puede operar aunque el stock en Sheets sea insuficiente."""
+    raw = (os.getenv("TATAMI_PERIODO_PRUEBAS_COCINA") or "1").strip().lower()
+    return raw in ("1", "true", "yes", "si", "sí")
+
+
+def es_personal_cocina(telefono: str) -> bool:
+    roles = phone_roles(telefono)
+    return bool(roles & {"JEFE_COCINA", "STAFF_COCINA"})
+
+
+def periodo_pruebas_ignorar_stock(telefono: str) -> bool:
+    """Jacky y staff cocina: no bloquear por stock insuficiente durante pruebas."""
+    return periodo_pruebas_cocina_activo() and es_personal_cocina(telefono)
+
+
 def telefonos_por_roles(role_codes: Iterable[str]) -> list[tuple[str, str]]:
     """
     Resuelve códigos de rol → [(tel, etiqueta)] sin duplicados.
@@ -357,6 +430,10 @@ def sched_horario_activo() -> bool:
 def horas_pipeline_sri_descarga() -> set[int]:
     from config_sheets import cfg
 
+    modo = str(cfg("pipe_facturas_sri_modo", "solo_proceso_cola") or "").strip().lower()
+    if modo in ("solo_proceso", "solo_proceso_cola", "solo-cola", "cola"):
+        return set()
+
     raw = str(cfg("pipe_facturas_sri_horas_descarga", "") or "")
     horas: set[int] = set()
     for p in raw.replace(";", ",").split(","):
@@ -368,6 +445,18 @@ def horas_pipeline_sri_descarga() -> set[int]:
         except ValueError:
             pass
     return horas or set(range(24))
+
+
+def pipeline_sri_solo_proceso() -> bool:
+    """True si el pipeline horario solo procesa cola DESCARGADO (sin abrir portal)."""
+    env = os.getenv("PIPELINE_SRI_SOLO_PROCESO", "").strip().lower()
+    if env in ("1", "true", "yes", "si"):
+        return True
+
+    from config_sheets import cfg
+
+    modo = str(cfg("pipe_facturas_sri_modo", "solo_proceso_cola") or "").strip().lower()
+    return modo in ("solo_proceso", "solo_proceso_cola", "solo-cola", "cola")
 
 
 def invalidar_cache() -> None:

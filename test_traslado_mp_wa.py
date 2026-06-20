@@ -262,5 +262,105 @@ class TestTrasladoVsProduccion(unittest.TestCase):
         self.assertNotIn("udon", (sub.get("nombre") or "").lower())
 
 
+class TestPeriodoPruebasCocina(unittest.TestCase):
+    def test_jacky_en_periodo_pruebas(self):
+        from estrategia_config import periodo_pruebas_ignorar_stock
+
+        with patch.dict("os.environ", {"TATAMI_PERIODO_PRUEBAS_COCINA": "1"}):
+            from importlib import reload
+
+            import estrategia_config
+
+            reload(estrategia_config)
+            self.assertTrue(
+                estrategia_config.periodo_pruebas_ignorar_stock("593992911956")
+            )
+
+    def test_traslado_stock_insuficiente_permitido(self):
+        from whatsapp_webhook import tool_trasladar_mp
+
+        filas = [
+            {
+                "cod_mp_sistema": "566",
+                "nombre_mp": "Whisky Buchanans 18",
+                "cod_bodega": "BOD-003",
+                "stock_actual": "100",
+                "unidad_base": "ml",
+            },
+            {
+                "cod_mp_sistema": "566",
+                "nombre_mp": "Whisky Buchanans 18",
+                "cod_bodega": "BOD-002",
+                "stock_actual": "0",
+                "unidad_base": "ml",
+            },
+        ]
+        with patch("whatsapp_webhook.leer_bd_mp_sistema", return_value=filas):
+            with patch(
+                "whatsapp_webhook._resolver_mp_por_nombre",
+                return_value={
+                    "ok": True,
+                    "cod_mp": "566",
+                    "nombre_mp": "Whisky Buchanans 18",
+                },
+            ):
+                with patch(
+                    "unidades_operativas.resolver_cantidad_traslado_mp",
+                    return_value={"cantidad_base": 750.0, "interpretacion": "750 ml"},
+                ):
+                    r = tool_trasladar_mp(
+                        {
+                            "nombre_mp": "buchanan 18",
+                            "bodega_origen": "BOD-003",
+                            "bodega_destino": "BOD-002",
+                            "cantidad": 750,
+                            "ignorar_stock": True,
+                        }
+                    )
+        self.assertTrue(r.get("requiere_confirmacion"))
+        self.assertIn("Periodo pruebas", r.get("mensaje", ""))
+
+    def test_combinar_traslado_generico_con_detalle(self):
+        from whatsapp_webhook import _texto_traslado_combinado, _traslado_ctx_touch
+
+        wa = "593992911956"
+        _traslado_ctx_touch(wa, texto="trasladar producto")
+        out = _texto_traslado_combinado(wa, "2 tortas de chocolate de 005 a 001")
+        self.assertIn("005", out)
+        self.assertIn("tortas", out.lower())
+
+    def test_continuacion_traslado_no_produccion(self):
+        from whatsapp_webhook import (
+            _es_continuacion_traslado_pendiente,
+            _resolver_prod_sub,
+            _traslado_ctx_touch,
+        )
+
+        wa = "593992911956"
+        _traslado_ctx_touch(wa, texto="trasladar producto")
+        self.assertTrue(_es_continuacion_traslado_pendiente("2 torta de chocolate"))
+        with patch(
+            "whatsapp_webhook._prod_ctx_get",
+            return_value={"area": "cocina", "catalog_seen": True},
+        ):
+            self.assertIsNone(_resolver_prod_sub("2 torta de chocolate", wa))
+
+    def test_cantidad_dos_061(self):
+        from whatsapp_webhook import _extraer_cantidad_sub
+
+        with patch(
+            "unidades_operativas.cargar_rendimiento_subrecetas",
+            return_value={
+                "SUB-061": {
+                    "rendimiento_estandar": 1054.0,
+                    "unidad": "gr",
+                    "nombre_subreceta": "torta de chocolate",
+                }
+            },
+        ):
+            cant = _extraer_cantidad_sub("2 061", cod_sub="061")
+        self.assertAlmostEqual(cant, 2108.0)
+
+
 if __name__ == "__main__":
     unittest.main()

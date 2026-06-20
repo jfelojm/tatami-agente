@@ -43,7 +43,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-railway-v17"
+TATAMI_WA_BUILD = "20250619-railway-v18"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -397,6 +397,19 @@ def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | Non
     if expl is not None:
         return expl
     if cod_sub:
+        cod_digits = cod_sub.replace("SUB-", "").replace("sub-", "").strip()[-3:]
+        m_qty_cod = re.match(
+            rf"^\s*(\d+)\s+(?:sub[- ]?)?0?{re.escape(cod_digits.lstrip('0') or cod_digits)}\b",
+            (texto or ""),
+            re.I,
+        )
+        if m_qty_cod:
+            lotes = float(m_qty_cod.group(1))
+            r = resolver_cantidad_produccion_sub(
+                cod_sub, None, texto=texto, cantidad_lotes=lotes
+            )
+            if r.get("cantidad_base") is not None:
+                return float(r["cantidad_base"])
         r = resolver_cantidad_produccion_sub(cod_sub, None, texto=texto)
         if r.get("cantidad_base") is not None:
             return float(r["cantidad_base"])
@@ -2692,6 +2705,7 @@ def tool_trasladar_mp(args):
     bodega_destino = resolver_cod_bodega(args.get("bodega_destino", ""))
     cantidad = float(args.get("cantidad", 0))
     confirmado = args.get("confirmado", False)
+    ignorar_stock = bool(args.get("ignorar_stock"))
 
     rows = leer_bd_mp_sistema()
     res_mp = _resolver_mp_por_nombre(
@@ -2757,18 +2771,23 @@ def tool_trasladar_mp(args):
             break
 
     if stock_origen is None:
-        etiqueta = nombre_mp_resuelto or nombre_mp or cod_mp
-        return {
-            "error": (
-                f"{etiqueta} no está registrado en "
-                f"{nombre_bodega(bodega_origen)} (origen del traslado)."
-                + _hint_fila_maestro_traslado(
-                    rows, cod_mp, bodega_origen, rol="origen"
+        if ignorar_stock:
+            stock_origen = 0.0
+            unidad_base = unidad_base or "UNI"
+        else:
+            etiqueta = nombre_mp_resuelto or nombre_mp or cod_mp
+            return {
+                "error": (
+                    f"{etiqueta} no está registrado en "
+                    f"{nombre_bodega(bodega_origen)} (origen del traslado)."
+                    + _hint_fila_maestro_traslado(
+                        rows, cod_mp, bodega_origen, rol="origen"
+                    )
                 )
-            )
-        }
+            }
 
-    if cantidad > stock_origen:
+    stock_insuficiente = cantidad > stock_origen
+    if stock_insuficiente and not ignorar_stock:
         return {
             "error": (
                 f"Stock insuficiente en {nombre_bodega(bodega_origen)}: "
@@ -2800,6 +2819,12 @@ def tool_trasladar_mp(args):
     if not confirmado:
         etiqueta = (nombre_mp or nombre_mp_resuelto or cod_mp).strip()
         det_cant = f" ({interpretacion_cant})" if interpretacion_cant else ""
+        aviso_pruebas = ""
+        if ignorar_stock and stock_insuficiente:
+            aviso_pruebas = (
+                f"\n⚠ Periodo pruebas cocina: stock insuficiente "
+                f"({round(stock_origen, 4)} {unidad_base} disponible) — se permitirá igual."
+            )
         return {
             "requiere_confirmacion": True,
             "cod_mp_sistema": cod_mp,
@@ -2813,6 +2838,7 @@ def tool_trasladar_mp(args):
                 f"a {nombre_bodega(bodega_destino)}? "
                 f"Stock en origen: {round(stock_origen, 4)} {unidad_base}. "
                 "Responde 'si confirmo el traslado' para ejecutar."
+                f"{aviso_pruebas}"
             ),
         }
 
@@ -3759,14 +3785,21 @@ def tool_produccion_subreceta(args):
             cantidad_resuelta = float(conv["cantidad_base"])
         if conv.get("interpretacion"):
             interpretaciones.append(str(conv["interpretacion"]))
+    simular = bool(args.get("simular", True))
+    forzar = bool(args.get("forzar"))
+    if not forzar and not simular and wa:
+        from estrategia_config import periodo_pruebas_ignorar_stock
+
+        if periodo_pruebas_ignorar_stock(wa):
+            forzar = True
     try:
         out = producir_subreceta_wa(
             cods,
             bodega=bodega,
             cantidad=cantidad_resuelta if cantidad_resuelta is not None else cant_raw,
             registrado_por=(args.get("registrado_por") or "WhatsApp").strip(),
-            simular=bool(args.get("simular", True)),
-            forzar=bool(args.get("forzar")),
+            simular=simular,
+            forzar=forzar,
             recalcular=bool(args.get("recalcular", True)),
         )
         if interpretaciones and isinstance(out, dict):
@@ -4130,20 +4163,61 @@ def _es_traslado_generico_sin_detalle(texto: str) -> bool:
     )
 
 
+def _combinar_fragmentos_traslado(prev: str, new: str) -> str:
+    """Une traslado genérico o parcial con el detalle que envía el usuario."""
+    item = ""
+    tramo_bod = ""
+    for t in (prev, new):
+        frag = _fragmento_insumo_traslado(t)
+        if frag and _normaliza_busqueda_mp(frag) not in _NOMBRES_MP_GENERICOS:
+            item = frag
+        m = _TRASLADO_DE_A_RE.search(t or "")
+        if m:
+            tramo_bod = m.group(0).strip()
+    if item and tramo_bod:
+        return f"trasladar {item} {tramo_bod}".strip()
+    if item:
+        return f"trasladar {item}".strip()
+    return f"{prev} {new}".strip()
+
+
 def _texto_traslado_combinado(wa_id: str, texto: str) -> str:
     """Combina detalle nuevo con traslado genérico pendiente (ej. transferir producto → 5 tortas…)."""
     new = _normalizar_texto_comando_wa(texto)
     ctx = _traslado_ctx_get(wa_id)
     if not ctx:
         return new
-    if _es_mensaje_traslado(new) and (_parse_traslado_bodegas(new) or _fragmento_insumo_traslado(new)):
+    if _es_mensaje_traslado(new) and (
+        _parse_traslado_bodegas(new) or _fragmento_insumo_traslado(new)
+    ):
         return new
-    prev = (ctx.get("texto") or "").strip()
+    if _es_traslado_implicito(new):
+        return new
+    prev = _normalizar_texto_comando_wa((ctx.get("texto") or "").strip())
     if not prev:
         return new
     if _parse_traslado_bodegas(new) or _fragmento_insumo_traslado(new):
-        return new
-    return new
+        return _combinar_fragmentos_traslado(prev, new)
+    if _es_traslado_generico_sin_detalle(prev):
+        return f"{prev} {new}".strip()
+    return _combinar_fragmentos_traslado(prev, new)
+
+
+def _es_continuacion_traslado_pendiente(texto: str) -> bool:
+    """Detalle parcial válido mientras hay traslado abierto (no confundir con producción)."""
+    if _es_mensaje_traslado(texto) or _es_traslado_implicito(texto):
+        return True
+    t = _normalizar_texto_comando_wa(texto)
+    if not t:
+        return False
+    if _parse_traslado_bodegas(t):
+        return True
+    frag = _fragmento_insumo_traslado(t)
+    if frag and _normaliza_busqueda_mp(frag) not in _NOMBRES_MP_GENERICOS:
+        return True
+    if _match_sub_codigos_en_texto(t) and re.match(r"^\d+\s", t):
+        return True
+    return False
 
 
 def _msg_traslado_inicio() -> str:
@@ -4424,6 +4498,10 @@ async def _manejar_traslado_mp_wa(
         "confirmado": False,
         "texto_original": texto,
     }
+    from estrategia_config import periodo_pruebas_ignorar_stock
+
+    if periodo_pruebas_ignorar_stock(wa_id):
+        args["ignorar_stock"] = True
     if cod_mp:
         args["cod_mp_sistema"] = cod_mp
         args["nombre_mp"] = nombre_mp
@@ -4557,6 +4635,8 @@ def _prod_ctx_update_from_parse(wa_id: str, texto: str, prod_sub: dict) -> None:
 
 def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
     if _es_mensaje_traslado(texto):
+        return None
+    if _traslado_ctx_get(wa_id) and _es_continuacion_traslado_pendiente(texto):
         return None
     ctx = _prod_ctx_get(wa_id)
 
@@ -4945,6 +5025,11 @@ def _llamar_agente_inner(mensaje, telefono):
                     if tc.name == "produccion_subreceta":
                         inp["_wa_id"] = telefono
                         inp.setdefault("registrado_por", telefono)
+                    if tc.name == "trasladar_mp":
+                        from estrategia_config import periodo_pruebas_ignorar_stock
+
+                        if periodo_pruebas_ignorar_stock(telefono):
+                            inp["ignorar_stock"] = True
                     if tc.name in ("trasladar_mp", "produccion_subreceta") and ultimo_user:
                         inp.setdefault("texto_original", ultimo_user)
                     result = fn(inp) if fn else {"error": f"Tool {tc.name} no encontrada"}
@@ -5187,76 +5272,102 @@ async def _manejar_produccion_sub(
     *,
     texto: str = "",
 ) -> None:
-    from estrategia_config import bodega_default_produccion_sub, validar_bodega_produccion_sub
+    from estrategia_config import (
+        bodega_default_produccion_sub,
+        periodo_pruebas_ignorar_stock,
+        validar_bodega_produccion_sub,
+    )
 
-    if texto and _es_mensaje_traslado(texto):
-        print(f"[Meta] {wa_id}: produccion bloqueada → traslado texto={texto!r}")
-        await _manejar_traslado_mp_wa(wa_id, texto, msg)
-        return
-
-    if not _autorizado_produccion_sub(wa_id):
-        await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
-        return
-    if prod_sub.get("ambiguo") or not prod_sub.get("cods"):
-        area = _resolver_area_produccion(
-            wa_id,
-            "",
-            cods=prod_sub.get("cods"),
-            area_hint=prod_sub.get("area"),
-        )
-        ctx = _prod_ctx_get(wa_id)
-        if area in ("barra", "cocina"):
-            _prod_ctx_touch(wa_id, area=area)
-            if ctx.get("catalog_seen"):
-                await enviar_mensaje_meta(wa_id, _msg_pedir_nombre_sub(area))
-            else:
-                await enviar_mensaje_meta(wa_id, _msg_menu_produccion_area(area))
-            return
-        msg = _msg_batch_no_identificado(wa_id)
-        if msg == _msg_batch_preguntar_area():
-            _pending_prod_area[wa_id] = "pick"
-        await enviar_mensaje_meta(wa_id, msg)
-        return
-    area = _resolver_area_produccion(wa_id, "", cods=prod_sub.get("cods"))
-    _prod_ctx_touch(wa_id, area=area, last_cods=prod_sub.get("cods"))
-    _limpiar_ctx_conteo(wa_id)
-    bodega = (prod_sub.get("bodega") or bodega_default_produccion_sub(wa_id)).strip().upper()
-    err = validar_bodega_produccion_sub(wa_id, bodega)
-    if err:
-        await enviar_mensaje_meta(wa_id, err)
-        return
-    prod_sub = {**prod_sub, "bodega": bodega}
-    await _feedback_procesando(wa_id, msg)
     try:
-        r = await asyncio.to_thread(
-            producir_subreceta_wa,
-            prod_sub["cods"],
-            bodega=prod_sub["bodega"],
-            cantidad=prod_sub.get("cantidad"),
-            registrado_por="WhatsApp",
-            simular=not prod_sub["confirmar"],
-            recalcular=prod_sub["confirmar"],
-        )
-        out = r.get("texto_whatsapp") or str(r)
-        if prod_sub["confirmar"]:
-            _pending_prod_sub.pop(wa_id, None)
-            _pending_prod_area.pop(wa_id, None)
-        else:
-            _pending_prod_sub[wa_id] = {
-                "cods": prod_sub["cods"],
-                "bodega": prod_sub["bodega"],
-                "cantidad": prod_sub.get("cantidad"),
-            }
-            if "confirmo" not in out.lower():
-                out += (
-                    "\n\nPara registrar en inventario responde CONFIRMAR "
-                    "o escribe confirmo."
-                )
-    except SubrecetaOperacionError as e:
-        out = f"No se pudo registrar producción: {e.message}"
+        if texto and _es_mensaje_traslado(texto):
+            print(f"[Meta] {wa_id}: produccion bloqueada → traslado texto={texto!r}")
+            await _manejar_traslado_mp_wa(wa_id, texto, msg)
+            return
+
+        if not _autorizado_produccion_sub(wa_id):
+            await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+            return
+        if prod_sub.get("ambiguo") or not prod_sub.get("cods"):
+            area = _resolver_area_produccion(
+                wa_id,
+                "",
+                cods=prod_sub.get("cods"),
+                area_hint=prod_sub.get("area"),
+            )
+            ctx = _prod_ctx_get(wa_id)
+            if area in ("barra", "cocina"):
+                _prod_ctx_touch(wa_id, area=area)
+                if ctx.get("catalog_seen"):
+                    await enviar_mensaje_meta(wa_id, _msg_pedir_nombre_sub(area))
+                else:
+                    await enviar_mensaje_meta(wa_id, _msg_menu_produccion_area(area))
+                return
+            msg_amb = _msg_batch_no_identificado(wa_id)
+            if msg_amb == _msg_batch_preguntar_area():
+                _pending_prod_area[wa_id] = "pick"
+            await enviar_mensaje_meta(wa_id, msg_amb)
+            return
+        area = _resolver_area_produccion(wa_id, "", cods=prod_sub.get("cods"))
+        _prod_ctx_touch(wa_id, area=area, last_cods=prod_sub.get("cods"))
+        _limpiar_ctx_conteo(wa_id)
+        bodega = (prod_sub.get("bodega") or bodega_default_produccion_sub(wa_id)).strip().upper()
+        err = validar_bodega_produccion_sub(wa_id, bodega)
+        if err:
+            await enviar_mensaje_meta(wa_id, err)
+            return
+        prod_sub = {**prod_sub, "bodega": bodega}
+        await _feedback_procesando(wa_id, msg)
+        forzar = periodo_pruebas_ignorar_stock(wa_id) and prod_sub["confirmar"]
+        try:
+            r = await asyncio.to_thread(
+                producir_subreceta_wa,
+                prod_sub["cods"],
+                bodega=prod_sub["bodega"],
+                cantidad=prod_sub.get("cantidad"),
+                registrado_por="WhatsApp",
+                simular=not prod_sub["confirmar"],
+                forzar=forzar,
+                recalcular=prod_sub["confirmar"],
+            )
+            out = r.get("texto_whatsapp") or str(r)
+            if periodo_pruebas_ignorar_stock(wa_id) and r.get("planes"):
+                avisos = []
+                for p in r.get("planes") or []:
+                    avisos.extend(p.get("avisos") or [])
+                if avisos:
+                    out += (
+                        "\n\n⚠ Periodo pruebas cocina: hay avisos de stock/costo "
+                        "pero puedes confirmar igual."
+                    )
+            if prod_sub["confirmar"]:
+                _pending_prod_sub.pop(wa_id, None)
+                _pending_prod_area.pop(wa_id, None)
+            else:
+                _pending_prod_sub[wa_id] = {
+                    "cods": prod_sub["cods"],
+                    "bodega": prod_sub["bodega"],
+                    "cantidad": prod_sub.get("cantidad"),
+                }
+                if "confirmo" not in out.lower():
+                    out += (
+                        "\n\nPara registrar en inventario responde CONFIRMAR "
+                        "o escribe confirmo."
+                    )
+        except SubrecetaOperacionError as e:
+            out = f"No se pudo registrar producción: {e.message}"
+        except Exception as e:
+            print(f"[Meta] producir_subreceta_wa wa_id={wa_id!r}: {e}")
+            out = f"Error al simular producción: {e!s}"
+        await enviar_mensaje_meta(wa_id, out)
     except Exception as e:
-        out = f"Error: {e}"
-    await enviar_mensaje_meta(wa_id, out)
+        import traceback
+
+        print(f"[Meta] _manejar_produccion_sub wa_id={wa_id!r}: {e}")
+        print(traceback.format_exc())
+        await enviar_mensaje_meta(
+            wa_id,
+            f"No pude procesar la producción. Intenta de nuevo.\nDetalle: {e!s}",
+        )
 
 
 async def procesar_mensaje(wa_id: str, msg: dict) -> None:
@@ -5299,8 +5410,13 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 return
 
             # Traslados MP / subreceta — PRIMERO (antes de estados pendientes de producción)
-            if _es_mensaje_traslado(texto_traslado) or (
-                _traslado_ctx_get(wa_id) and _es_traslado_implicito(texto_traslado)
+            if (
+                _es_mensaje_traslado(texto_traslado)
+                or _es_traslado_implicito(texto_traslado)
+                or (
+                    _traslado_ctx_get(wa_id)
+                    and _es_continuacion_traslado_pendiente(texto)
+                )
             ):
                 print(f"[Meta] {wa_id}: route=traslado")
                 await _manejar_traslado_mp_wa(wa_id, texto_traslado, msg)
