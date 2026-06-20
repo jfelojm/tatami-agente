@@ -43,7 +43,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-railway-v18"
+TATAMI_WA_BUILD = "20250619-railway-v19"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -275,6 +275,9 @@ def _es_mensaje_conteo(texto: str, wa_id: str | None = None) -> bool:
         return False
     t = raw.lower()
     ultima = _ultima_linea_usuario(raw).lower()
+    # Producción / subreceta no es conteo aunque diga «cocina» o «barra»
+    if re.search(r"\b(produc|prepar|subreceta|semi)\w*", t):
+        return False
     if re.search(r"\bconteo", t):
         return True
     if re.search(r"inventario\s+f[ií]sico", t):
@@ -284,11 +287,12 @@ def _es_mensaje_conteo(texto: str, wa_id: str | None = None) -> bool:
     if "conteo_barra" in t or "borrador_conteo" in t or "ciclo de conteo" in t:
         return True
     ctx = _conteo_ctx_get(wa_id) if wa_id else {}
-    if not ctx.get("active"):
-        return False
-    for fragment in (ultima, t):
-        if len(fragment) <= 48 and _parse_bodega_conteo(fragment):
-            return True
+    if ctx.get("active"):
+        if _pending_prod_area.get(wa_id or "") == "pick" and _parse_area_produccion(texto):
+            return False
+        for fragment in (ultima, t):
+            if len(fragment) <= 48 and _parse_bodega_conteo(fragment):
+                return True
     if re.search(r"\b(revisar|iniciar|nuevo|enviar|aprobar)\b", ultima):
         return True
     return False
@@ -528,9 +532,10 @@ def autorizado_comando(telefono: str, comando: str) -> bool:
 
 
 def _autorizado_produccion_sub(telefono: str) -> bool:
-    from estrategia_config import roles_con_permiso
-
-    return bool(phone_roles(telefono) & roles_con_permiso("perm_producir_sub_roles"))
+    """Producción SUB: staff cocina/barra, ADMIN y socios (dueños en allowlist)."""
+    if autorizado_tool(telefono, "produccion_subreceta"):
+        return True
+    return "SOCIO" in phone_roles(telefono)
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -5422,7 +5427,32 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 await _manejar_traslado_mp_wa(wa_id, texto_traslado, msg)
                 return
 
-            # Conteo físico — antes que producción (barra/cocina no son batches)
+            # Solo "subreceta" — menú de ayuda (no producción ambigua ni LLM)
+            if _es_palabra_subreceta_sola(texto):
+                print(f"[Meta] {wa_id}: route=ayuda_subreceta")
+                _limpiar_ctx_conteo(wa_id)
+                _pending_prod_area[wa_id] = "pick"
+                await enviar_mensaje_meta(wa_id, MSG_AYUDA_SUBRECETA)
+                return
+
+            # Respuesta BARRA / COCINA (o «producir cocina») — antes que conteo
+            if _pending_prod_area.get(wa_id) == "pick":
+                if _es_mensaje_traslado(texto):
+                    print(f"[Meta] {wa_id}: route=traslado (cancela pick producción)")
+                    _pending_prod_area.pop(wa_id, None)
+                    await _manejar_traslado_mp_wa(wa_id, texto, msg)
+                    return
+                area = _parse_area_produccion(texto)
+                if area:
+                    _prod_ctx_touch(wa_id, area=area)
+                    ctx = _prod_ctx_get(wa_id)
+                    if ctx.get("catalog_seen"):
+                        await enviar_mensaje_meta(wa_id, _msg_pedir_nombre_sub(area))
+                    else:
+                        await enviar_mensaje_meta(wa_id, _msg_menu_produccion_area(area))
+                    return
+
+            # Conteo físico — después de pick producción (barra/cocina no son batches)
             if _es_mensaje_conteo(texto, wa_id):
                 await _manejar_mensaje_conteo(wa_id, texto)
                 return
@@ -5438,28 +5468,6 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 print(f"[Meta] {wa_id}: route=ventas_hoy")
                 await _manejar_consulta_ventas_wa(wa_id, msg, texto)
                 return
-
-            # Solo "subreceta" — menú de ayuda (no producción ambigua ni LLM)
-            if _es_palabra_subreceta_sola(texto):
-                print(f"[Meta] {wa_id}: route=ayuda_subreceta")
-                await enviar_mensaje_meta(wa_id, MSG_AYUDA_SUBRECETA)
-                return
-
-            # Respuesta BARRA / COCINA tras "producir subreceta" sin detalle
-            if _pending_prod_area.get(wa_id) == "pick":
-                if _es_mensaje_traslado(texto):
-                    print(f"[Meta] {wa_id}: route=traslado (cancela pick producción)")
-                    await _manejar_traslado_mp_wa(wa_id, texto, msg)
-                    return
-                area = _parse_area_produccion(texto)
-                if area:
-                    _prod_ctx_touch(wa_id, area=area)
-                    ctx = _prod_ctx_get(wa_id)
-                    if ctx.get("catalog_seen"):
-                        await enviar_mensaje_meta(wa_id, _msg_pedir_nombre_sub(area))
-                    else:
-                        await enviar_mensaje_meta(wa_id, _msg_menu_produccion_area(area))
-                    return
 
             # Catálogo de subrecetas (no confundir con producción)
             if _es_consulta_lista_subrecetas(texto):

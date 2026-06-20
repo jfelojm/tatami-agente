@@ -362,5 +362,39 @@ class TestPeriodoPruebasCocina(unittest.TestCase):
         self.assertAlmostEqual(cant, 2108.0)
 
 
+class TestProduccionAccesoFelipe(unittest.TestCase):
+    def test_socio_puede_producir(self):
+        from whatsapp_webhook import _autorizado_produccion_sub
+
+        with patch("whatsapp_webhook.phone_roles", return_value={"SOCIO"}):
+            with patch("whatsapp_webhook.autorizado_tool", return_value=False):
+                self.assertTrue(_autorizado_produccion_sub("593987122959"))
+
+    def test_producir_cocina_no_es_conteo_con_ctx_activo(self):
+        from whatsapp_webhook import _conteo_ctx_touch, _es_mensaje_conteo
+
+        wa = "593987122959"
+        _conteo_ctx_touch(wa, active=True)
+        self.assertFalse(_es_mensaje_conteo("producir cocina", wa))
+        # «cocina» sola con pick producción pendiente no es conteo
+        from whatsapp_webhook import _pending_prod_area
+
+        _pending_prod_area[wa] = "pick"
+        self.assertFalse(_es_mensaje_conteo("cocina", wa))
+
+    def test_subreceta_activa_pick_area(self):
+        from whatsapp_webhook import (
+            _es_palabra_subreceta_sola,
+            _parse_area_produccion,
+            _pending_prod_area,
+        )
+
+        self.assertTrue(_es_palabra_subreceta_sola("subreceta"))
+        self.assertEqual(_parse_area_produccion("producir cocina"), "cocina")
+        wa = "593987122959"
+        _pending_prod_area[wa] = "pick"
+        self.assertEqual(_pending_prod_area.get(wa), "pick")
+
+
 if __name__ == "__main__":
     unittest.main()
