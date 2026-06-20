@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from registrar_produccion_subreceta import (
     _abrir_maestro,
+    _cargar_mapa_nombres_mp,
     _cargar_mapa_stock,
     _norm_sub,
+    _resolver_nombre_mp,
     _subs_meta_desde_cab,
     planificar_produccion,
     registrar,
@@ -26,25 +28,90 @@ class SubrecetaOperacionError(Exception):
         super().__init__(message)
 
 
-def _formatear_plan_wa(plan: dict, *, simular: bool) -> str:
+def _cod_sub_display(cod: str) -> str:
+    c = (cod or "").strip().upper()
+    if c.startswith("SUB-"):
+        return c
+    digits = c.replace("SUB-", "").strip()
+    if digits.isdigit():
+        return f"SUB-{digits.zfill(3)}"
+    return c
+
+
+def _lookup_nombre_mp(cod: str, nombres_mp: dict[str, str] | None) -> str:
+    if not cod or not nombres_mp:
+        return ""
+    cod = cod.strip()
+    if cod in nombres_mp:
+        return (nombres_mp[cod] or "").strip()
+    bare = cod.lstrip("0") or cod
+    for k, v in nombres_mp.items():
+        if not v:
+            continue
+        kb = (k or "").strip().lstrip("0") or k
+        if kb == bare or k.strip() == cod:
+            return v.strip()
+    return ""
+
+
+def _etiqueta_sub(cod: str, nombre: str = "") -> str:
+    c = _cod_sub_display(cod)
+    n = (nombre or "").strip()
+    if n and n.upper() != c and not n.upper().startswith("SUB-"):
+        return f"{n} ({c})"
+    return c
+
+
+def _etiqueta_mp(
+    item: dict,
+    nombres_mp: dict[str, str] | None = None,
+    subs_meta: dict[str, dict] | None = None,
+) -> str:
+    cod = (item.get("cod_mp_sistema") or "").strip()
+    nom = (item.get("nombre_mp") or "").strip()
+    if not nom or nom == cod or (nom.isdigit() and nom.lstrip("0") == cod.lstrip("0")):
+        nom = _resolver_nombre_mp(
+            cod,
+            nombre_detalle=nom,
+            nombres_mp=nombres_mp,
+            subs_meta=subs_meta,
+        )
+    if not nom or nom == cod:
+        nom = _lookup_nombre_mp(cod, nombres_mp)
+    if str(cod).upper().startswith("SUB-"):
+        return _etiqueta_sub(cod, nom)
+    if nom and nom != cod:
+        return f"{nom} ({cod})"
+    return cod or "?"
+
+
+def _formatear_plan_wa(
+    plan: dict,
+    *,
+    simular: bool,
+    nombres_mp: dict[str, str] | None = None,
+    subs_meta: dict[str, dict] | None = None,
+) -> str:
+    ctx = {"nombres_mp": nombres_mp, "subs_meta": subs_meta}
+    etiqueta = lambda item: _etiqueta_mp(item, **ctx)
     lines = [
-        f"{'[SIMULACIÓN] ' if simular else ''}Producción SUB {plan['cod_subreceta']} — {plan['nombre_subreceta']}",
+        f"{'[SIMULACIÓN] ' if simular else ''}Producción {_etiqueta_sub(plan['cod_subreceta'], plan['nombre_subreceta'])}",
         f"Lote: {plan['cantidad_producida']} {plan['unidad']} (rend {plan['rendimiento_estandar']}, factor {plan['factor']})",
-        f"Entrada: {plan['entrada_sub']['cod_mp_sistema']} +{plan['entrada_sub']['cantidad_mov']} {plan['entrada_sub']['unidad_base']} @ {plan['bodega_destino']}",
+        f"Entrada: {etiqueta(plan['entrada_sub'])} +{plan['entrada_sub']['cantidad_mov']} {plan['entrada_sub']['unidad_base']} @ {plan['bodega_destino']}",
         "Salidas MP:",
     ]
     for s in plan["salidas_mp"][:12]:
         lines.append(
-            f"  • {s['cod_mp_sistema']} @ {s['cod_bodega']}: -{s['cantidad_mov']} {s['unidad_base']}"
+            f"  • {etiqueta(s)} @ {s['cod_bodega']}: -{s['cantidad_mov']} {s['unidad_base']}"
         )
     if len(plan["salidas_mp"]) > 12:
         lines.append(f"  … +{len(plan['salidas_mp']) - 12} líneas más")
     if plan["avisos"]:
         lines.append("Avisos:")
-        for a in plan["avisos"][:6]:
+        for a in plan["avisos"][:8]:
             lines.append(f"  ! {a}")
     if simular:
-        lines.append("Para aplicar: repite el comando con CONFIRMAR al final.")
+        lines.append("Para aplicar: responde *SÍ* o *confirmo*.")
     return "\n".join(lines)
 
 
@@ -71,6 +138,7 @@ def producir_subreceta_wa(
     costos_mp = cargar_costos_mp(sh)
     subs_meta = _subs_meta_desde_cab(cab)
     stock_map = _cargar_mapa_stock(sh)
+    nombres_mp = _cargar_mapa_nombres_mp(sh)
 
     planes: list[dict] = []
     resultados: list[dict] = []
@@ -92,7 +160,14 @@ def producir_subreceta_wa(
                 stock_map=stock_map,
             )
             planes.append(plan)
-            textos.append(_formatear_plan_wa(plan, simular=simular))
+            textos.append(
+                _formatear_plan_wa(
+                    plan,
+                    simular=simular,
+                    nombres_mp=nombres_mp,
+                    subs_meta=subs_meta,
+                )
+            )
 
             if plan["avisos"] and not forzar and not simular:
                 omitidos.append(cod)

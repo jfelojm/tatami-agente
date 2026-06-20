@@ -60,7 +60,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250620-confirm-typo-v25"
+TATAMI_WA_BUILD = "20250620-prod-nombres-v26"
 
 
 def _log_webhook_event(line: str) -> None:

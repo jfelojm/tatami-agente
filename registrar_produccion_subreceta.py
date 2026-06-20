@@ -193,8 +193,14 @@ def planificar_produccion(
 
     for ln in lineas:
         if es_linea_subreceta_hijo(ln):
+            hijo_raw = (ln.get("cod_subreceta_hijo") or "").strip()
+            from codigos_subreceta import cod_sub_canonico
+
+            hijo_c = cod_sub_canonico(hijo_raw)
+            hijo_nom = (subs_meta.get(hijo_c) or {}).get("nombre_subreceta") or hijo_raw
+            padre_nom = (meta.get("nombre_subreceta") or info.get("nombre_subreceta") or cod)
             avisos.append(
-                f"Sub {cod} tiene hijo {ln.get('cod_subreceta_hijo')}: "
+                f"{padre_nom} ({cod}) requiere hijo {hijo_nom} ({hijo_c}): "
                 "producir hijo antes o usar lote estándar completo"
             )
             continue
@@ -394,8 +400,11 @@ def _imprimir_plan(plan: dict) -> None:
           f"@ ${plan['entrada_sub']['costo_unitario']:.6f}/u")
     print("  Salidas MP:")
     for s in plan["salidas_mp"]:
+        cod = s["cod_mp_sistema"]
+        nom = (s.get("nombre_mp") or "").strip()
+        etiqueta = f"{nom} ({cod})" if nom and nom != cod else cod
         print(
-            f"    {s['cod_mp_sistema']} @ {s['cod_bodega']}: "
+            f"    {etiqueta} @ {s['cod_bodega']}: "
             f"-{s['cantidad_mov']} {s['unidad_base']} (cu ${s['costo_unitario']:.6f})"
         )
     if plan["avisos"]:
