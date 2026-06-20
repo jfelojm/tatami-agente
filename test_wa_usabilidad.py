@@ -1,0 +1,60 @@
+"""Tests wa_usabilidad — menú y mensajes por rol."""
+
+from __future__ import annotations
+
+import unittest
+from unittest.mock import patch
+
+import wa_usabilidad as wu
+
+
+class TestMenu(unittest.TestCase):
+    def test_comando_menu(self):
+        self.assertTrue(wu.es_comando_menu("ayuda"))
+        self.assertTrue(wu.es_comando_menu("hola"))
+        self.assertFalse(wu.es_comando_menu("2 tortas de chocolate"))
+
+    def test_seleccion_numerica(self):
+        self.assertEqual(wu.parse_seleccion_menu("3"), 3)
+        self.assertIsNone(wu.parse_seleccion_menu("23"))
+
+
+class TestMensajesPorRol(unittest.TestCase):
+    def test_operativo_mensaje_corto(self):
+        with patch("wa_usabilidad.phone_roles", return_value={"JEFE_COCINA"}):
+            msg = wu.msg_confirmacion_traslado(
+                "593992911956",
+                cant_txt="2 lotes (1054 gr c/u)",
+                etiqueta="torta de chocolate",
+                origen="Externa",
+                destino="Cocina",
+                stock_origen=0,
+                unidad_base="gr",
+                stock_insuficiente=True,
+                periodo_pruebas=True,
+                sin_fila_maestro=True,
+            )
+        self.assertIn("SÍ", msg)
+        self.assertIn("modo prueba", msg)
+        self.assertNotIn("BD_MP", msg)
+        self.assertNotIn("sync", msg.lower())
+
+    def test_admin_ve_detalle_tecnico(self):
+        with patch("wa_usabilidad.phone_roles", return_value={"ADMIN", "SOCIO"}):
+            msg = wu.msg_confirmacion_traslado(
+                "593987122959",
+                cant_txt="1 lote (1054 gr)",
+                etiqueta="torta de chocolate",
+                origen="Externa",
+                destino="Cocina",
+                stock_origen=0,
+                unidad_base="gr",
+                stock_insuficiente=True,
+                periodo_pruebas=True,
+                sin_fila_maestro=True,
+            )
+        self.assertIn("Sincroniza maestro", msg)
+
+
+if __name__ == "__main__":
+    unittest.main()

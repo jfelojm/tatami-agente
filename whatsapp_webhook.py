@@ -37,13 +37,25 @@ from conteo_operaciones import (
 )
 from kardex_inventario import get_kardex, formatear_kardex_wa, generar_xlsx
 from google_credentials import google_credentials
+from wa_usabilidad import (
+    es_comando_menu,
+    menu_ctx_activo,
+    menu_ctx_touch,
+    msg_confirmacion_traslado,
+    msg_menu_principal,
+    msg_produccion_pie_confirmacion,
+    msg_submenu,
+    msg_traslado_cancelado,
+    msg_traslado_ejecutado,
+    parse_seleccion_menu,
+)
 
 load_dotenv(override=False)
 TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-railway-v20"
+TATAMI_WA_BUILD = "20250620-usabilidad-v24"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -2930,19 +2942,24 @@ def tool_trasladar_mp(args):
         cant_txt = _fmt_cantidad_traslado_wa(
             cantidad, unidad_base, interpretacion_cant, es_subreceta=es_subreceta
         )
-        aviso_extra = ""
-        if ignorar_stock and stock_insuficiente:
-            aviso_extra = (
-                f"\n⚠ Stock insuficiente ({round(stock_origen, 4):g} {unidad_base} disponible) "
-                "— periodo de pruebas, se permite igual."
-            )
         sin_fila_maestro = es_subreceta and not any(
             norm_mp(r.get("cod_mp_sistema")) == cod_mp
             and normalizar_cod_bodega(r.get("cod_bodega", "")) in (bodega_origen, bodega_destino)
             for r in rows
         )
-        if sin_fila_maestro:
-            aviso_extra += "\n⚠ La subreceta aún no está en inventario; esto es una simulación."
+        wa_ctx = args.get("_wa_id") or args.get("wa_id") or ""
+        mensaje_confirm = msg_confirmacion_traslado(
+            wa_ctx,
+            cant_txt=cant_txt,
+            etiqueta=etiqueta,
+            origen=nombre_bodega(bodega_origen) or bodega_origen,
+            destino=nombre_bodega(bodega_destino) or bodega_destino,
+            stock_origen=round(stock_origen, 4),
+            unidad_base=unidad_base,
+            stock_insuficiente=stock_insuficiente,
+            periodo_pruebas=bool(ignorar_stock),
+            sin_fila_maestro=sin_fila_maestro,
+        )
         return {
             "requiere_confirmacion": True,
             "cod_mp_sistema": cod_mp,
@@ -2950,13 +2967,7 @@ def tool_trasladar_mp(args):
             "stock_origen": round(stock_origen, 4),
             "cantidad_interpretada": round(cantidad, 4),
             "interpretacion_cantidad": interpretacion_cant,
-            "mensaje": (
-                f"¿Confirmas trasladar *{cant_txt}* de *{etiqueta}* "
-                f"de {nombre_bodega(bodega_origen)} a {nombre_bodega(bodega_destino)}?\n\n"
-                f"Stock en origen: {round(stock_origen, 4):g} {unidad_base}.\n"
-                "Responde *si confirmo el traslado* para ejecutar."
-                f"{aviso_extra}"
-            ),
+            "mensaje": mensaje_confirm,
         }
 
     from inventario_traslado import registrar_traslado_mp
@@ -2977,14 +2988,20 @@ def tool_trasladar_mp(args):
     )
 
     invalidar_cache_bd_mp()
+    wa_ctx = args.get("_wa_id") or args.get("wa_id") or ""
+    etiqueta_ok = (nombre_mp or nombre_mp_resuelto or cod_mp).strip()
+    cant_txt = _fmt_cantidad_traslado_wa(
+        cantidad, unidad_base, interpretacion_cant, es_subreceta=es_subreceta
+    )
     return {
         "ejecutado": True,
         "cod_mov": res["cod_mov"],
-        "mensaje": (
-            f"Traslado registrado: {cantidad} {unidad_base} de "
-            f"{(nombre_mp or nombre_mp_resuelto or cod_mp).strip()} "
-            f"de {nombre_bodega(bodega_origen)} a {nombre_bodega(bodega_destino)}. "
-            "Stock y costo ref recalculados en Sheets."
+        "mensaje": msg_traslado_ejecutado(
+            wa_ctx,
+            cant_txt=cant_txt,
+            etiqueta=etiqueta_ok,
+            origen=nombre_bodega(bodega_origen) or bodega_origen,
+            destino=nombre_bodega(bodega_destino) or bodega_destino,
         ),
     }
 
@@ -4377,14 +4394,10 @@ def _es_continuacion_traslado_pendiente(texto: str) -> bool:
 def _msg_traslado_inicio() -> str:
     return (
         "*Traslado entre bodegas*\n\n"
-        "Dime en un mensaje:\n"
-        "1. Qué mueves (MP, subreceta o semi)\n"
-        "2. Cantidad (ej. 5 tortas, 1 botella, 750 ml)\n"
-        "3. Origen y destino (ej. de cocina a externa, de 005 a 001)\n\n"
-        "Ejemplos:\n"
-        "• Traslada papa 10 kg de cocina a externa\n"
-        "• Traslada 5 tortas de chocolate de cocina a externa\n"
-        "• Mueve whisky Buchanan de consignación a barra 750 ml"
+        "Escribe en una línea qué, cuánto y de dónde a dónde:\n\n"
+        "• *2 tortas de chocolate de externa a cocina*\n"
+        "• *10 kg papa de cocina a externa*\n"
+        "• *750 ml buchanan de consignación a barra*"
     )
 
 
@@ -4656,6 +4669,7 @@ async def _manejar_traslado_mp_wa(
         "cantidad": cantidad,
         "confirmado": False,
         "texto_original": texto,
+        "_wa_id": wa_id,
     }
     from estrategia_config import periodo_pruebas_ignorar_stock
 
@@ -4710,7 +4724,6 @@ async def _manejar_traslado_mp_wa(
 
 
 async def _manejar_confirmacion_traslado_wa(wa_id: str, msg: dict | None) -> None:
-    """Ejecuta traslado simulado tras «confirmo» / «si confirmo el traslado»."""
     pending = _traslado_confirm_get(wa_id)
     if not pending:
         await enviar_mensaje_meta(
@@ -4723,6 +4736,7 @@ async def _manejar_confirmacion_traslado_wa(wa_id: str, msg: dict | None) -> Non
     await _feedback_procesando(wa_id, msg)
     args = dict(pending.get("args") or {})
     args["confirmado"] = True
+    args["_wa_id"] = wa_id
     from estrategia_config import periodo_pruebas_ignorar_stock
 
     if periodo_pruebas_ignorar_stock(wa_id):
@@ -4750,6 +4764,99 @@ async def _manejar_confirmacion_traslado_wa(wa_id: str, msg: dict | None) -> Non
     else:
         out = "Traslado registrado."
     await enviar_mensaje_meta(wa_id, out)
+
+
+def _parse_ajuste_cantidad_traslado(texto: str, args: dict) -> dict | None:
+    """«2», «pero 3 tortas»… mientras hay traslado pendiente de confirmación."""
+    if _es_confirmacion_corta(texto) or _es_cancelacion_corta(texto):
+        return None
+    t = (texto or "").strip()
+    if not t or len(t) > 80:
+        return None
+    t_low = t.lower()
+    if _parse_traslado_bodegas(t) and re.search(r"\bde\b.*\ba\b", t_low):
+        return None
+
+    cod_mp = (args.get("cod_mp_sistema") or "").upper()
+    es_sub = cod_mp.startswith("SUB-")
+    t_adj = re.sub(
+        r"^(pero|mejor|son|ahora|que sean|hazlo|haz|dame|pon)\s+",
+        "",
+        t_low,
+        flags=re.I,
+    ).strip()
+
+    if es_sub:
+        cod_sub = cod_mp.replace("SUB-", "")
+        if re.match(r"^\d+$", t_adj):
+            return {"cantidad_lotes": float(t_adj)}
+        m_lotes = re.match(r"^(\d+)\s+(?:tortas?|lotes?|unidades?|semis?)", t_adj)
+        if m_lotes:
+            return {"cantidad_lotes": float(m_lotes.group(1))}
+        cant = _extraer_cantidad_sub(t_adj if t_adj != t_low else t, cod_sub=cod_sub)
+        if cant is not None:
+            return {"cantidad": cant, "cantidad_lotes": None}
+        return None
+
+    from unidades_operativas import parse_cantidad_explicita_base, parse_cantidad_presentacion
+
+    expl = parse_cantidad_explicita_base(t_adj or t)
+    if expl is not None:
+        return {"cantidad": expl}
+    pres = parse_cantidad_presentacion(t_adj or t)
+    if pres:
+        return {"cantidad": pres[0]}
+    if re.match(r"^\d+\.?\d*$", t_adj):
+        return {"cantidad": float(t_adj.replace(",", "."))}
+    return None
+
+
+async def _manejar_ajuste_traslado_wa(
+    wa_id: str, texto: str, msg: dict | None, ajuste: dict
+) -> None:
+    pending = _traslado_confirm_get(wa_id)
+    if not pending:
+        return
+    args = dict(pending.get("args") or {})
+    if ajuste.get("cantidad_lotes") is not None:
+        args["cantidad_lotes"] = ajuste["cantidad_lotes"]
+    if ajuste.get("cantidad") is not None:
+        args["cantidad"] = ajuste["cantidad"]
+        args.pop("cantidad_lotes", None)
+    args["confirmado"] = False
+    args["_wa_id"] = wa_id
+    from estrategia_config import periodo_pruebas_ignorar_stock
+
+    if periodo_pruebas_ignorar_stock(wa_id):
+        args["ignorar_stock"] = True
+
+    try:
+        r = await asyncio.to_thread(tool_trasladar_mp, args)
+    except Exception as e:
+        await enviar_mensaje_meta(wa_id, f"Error al actualizar cantidad: {e}")
+        return
+
+    if r.get("requiere_confirmacion"):
+        _traslado_confirm_touch(wa_id, args)
+        out = "Entendido, actualicé la cantidad.\n\n" + (r.get("mensaje") or "")
+        await enviar_mensaje_meta(wa_id, out)
+    elif r.get("error"):
+        await enviar_mensaje_meta(wa_id, str(r.get("error")))
+    else:
+        await enviar_mensaje_meta(wa_id, r.get("mensaje") or "Listo.")
+
+
+async def _manejar_menu_wa(wa_id: str, texto: str, msg: dict | None) -> None:
+    sel = parse_seleccion_menu(texto)
+    if sel is not None and menu_ctx_activo(wa_id):
+        menu_ctx_touch(wa_id)
+        if sel == 3:
+            await _manejar_consulta_ventas_wa(wa_id, msg, texto="ventas de hoy")
+            return
+        await enviar_mensaje_meta(wa_id, msg_submenu(sel, wa_id))
+        return
+    menu_ctx_touch(wa_id)
+    await enviar_mensaje_meta(wa_id, msg_menu_principal(wa_id))
 
 
 _BATCH_KEYWORDS = (
@@ -4910,6 +5017,7 @@ def _es_confirmacion_corta(texto: str) -> bool:
     t = (texto or "").strip().lower().replace("í", "i")
     if t in (
         "si",
+        "sí",
         "si confirmo",
         "confirmo",
         "confirmar",
@@ -5581,11 +5689,8 @@ async def _manejar_produccion_sub(
                     "bodega": prod_sub["bodega"],
                     "cantidad": prod_sub.get("cantidad"),
                 }
-                if "confirmo" not in out.lower():
-                    out += (
-                        "\n\nPara registrar en inventario responde CONFIRMAR "
-                        "o escribe confirmo."
-                    )
+                if "confirmo" not in out.lower() and "sí" not in out.lower():
+                    out += msg_produccion_pie_confirmacion()
         except SubrecetaOperacionError as e:
             out = f"No se pudo registrar producción: {e.message}"
         except Exception as e:
@@ -5647,12 +5752,26 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             if _traslado_confirm_get(wa_id):
                 if _es_cancelacion_corta(texto):
                     _limpiar_ctx_traslado_confirm(wa_id)
-                    await enviar_mensaje_meta(wa_id, "Traslado cancelado.")
+                    await enviar_mensaje_meta(wa_id, msg_traslado_cancelado())
                     return
                 if _es_confirmacion_corta(texto):
                     print(f"[Meta] {wa_id}: route=traslado_confirm")
                     await _manejar_confirmacion_traslado_wa(wa_id, msg)
                     return
+                pending_args = (_traslado_confirm_get(wa_id).get("args") or {})
+                ajuste = _parse_ajuste_cantidad_traslado(texto, pending_args)
+                if ajuste:
+                    print(f"[Meta] {wa_id}: route=traslado_ajuste_cantidad")
+                    await _manejar_ajuste_traslado_wa(wa_id, texto, msg, ajuste)
+                    return
+
+            # Menú principal (hola / ayuda / 1-5)
+            if es_comando_menu(texto) or (
+                menu_ctx_activo(wa_id) and parse_seleccion_menu(texto) is not None
+            ):
+                print(f"[Meta] {wa_id}: route=menu")
+                await _manejar_menu_wa(wa_id, texto, msg)
+                return
 
             texto_traslado = _texto_traslado_combinado(wa_id, texto)
             if _es_mensaje_traslado(texto_traslado) or _es_traslado_implicito(texto_traslado):

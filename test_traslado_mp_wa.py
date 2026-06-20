@@ -255,12 +255,12 @@ class TestTrasladoVsProduccion(unittest.TestCase):
                             "cantidad": 1,
                             "confirmado": False,
                             "ignorar_stock": True,
+                            "_wa_id": "593987122959",
                         }
                     )
         self.assertTrue(r.get("requiere_confirmacion"))
         self.assertIn("torta de chocolate", r.get("mensaje", ""))
-        self.assertIn("simulación", r.get("mensaje", ""))
-        self.assertNotIn("BD_MP_SISTEMA", r.get("mensaje", ""))
+        self.assertIn("SÍ", r.get("mensaje", ""))
         self.assertNotIn("sin conversión", r.get("mensaje", "").lower())
 
     def test_traslado_con_unicode_invisible(self):
@@ -492,6 +492,29 @@ class TestProduccionAccesoFelipe(unittest.TestCase):
         wa = "593987122959"
         _pending_prod_area[wa] = "pick"
         self.assertEqual(_pending_prod_area.get(wa), "pick")
+
+
+class TestAjusteCantidadTraslado(unittest.TestCase):
+    def test_parse_ajuste_dos_tortas(self):
+        from whatsapp_webhook import _parse_ajuste_cantidad_traslado
+
+        args = {"cod_mp_sistema": "SUB-061"}
+        adj = _parse_ajuste_cantidad_traslado("2", args)
+        self.assertEqual(adj, {"cantidad_lotes": 2.0})
+
+    def test_parse_ajuste_pero_mejor(self):
+        from whatsapp_webhook import _parse_ajuste_cantidad_traslado
+
+        args = {"cod_mp_sistema": "SUB-061"}
+        adj = _parse_ajuste_cantidad_traslado("pero 3 tortas", args)
+        self.assertEqual(adj, {"cantidad_lotes": 3.0})
+
+    def test_confirmo_no_es_ajuste(self):
+        from whatsapp_webhook import _parse_ajuste_cantidad_traslado
+
+        self.assertIsNone(
+            _parse_ajuste_cantidad_traslado("confirmo", {"cod_mp_sistema": "SUB-061"})
+        )
 
 
 class TestConfirmacionTraslado(unittest.TestCase):
