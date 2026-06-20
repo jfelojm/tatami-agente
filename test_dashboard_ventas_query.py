@@ -14,6 +14,15 @@ from dashboard_routes import (
 )
 
 
+def _ventas_json(**kwargs):
+    r = ventas(**kwargs)
+    if hasattr(r, "body"):
+        import json
+
+        return json.loads(r.body)
+    return r
+
+
 class TestParseMeses(unittest.TestCase):
     def test_meses_csv(self):
         self.assertEqual(_parse_meses_query(["2026-01,2026-06"]), {"2026-01", "2026-06"})
@@ -100,7 +109,7 @@ class TestVentasPaginacion(unittest.TestCase):
 class TestVentasIntegracion(unittest.TestCase):
     def test_anio_coincide_suma_meses(self):
         token = os.getenv("DASHBOARD_TOKEN", "tatami2026")
-        year = ventas(
+        year = _ventas_json(
             token=token,
             desde="2026-01-01",
             hasta="2026-12-31",
@@ -126,7 +135,7 @@ class TestVentasIntegracion(unittest.TestCase):
         )
         self.assertAlmostEqual(tot, chart, places=1)
 
-        jun = ventas(
+        jun = _ventas_json(
             token=token,
             desde="2026-06-01",
             hasta="2026-06-30",
