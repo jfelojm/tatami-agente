@@ -13,9 +13,8 @@ from collections import defaultdict
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
-
-load_dotenv(override=True)
+from google_credentials import google_credentials
+load_dotenv(override=False)
 
 SHEET_CABECERA = "BD_SUBRECETAS"
 SHEET_DETALLE = "BD_SUBRECETAS_DETALLE"
@@ -44,10 +43,9 @@ def filtrar_lineas_subreceta_hijo(lineas: list[dict]) -> list[dict]:
 
 
 def _abrir_maestro():
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-    )
-    return gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
+    from google_credentials import open_gspread_workbook
+
+    return open_gspread_workbook(SCOPES)
 
 
 def _fila_a_dict(headers: list[str], row: list) -> dict:

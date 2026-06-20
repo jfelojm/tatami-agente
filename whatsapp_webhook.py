@@ -38,12 +38,12 @@ from conteo_operaciones import (
 from kardex_inventario import get_kardex, formatear_kardex_wa, generar_xlsx
 from google_credentials import google_credentials
 
-load_dotenv()
+load_dotenv(override=False)
 TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250619-railway-v19"
+TATAMI_WA_BUILD = "20250619-railway-v20"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -716,11 +716,10 @@ def conectar_supabase():
 def conectar_sheets():
     global _sheet_workbook
     if _sheet_workbook is None:
+        from google_credentials import open_gspread_workbook, pin_cloud_env
 
-        creds = google_credentials(SCOPES)
-        _sheet_workbook = gspread.Client(auth=creds).open_by_key(
-            os.getenv("SPREADSHEET_ID")
-        )
+        pin_cloud_env()
+        _sheet_workbook = open_gspread_workbook(SCOPES)
     return _sheet_workbook
 
 
@@ -5322,6 +5321,9 @@ async def _manejar_produccion_sub(
             return
         prod_sub = {**prod_sub, "bodega": bodega}
         await _feedback_procesando(wa_id, msg)
+        from google_credentials import pin_cloud_env
+
+        pin_cloud_env()
         forzar = periodo_pruebas_ignorar_stock(wa_id) and prod_sub["confirmar"]
         try:
             r = await asyncio.to_thread(
@@ -5362,7 +5364,17 @@ async def _manejar_produccion_sub(
             out = f"No se pudo registrar producción: {e.message}"
         except Exception as e:
             print(f"[Meta] producir_subreceta_wa wa_id={wa_id!r}: {e}")
-            out = f"Error al simular producción: {e!s}"
+            import traceback
+
+            print(traceback.format_exc())
+            err = str(e).strip()
+            if "credenciales Google" in err or "GOOGLE_CREDENTIALS" in err:
+                out = (
+                    "No pude conectar a Google Sheets para simular producción.\n"
+                    "En Railway verifica GOOGLE_CREDENTIALS_JSON (JSON completo del service account)."
+                )
+            else:
+                out = f"Error al simular producción: {err}"
         await enviar_mensaje_meta(wa_id, out)
     except Exception as e:
         import traceback
@@ -5847,16 +5859,29 @@ async def webhook(Body: str = Form(...), From: str = Form(...)):
 @app.get("/")
 def health():
     try:
-        from google_credentials import has_google_credentials
+        from google_credentials import has_google_credentials, pin_cloud_env
 
+        pin_cloud_env()
         tools_n = len(TOOLS)
+        sheets_ok = False
+        sheets_err = ""
+        if has_google_credentials():
+            try:
+                sh = conectar_sheets()
+                sh.sheet1.get("A1")
+                sheets_ok = True
+            except Exception as e:
+                sheets_ok = False
+                sheets_err = str(e)
+        else:
+            sheets_err = "sin credenciales"
     except Exception as e:
         return {
             "status": "ok",
             "wa_build": TATAMI_WA_BUILD,
             "tools_error": str(e),
         }
-    return {
+    out = {
         "status": "ok",
         "agente": "Tatami Bao Bar v4",
         "tools": tools_n,
@@ -5864,4 +5889,9 @@ def health():
         "git_commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:12],
         "anthropic_key_set": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip()),
         "google_creds_set": has_google_credentials(),
+        "sheets_ping": sheets_ok,
+        "spreadsheet_id_set": bool((os.getenv("SPREADSHEET_ID") or "").strip()),
     }
+    if sheets_err:
+        out["sheets_error"] = sheets_err
+    return out

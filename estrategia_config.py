@@ -14,7 +14,7 @@ from typing import Iterable
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 ROLE_PRIORITY: tuple[str, ...] = (
     "ADMIN",

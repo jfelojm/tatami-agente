@@ -27,7 +27,6 @@ from datetime import datetime, timezone
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 
 from bodegas_config import normalizar_cod_bodega
@@ -39,8 +38,9 @@ from subrecetas_detalle import (
     es_linea_subreceta_hijo,
     orden_produccion,
 )
+from google_credentials import google_credentials
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SHEET_CABECERA = "BD_SUBRECETAS"
@@ -248,12 +248,8 @@ def resumen_subreceta_costo(
 def cargar_contexto_subrecetas(sh=None):
     """(cabeceras, por_padre, costos_mp, resultados_calc)."""
     import gspread
-    from google.oauth2.service_account import Credentials
-
     if sh is None:
-        creds = Credentials.from_service_account_file(
-            os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-        )
+        creds = google_credentials(SCOPES)
         sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     cab = cargar_bd_subrecetas(sh)
     detalle = cargar_bd_subrecetas_detalle(sh)
@@ -473,9 +469,7 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
 
     print("Cargando maestros...")

@@ -31,19 +31,15 @@ from subrecetas_detalle import (
     es_linea_mp_detalle,
     es_linea_subreceta_hijo,
 )
+from google_credentials import google_credentials
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 
 def _abrir_maestro():
-    import gspread
-    from google.oauth2.service_account import Credentials
+    from google_credentials import open_gspread_workbook
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
-    return gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
+    return open_gspread_workbook()
 
 
 def _norm_sub(cod: str) -> str:
@@ -103,6 +99,52 @@ def _cargar_mapa_stock(sh) -> dict[tuple[str, str], float]:
     return out
 
 
+def _cargar_mapa_nombres_mp(sh) -> dict[str, str]:
+    """cod_mp_sistema -> nombre_mp (primera fila no vacía en BD_MP_SISTEMA)."""
+    ws = sh.worksheet("BD_MP_SISTEMA")
+    vals = ws.get_all_values()
+    hi = next(
+        i for i, r in enumerate(vals) if any((c or "").strip() == "cod_mp_sistema" for c in r)
+    )
+    headers = [(c or "").strip() for c in vals[hi]]
+    icod = headers.index("cod_mp_sistema")
+    inom = headers.index("nombre_mp")
+    out: dict[str, str] = {}
+    for row in vals[hi + 1 :]:
+        if len(row) <= max(icod, inom):
+            continue
+        cod = row[icod].strip()
+        nom = row[inom].strip()
+        if cod and nom and cod not in out:
+            out[cod] = nom
+    return out
+
+
+def _resolver_nombre_mp(
+    cod_mp: str,
+    *,
+    nombre_detalle: str = "",
+    nombres_mp: dict[str, str] | None = None,
+    subs_meta: dict[str, dict] | None = None,
+) -> str:
+    nom = (nombre_detalle or "").strip()
+    if nom:
+        return nom
+    if nombres_mp:
+        nom = (nombres_mp.get(cod_mp) or "").strip()
+        if nom:
+            return nom
+    if subs_meta and cod_mp:
+        from codigos_subreceta import cod_sub_canonico
+
+        nk = cod_sub_canonico(cod_mp.replace("SUB-", "") if not cod_mp.startswith("SUB-") else cod_mp)
+        meta = subs_meta.get(nk) or {}
+        nom = (meta.get("nombre_subreceta") or "").strip()
+        if nom:
+            return nom
+    return cod_mp
+
+
 def planificar_produccion(
     cod_sub: str,
     *,
@@ -140,6 +182,7 @@ def planificar_produccion(
     costos_mp = costos_mp if costos_mp is not None else cargar_costos_mp(sh)
     if subs_meta is None:
         subs_meta = _subs_meta_desde_cab(cab)
+    nombres_mp = _cargar_mapa_nombres_mp(sh)
     meta = subs_meta.get(cod, {})
     costo_u_sub = _safe_float(meta.get("costo_unitario_estandar"))
     if costo_u_sub <= 0:
@@ -172,15 +215,22 @@ def planificar_produccion(
             avisos.append(f"MP {cod_mp}@{bod} sin costo ({nota})")
 
         stk = (stock_map or {}).get((cod_mp, bod))
+        nombre_mp = _resolver_nombre_mp(
+            cod_mp,
+            nombre_detalle=(ln.get("nombre_mp") or ""),
+            nombres_mp=nombres_mp,
+            subs_meta=subs_meta,
+        )
         if stk is not None and stk < consumo:
             avisos.append(
-                f"MP {cod_mp}@{bod}: stock {stk} < consumo {consumo} (lote factor {factor:.4f})"
+                f"{nombre_mp} ({cod_mp})@{bod}: stock {stk} < consumo {consumo} "
+                f"(lote factor {factor:.4f})"
             )
 
         salidas_mp.append(
             {
                 "cod_mp_sistema": cod_mp,
-                "nombre_mp": (ln.get("nombre_mp") or "").strip(),
+                "nombre_mp": nombre_mp,
                 "cod_bodega": bod,
                 "cantidad_mov": consumo,
                 "unidad_base": (ln.get("unidad_base") or "gr").strip(),

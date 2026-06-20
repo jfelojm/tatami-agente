@@ -362,6 +362,27 @@ class TestPeriodoPruebasCocina(unittest.TestCase):
         self.assertAlmostEqual(cant, 2108.0)
 
 
+class TestGoogleCredentialsPin(unittest.TestCase):
+    def test_pin_restores_json_after_dotenv_wipe(self):
+        import os
+        from pathlib import Path
+
+        from dotenv import load_dotenv
+        import google_credentials as gc
+
+        gc._PINNED_ENV["GOOGLE_CREDENTIALS_JSON"] = (
+            '{"type":"service_account","project_id":"x"}'
+        )
+        os.environ["GOOGLE_CREDENTIALS_JSON"] = gc._PINNED_ENV["GOOGLE_CREDENTIALS_JSON"]
+        p = Path("_t_pin.env")
+        p.write_text("GOOGLE_CREDENTIALS_JSON=\n", encoding="utf-8")
+        load_dotenv(p, override=True)
+        self.assertFalse((os.getenv("GOOGLE_CREDENTIALS_JSON") or "").strip())
+        gc.pin_cloud_env()
+        self.assertTrue((os.getenv("GOOGLE_CREDENTIALS_JSON") or "").strip())
+        p.unlink()
+
+
 class TestProduccionAccesoFelipe(unittest.TestCase):
     def test_socio_puede_producir(self):
         from whatsapp_webhook import _autorizado_produccion_sub

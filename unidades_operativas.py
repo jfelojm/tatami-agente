@@ -193,9 +193,11 @@ def cargar_factores_mp_por_cod(*, sh=None, force_refresh: bool = False) -> dict[
         from dotenv import load_dotenv
         from google_credentials import google_credentials
 
-        load_dotenv()
-        creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
-        sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
+        load_dotenv(override=False)
+        from google_credentials import google_credentials, open_gspread_workbook, pin_cloud_env
+
+        pin_cloud_env()
+        sh = open_gspread_workbook(["https://www.googleapis.com/auth/spreadsheets"])
 
     ws = sh.worksheet("BD_ITEMS_PROV")
     vals = ws.get_all_values()
@@ -261,9 +263,11 @@ def cargar_rendimiento_subrecetas(*, sh=None, force_refresh: bool = False) -> di
         from dotenv import load_dotenv
         from google_credentials import google_credentials
 
-        load_dotenv()
-        creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
-        sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
+        load_dotenv(override=False)
+        from google_credentials import google_credentials, open_gspread_workbook, pin_cloud_env
+
+        pin_cloud_env()
+        sh = open_gspread_workbook(["https://www.googleapis.com/auth/spreadsheets"])
 
     from subrecetas_detalle import cargar_bd_subrecetas
 
