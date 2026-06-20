@@ -12,7 +12,7 @@ from datetime import date
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from supabase import create_client
 
 from dashboard_services.compras import build_resumen_compras
@@ -31,6 +31,14 @@ router = APIRouter()
 DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "tatami2026")
 _DASH_DIR = Path(__file__).resolve().parent
 _DASHBOARD_HTML = _DASH_DIR / "dashboard.html"
+_NO_STORE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Pragma": "no-cache",
+}
+
+
+def _json_no_store(content) -> JSONResponse:
+    return JSONResponse(content=content, headers=_NO_STORE_HEADERS)
 
 
 def _escape_script(js: str) -> str:
@@ -509,7 +517,7 @@ def dashboard(token: str = ""):
     html = _DASHBOARD_HTML.read_text(encoding="utf-8")
     html = html.replace("__TOKEN__", token)
     html = _inline_dashboard_js(html)
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html, headers=_NO_STORE_HEADERS)
 
 
 @router.get("/dashboard-app.js")
@@ -814,10 +822,7 @@ def ventas(
             desde=date.fromisoformat(desde),
             hasta=date.fromisoformat(hasta),
         )
-    return result
-
-
-def _query_mov_inventario(sb, *, desde: str | None, hasta: str | None) -> list[dict]:
+    return _json_no_store(result)
     q = sb.table("mov_inventario").select(
         "fecha,tipo_mov,cod_mp_sistema,nombre_mp,cantidad_mov,"
         "costo_unitario,costo_total,num_documento,cod_bodega_origen,cod_bodega_destino,observaciones"
@@ -869,7 +874,12 @@ def dashboard_meta(token: str = ""):
     _check_token(token)
     base = meta_dashboard(_get_sb())
     base.update(_opciones_filtro_catalogo(_cargar_catalogo()))
-    return base
+    base["api_version"] = (
+        os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("GIT_COMMIT")
+        or "dev"
+    )[:12]
+    return _json_no_store(base)
 
 
 @router.get("/api/dashboard/ventas/socios")

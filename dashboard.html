@@ -1440,6 +1440,42 @@ let view = 'tree';
 let audience = 'socios';
 window.audience = audience;
 let _data = null;
+const DASH_FETCH = { cache: 'no-store' };
+
+function dashFetch(url) {
+  return fetch(url, DASH_FETCH);
+}
+
+function formatChartLabel(lbl) {
+  const s = String(lbl || '');
+  const m = /^(\d{4})-(\d{2})$/.exec(s);
+  if (m && (ag === 'mes' || ag === 'anio')) {
+    const meses = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    return meses[parseInt(m[2], 10)] + ' ' + m[1].slice(2);
+  }
+  return s;
+}
+
+function periodFilterMatchesLabels(pf, labels) {
+  if (!pf || !pf.length || !labels || !labels.length) return false;
+  const sample = String(labels[0]);
+  const pf0 = String(pf[0]);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(sample)) return ag === 'dia' && /^\d{4}-\d{2}-\d{2}$/.test(pf0);
+  if (/^\d{4}-W\d{2}$/.test(sample)) return ag === 'semana' && /^\d{4}-W\d{2}$/.test(pf0);
+  if (/^\d{4}-\d{2}$/.test(sample)) return (ag === 'mes' || ag === 'anio') && /^\d{4}-\d{2}$/.test(pf0);
+  if (/^\d{4}$/.test(sample)) return ag === 'anio' && /^\d{4}$/.test(pf0);
+  return false;
+}
+
+function sumSeriesByPv(d, idx) {
+  const out = { BARRA: 0, COCINA: 0, OTRO: 0 };
+  idx.forEach(i => {
+    out.BARRA += Number((d.barra || [])[i]) || 0;
+    out.COCINA += Number((d.cocina || [])[i]) || 0;
+    out.OTRO += Number((d.otro || [])[i]) || 0;
+  });
+  return out;
+}
 let _socios = null;
 let _rentData = null;
 let _meta = null;
@@ -1505,7 +1541,7 @@ function deltaHtml(d) {
 
 async function loadMeta() {
   try {
-    const res = await fetch(`${BASE}/api/dashboard/meta?token=${TOKEN}`);
+    const res = await dashFetch(`${BASE}/api/dashboard/meta?token=${TOKEN}`);
     if (!res.ok) return;
     _meta = await res.json();
     window._meta = _meta;
@@ -2271,6 +2307,7 @@ function buildUrl() {
 
 async function cargar() {
   const mySeq = ++_cargarSeq;
+  window._periodFilter = null;
   document.getElementById('error-msg').classList.add('hid');
   if (window.currentDash === 'rentabilidad') {
     if (typeof window.cargarRentabilidadFull === 'function') return window.cargarRentabilidadFull();
@@ -2290,12 +2327,13 @@ async function cargar() {
       appendPvToQuery(q);
       appendPlatoCatToQuery(q);
       appendMesesToQuery(q, ranges);
-      let res = await fetch(`${BASE}/api/dashboard/ventas?${q}`);
+      if (_meta && _meta.api_version) q.set('_v', _meta.api_version);
+      let res = await dashFetch(`${BASE}/api/dashboard/ventas?${q}`);
       if (!res.ok) {
         q.delete('incluir_socios');
         q.delete('agrup');
         q.delete('orden');
-        res = await fetch(`${BASE}/api/dashboard/ventas/socios?${q}`);
+        res = await dashFetch(`${BASE}/api/dashboard/ventas/socios?${q}`);
       }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -2321,7 +2359,13 @@ async function cargar() {
   document.getElementById('metrics').innerHTML = '<div class="loading">Cargando...</div>';
   document.getElementById('tb').innerHTML = '<tr><td colspan="5" class="loading">Cargando...</td></tr>';
   try {
-    const res = await fetch(buildUrl());
+    let url = buildUrl();
+    if (_meta && _meta.api_version) {
+      const u = new URL(url);
+      u.searchParams.set('_v', _meta.api_version);
+      url = u.toString();
+    }
+    const res = await dashFetch(url);
     if (!res.ok) {
       let detail = `Error ${res.status}`;
       try {
@@ -2347,38 +2391,22 @@ async function cargar() {
 }
 
 
-function sumChartPeriodTotals(d, idx) {
-  let tvta = 0;
-  idx.forEach(i => {
-    if (pvIncludes('BARRA')) tvta += Number((d.barra || [])[i]) || 0;
-    if (pvIncludes('COCINA')) tvta += Number((d.cocina || [])[i]) || 0;
-    if (pvIncludes('OTRO')) tvta += Number((d.otro || [])[i]) || 0;
-  });
-  return tvta;
-}
-
 function render() {
   if (!_data) return;
   const d = _data;
   const idx = chartIndices(d.labels || []);
+  const pvSum = sumSeriesByPv(d, idx);
   let tvta = 0, tuds = 0;
-  if (window._periodFilter && window._periodFilter.length && d.labels && d.labels.length) {
-    tvta = sumChartPeriodTotals(d, idx);
-    const allVta = (d.total_barra || 0) + (d.total_cocina || 0) + (d.total_otro || 0);
-    PV_KEYS.forEach(k => {
-      if (pvIncludes(k)) tuds += (d.desglose?.[k]?.uds) || 0;
-    });
-    if (allVta > 0 && tvta < allVta) {
-      const ratio = tvta / allVta;
-      tuds = Math.round(tuds * ratio);
-    }
-  } else {
-    PV_KEYS.forEach(k => {
-      if (pvIncludes(k)) {
-        tvta += (d.desglose?.[k]?.vta) || 0;
-        tuds += (d.desglose?.[k]?.uds) || 0;
-      }
-    });
+  if (pvIncludes('BARRA')) tvta += pvSum.BARRA;
+  if (pvIncludes('COCINA')) tvta += pvSum.COCINA;
+  if (pvIncludes('OTRO')) tvta += pvSum.OTRO;
+  PV_KEYS.forEach(k => {
+    if (pvIncludes(k)) tuds += (d.desglose?.[k]?.uds) || 0;
+  });
+  const allVta = (d.total_barra || 0) + (d.total_cocina || 0) + (d.total_otro || 0);
+  if (allVta > 0 && Math.abs(tvta - allVta) > 0.01) {
+    const ratio = tvta / allVta;
+    tuds = Math.round(tuds * ratio);
   }
   _tv = tvta || 1;
 
@@ -2389,13 +2417,13 @@ function render() {
     `<div class="mc"><div class="ml">Ticket promedio</div><div class="mv">$${tuds>0?(tvta/tuds).toFixed(2):'0.00'}</div><div class="ms">por ítem</div></div>`,
   ];
   if (pvIncludes('BARRA')) {
-    cards.push(`<div class="mc"><div class="ml">Barra</div><div class="mv">$${(d.desglose?.BARRA?.vta||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${pct(d.desglose?.BARRA?.vta||0)}% del filtro</div></div>`);
+    cards.push(`<div class="mc"><div class="ml">Barra</div><div class="mv">$${pvSum.BARRA.toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${pct(pvSum.BARRA)}% del filtro</div></div>`);
   }
   if (pvIncludes('COCINA')) {
-    cards.push(`<div class="mc"><div class="ml">Cocina</div><div class="mv">$${(d.desglose?.COCINA?.vta||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${pct(d.desglose?.COCINA?.vta||0)}% del filtro</div></div>`);
+    cards.push(`<div class="mc"><div class="ml">Cocina</div><div class="mv">$${pvSum.COCINA.toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${pct(pvSum.COCINA)}% del filtro</div></div>`);
   }
   if (pvIncludes('OTRO')) {
-    cards.push(`<div class="mc"><div class="ml">Otro</div><div class="mv">$${(d.desglose?.OTRO?.vta||0).toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${pct(d.desglose?.OTRO?.vta||0)}% del filtro</div></div>`);
+    cards.push(`<div class="mc"><div class="ml">Otro</div><div class="mv">$${pvSum.OTRO.toLocaleString('es-EC',{maximumFractionDigits:0})}</div><div class="ms">${pct(pvSum.OTRO)}% del filtro</div></div>`);
   }
   document.getElementById('metrics').innerHTML = cards.join('');
 
@@ -2408,7 +2436,9 @@ function render() {
 function chartIndices(labels) {
   let idx = labels.map((_, i) => i);
   const pf = window._periodFilter;
-  if (pf && pf.length) idx = idx.filter(i => pf.includes(labels[i]));
+  if (pf && pf.length && periodFilterMatchesLabels(pf, labels)) {
+    idx = idx.filter(i => pf.includes(labels[i]));
+  }
   if (ag === 'dia') {
     const ds = getCheckedValues(document.getElementById('chk-dias-sem'));
     if (ds.length && ds.length < 7) {
@@ -2430,7 +2460,7 @@ function drawChart() {
     return;
   }
   const idx = chartIndices(d.labels);
-  const labels = idx.map(i => d.labels[i]);
+  const labels = idx.map(i => formatChartLabel(d.labels[i]));
   const pick = arr => idx.map(i => (arr || [])[i] ?? 0);
   const legend = document.getElementById('chart-legend');
   const showBarra = pvIncludes('BARRA');
