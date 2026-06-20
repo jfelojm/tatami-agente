@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250620-costo-cache-v29"
+TATAMI_WA_BUILD = "20250620-par-level-routing-v30"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -522,6 +522,8 @@ def _es_intento_produccion(texto: str, wa_id: str | None = None) -> bool:
         return False
     if _es_consulta_receta_plato(texto):
         return False
+    if _es_consulta_bajo_par(texto):
+        return False
     t = (texto or "").lower()
     if re.search(r"\bproducto?s?\b", t) and not re.search(
         r"\b(producir|produccion|producción|preparar|preparacion|preparación)\w*",
@@ -543,9 +545,9 @@ def _es_intento_produccion(texto: str, wa_id: str | None = None) -> bool:
 
 def _es_orden_produccion_afirmativa(texto: str) -> bool:
     t = (texto or "").lower().strip()
-    if re.search(r"\b(prepar|produc)\w*", t):
+    if re.search(r"\b(preparar|preparacion|preparación|producir|produccion|producción)\w*", t):
         return True
-    return bool(t.startswith("si ") and re.search(r"\b(prepar|produc|haz|hacer)\w*", t))
+    return bool(t.startswith("si ") and re.search(r"\b(prepar|producir|haz|hacer)\w*", t))
 
 
 def autorizado_tool(telefono: str, tool_name: str) -> bool:
@@ -4556,6 +4558,24 @@ async def _manejar_aclaracion_traslado(wa_id: str, texto: str, msg: dict | None)
     return True
 
 
+async def _manejar_consulta_bajo_par_wa(
+    wa_id: str,
+    msg: dict | None,
+    texto: str = "",
+) -> None:
+    """Insumos bajo par level — directo, sin LLM."""
+    try:
+        await _feedback_procesando(wa_id, msg)
+        out = await asyncio.to_thread(_texto_bajo_par_wa, texto)
+        await _enviar_texto_largo_wa(wa_id, out)
+    except Exception as e:
+        print(f"[Meta] consulta bajo par wa_id={wa_id!r} texto={texto!r}: {e}")
+        await enviar_mensaje_meta(
+            wa_id,
+            "No pude consultar insumos bajo par. Intenta de nuevo en un momento.",
+        )
+
+
 async def _manejar_consulta_ventas_wa(
     wa_id: str,
     msg: dict | None,
@@ -4935,21 +4955,79 @@ async def _manejar_menu_wa(wa_id: str, texto: str, msg: dict | None) -> None:
     await enviar_mensaje_meta(wa_id, msg_menu_principal(wa_id))
 
 
-_BATCH_KEYWORDS = (
-    "batch",
-    "subreceta",
-    "sub receta",
-    "sub-0",
-    "semi",
-    "salsa",
-    "pan bao",
-    "bao",
-    "masa",
-    "prepar",
-    "produc",
-    "registr",
-    "hacer",
+# Palabras completas — no usar "produc" suelto (matchea «productos»).
+_BATCH_WORD_PATTERNS = (
+    r"\bbatch\b",
+    r"\bsubreceta\b",
+    r"\bsub receta\b",
+    r"\bsub-0\d",
+    r"\bsemi\b",
+    r"\bsalsa\b",
+    r"\bpan bao\b",
+    r"\bbao\b",
+    r"\bmasa\b",
+    r"\bprepar",
+    r"\bproducir\b",
+    r"\bproduccion\b",
+    r"\bproducción\b",
+    r"\bregistr",
+    r"\bhacer\b",
 )
+
+
+def _texto_parece_batch(t: str) -> bool:
+    return any(re.search(pat, t, re.I) for pat in _BATCH_WORD_PATTERNS)
+
+
+def _es_consulta_bajo_par(texto: str) -> bool:
+    """Insumos/productos bajo par level — no es producción de subreceta."""
+    t = re.sub(r"\s+", " ", (texto or "").strip().lower())
+    if not t:
+        return False
+    if not re.search(r"\bpar\b", t) and "par level" not in t:
+        return False
+    if re.search(
+        r"\b(bajo|debajo|critico|crítico|reponer|faltante|deficit|déficit|minimo|mínimo)\b",
+        t,
+    ):
+        return True
+    if re.search(r"\b(producto?s?|insumo?s?|materia?s?\s+prima?s?)\b", t):
+        return True
+    return False
+
+
+def _extraer_top_par(texto: str) -> int:
+    t = (texto or "").lower()
+    m = re.search(r"\btop\s*(\d+)\b", t)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"\b(primeros?|ultimos?)\s*(\d+)\b", t)
+    if m:
+        return int(m.group(2))
+    return 0
+
+
+def _texto_bajo_par_wa(texto: str = "") -> str:
+    top = _extraer_top_par(texto)
+    r = tool_stock_critico({"top": top} if top else {})
+    items = r.get("items") or []
+    total = int(r.get("total_bajo_par") or 0)
+    if total == 0:
+        return "No hay insumos bajo par level (par > 0 y stock total < par)."
+    titulo = f"Insumos bajo par level: {total}"
+    if top and total > len(items):
+        titulo += f" (mostrando top {top})"
+    lines = [titulo, ""]
+    for it in items:
+        nom = (it.get("nombre") or it.get("cod_mp_sistema") or "").strip()
+        stock = it.get("stock_actual")
+        par = it.get("par_level")
+        uni = (it.get("unidad") or "").strip()
+        pct = it.get("deficit_pct")
+        lines.append(
+            f"- {nom}: stock {stock}{uni} / par {par}{uni} ({pct}% bajo par)"
+        )
+    return "\n".join(lines)
 
 
 def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict | None:
@@ -4963,6 +5041,8 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
         return None
     if _es_consulta_lista_subrecetas(raw):
         return None
+    if _es_consulta_bajo_par(raw):
+        return None
     if _es_consulta_receta_plato(raw):
         return None
     if _es_mensaje_traslado(raw):
@@ -4970,7 +5050,7 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
     t = raw.lower()
     cods = _match_sub_codigos_en_texto(raw)
     parece_batch = (
-        any(k in t for k in _BATCH_KEYWORDS)
+        _texto_parece_batch(t)
         or bool(cods)
         or (
             _es_intento_produccion(raw, wa_id)
@@ -5025,6 +5105,8 @@ def _prod_ctx_update_from_parse(wa_id: str, texto: str, prod_sub: dict) -> None:
 
 def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
     if _es_mensaje_traslado(texto):
+        return None
+    if _es_consulta_bajo_par(texto):
         return None
     if _traslado_confirm_get(wa_id) and _es_confirmacion_corta(texto):
         return None
@@ -5905,6 +5987,16 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             if _es_consulta_receta_plato(texto):
                 print(f"[Meta] {wa_id}: route=receta_plato")
                 await _manejar_consulta_receta_plato_wa(wa_id, texto, msg)
+                return
+
+            # Insumos bajo par level — sin LLM (antes que producción/batch)
+            if _es_consulta_bajo_par(texto):
+                if not puede_consultar_inventario(wa_id):
+                    await enviar_mensaje_meta(wa_id, MSG_SIN_PERMISO_CONSULTA)
+                    return
+                print(f"[Meta] {wa_id}: route=bajo_par")
+                _limpiar_pick_produccion(wa_id)
+                await _manejar_consulta_bajo_par_wa(wa_id, msg, texto)
                 return
 
             # Ventas de hoy — sin LLM
