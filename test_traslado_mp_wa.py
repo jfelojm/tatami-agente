@@ -494,5 +494,51 @@ class TestProduccionAccesoFelipe(unittest.TestCase):
         self.assertEqual(_pending_prod_area.get(wa), "pick")
 
 
+class TestConfirmacionTraslado(unittest.TestCase):
+    def test_confirmo_es_confirmacion_corta(self):
+        from whatsapp_webhook import _es_confirmacion_corta
+
+        self.assertTrue(_es_confirmacion_corta("confirmo"))
+        self.assertTrue(_es_confirmacion_corta("si confirmo el traslado"))
+
+    def test_cancelar_traslado(self):
+        from whatsapp_webhook import _es_cancelacion_corta
+
+        self.assertTrue(_es_cancelacion_corta("cancelar"))
+
+    def test_pending_confirm_ttl(self):
+        from whatsapp_webhook import (
+            _limpiar_ctx_traslado_confirm,
+            _traslado_confirm_get,
+            _traslado_confirm_touch,
+        )
+
+        wa = "593987122959"
+        _traslado_confirm_touch(
+            wa,
+            {
+                "bodega_origen": "BOD-005",
+                "bodega_destino": "BOD-001",
+                "cod_mp_sistema": "SUB-061",
+                "nombre_mp": "torta de chocolate",
+                "cantidad": 2108,
+            },
+        )
+        self.assertTrue(_traslado_confirm_get(wa))
+        _limpiar_ctx_traslado_confirm(wa)
+        self.assertFalse(_traslado_confirm_get(wa))
+
+    def test_confirmo_no_va_a_produccion_si_hay_traslado_pendiente(self):
+        from whatsapp_webhook import (
+            _resolver_prod_sub,
+            _traslado_confirm_touch,
+        )
+
+        wa = "593987122959"
+        _traslado_confirm_touch(wa, {"bodega_origen": "BOD-005", "bodega_destino": "BOD-001"})
+        with patch("whatsapp_webhook._prod_ctx_get", return_value={"area": "cocina"}):
+            self.assertIsNone(_resolver_prod_sub("confirmo", wa))
+
+
 if __name__ == "__main__":
     unittest.main()

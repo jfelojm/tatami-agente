@@ -611,6 +611,9 @@ _CONTEO_CTX_TTL_SEC = 900
 # Contexto de traslado pendiente (insumo/bodegas incompletos o aclaración sub)
 _pending_traslado: dict[str, dict] = {}
 _TRASLADO_CTX_TTL_SEC = 900
+# Simulación de traslado esperando «confirmo» (como _pending_prod_sub)
+_pending_traslado_confirm: dict[str, dict] = {}
+_TRASLADO_CONFIRM_TTL_SEC = 900
 MSG_COLA_ESPERA = (
     "Un momento, estoy procesando tu mensaje anterior. Te respondo en seguida."
 )
@@ -4201,6 +4204,10 @@ def _limpiar_ctx_produccion(wa_id: str) -> None:
     historiales.pop(wa_id, None)
 
 
+def _limpiar_ctx_traslado_parcial(wa_id: str) -> None:
+    _pending_traslado.pop(wa_id, None)
+
+
 _NOMBRES_MP_GENERICOS = frozenset({
     "mp",
     "mps",
@@ -4256,6 +4263,24 @@ def _traslado_ctx_get(wa_id: str) -> dict:
         _pending_traslado.pop(wa_id, None)
         return {}
     return ctx
+
+
+def _traslado_confirm_get(wa_id: str) -> dict:
+    ctx = _pending_traslado_confirm.get(wa_id)
+    if not ctx:
+        return {}
+    if time.monotonic() - ctx.get("at", 0) > _TRASLADO_CONFIRM_TTL_SEC:
+        _pending_traslado_confirm.pop(wa_id, None)
+        return {}
+    return ctx
+
+
+def _traslado_confirm_touch(wa_id: str, args: dict) -> None:
+    _pending_traslado_confirm[wa_id] = {"at": time.monotonic(), "args": dict(args)}
+
+
+def _limpiar_ctx_traslado_confirm(wa_id: str) -> None:
+    _pending_traslado_confirm.pop(wa_id, None)
 
 
 def _es_traslado_generico_sin_detalle(texto: str) -> bool:
@@ -4667,15 +4692,63 @@ async def _manejar_traslado_mp_wa(
 
     if r.get("requiere_eleccion"):
         out = r.get("mensaje") or "Varios productos coinciden; indica cuál por nombre."
+        _limpiar_ctx_traslado_confirm(wa_id)
     elif r.get("requiere_confirmacion"):
         out = r.get("mensaje") or "Confirma el traslado."
+        _traslado_confirm_touch(wa_id, args)
     elif r.get("error"):
+        out = str(r.get("error"))
+        _limpiar_ctx_traslado_confirm(wa_id)
+    elif r.get("mensaje"):
+        out = r["mensaje"]
+        _limpiar_ctx_traslado_confirm(wa_id)
+    else:
+        out = str(r)
+        _limpiar_ctx_traslado_confirm(wa_id)
+    _pending_traslado.pop(wa_id, None)
+    await enviar_mensaje_meta(wa_id, out)
+
+
+async def _manejar_confirmacion_traslado_wa(wa_id: str, msg: dict | None) -> None:
+    """Ejecuta traslado simulado tras «confirmo» / «si confirmo el traslado»."""
+    pending = _traslado_confirm_get(wa_id)
+    if not pending:
+        await enviar_mensaje_meta(
+            wa_id,
+            "No hay un traslado pendiente de confirmar. "
+            "Indica qué mover y entre qué bodegas (ej. 2 tortas de chocolate de 005 a 001).",
+        )
+        return
+
+    await _feedback_procesando(wa_id, msg)
+    args = dict(pending.get("args") or {})
+    args["confirmado"] = True
+    from estrategia_config import periodo_pruebas_ignorar_stock
+
+    if periodo_pruebas_ignorar_stock(wa_id):
+        args["ignorar_stock"] = True
+
+    try:
+        r = await asyncio.to_thread(tool_trasladar_mp, args)
+    except Exception as e:
+        await enviar_mensaje_meta(wa_id, f"Error al ejecutar traslado: {e}")
+        return
+
+    _limpiar_ctx_traslado_confirm(wa_id)
+    _pending_traslado.pop(wa_id, None)
+
+    if r.get("error"):
         out = str(r.get("error"))
     elif r.get("mensaje"):
         out = r["mensaje"]
+    elif r.get("cod_mov"):
+        nom = args.get("nombre_mp") or args.get("cod_mp_sistema") or "producto"
+        out = (
+            f"Traslado registrado: {nom} "
+            f"({args.get('bodega_origen')} → {args.get('bodega_destino')})."
+        )
     else:
-        out = str(r)
-    _pending_traslado.pop(wa_id, None)
+        out = "Traslado registrado."
     await enviar_mensaje_meta(wa_id, out)
 
 
@@ -4770,6 +4843,8 @@ def _prod_ctx_update_from_parse(wa_id: str, texto: str, prod_sub: dict) -> None:
 def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
     if _es_mensaje_traslado(texto):
         return None
+    if _traslado_confirm_get(wa_id) and _es_confirmacion_corta(texto):
+        return None
     if _traslado_ctx_get(wa_id) and _es_continuacion_traslado_pendiente(texto):
         return None
     ctx = _prod_ctx_get(wa_id)
@@ -4828,6 +4903,10 @@ def _es_comando_conteo(texto_upper: str) -> bool:
 
 
 def _es_confirmacion_produccion(texto: str) -> bool:
+    return _es_confirmacion_corta(texto)
+
+
+def _es_confirmacion_corta(texto: str) -> bool:
     t = (texto or "").strip().lower().replace("í", "i")
     if t in (
         "si",
@@ -4840,9 +4919,26 @@ def _es_confirmacion_produccion(texto: str) -> bool:
         "yes",
         "listo",
         "de acuerdo",
+        "si confirmo el traslado",
+        "confirmo el traslado",
     ):
         return True
     return t.startswith("si ") and "confirm" in t
+
+
+def _es_cancelacion_corta(texto: str) -> bool:
+    t = (texto or "").strip().lower().replace("í", "i")
+    return t in (
+        "no",
+        "cancelar",
+        "cancela",
+        "cancel",
+        "olvida",
+        "olvidalo",
+        "no confirmo",
+        "detener",
+        "stop",
+    )
 
 
 def _parse_iniciar_conteo_comando(texto: str) -> str | None:
@@ -5547,7 +5643,17 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             texto_upper = texto.strip().upper()
 
-            # Traslado: limpiar estado de producción antes de cualquier otra ruta
+            # Confirmación / cancelación de traslado simulado (antes de LLM y producción)
+            if _traslado_confirm_get(wa_id):
+                if _es_cancelacion_corta(texto):
+                    _limpiar_ctx_traslado_confirm(wa_id)
+                    await enviar_mensaje_meta(wa_id, "Traslado cancelado.")
+                    return
+                if _es_confirmacion_corta(texto):
+                    print(f"[Meta] {wa_id}: route=traslado_confirm")
+                    await _manejar_confirmacion_traslado_wa(wa_id, msg)
+                    return
+
             texto_traslado = _texto_traslado_combinado(wa_id, texto)
             if _es_mensaje_traslado(texto_traslado) or _es_traslado_implicito(texto_traslado):
                 _limpiar_ctx_produccion(wa_id)
