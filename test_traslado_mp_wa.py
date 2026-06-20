@@ -260,4 +260,7 @@ class TestTrasladoVsProduccion(unittest.TestCase):
         self.assertIsNotNone(sub)
         self.assertEqual(sub["cod_sub"], "060")
         self.assertNotIn("udon", (sub.get("nombre") or "").lower())
+
+
+if __name__ == "__main__":
     unittest.main()
