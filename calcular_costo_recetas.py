@@ -23,7 +23,6 @@ from datetime import datetime, timezone
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption
 
 from bodegas_config import normalizar_cod_bodega
@@ -49,6 +48,7 @@ from recetas_detalle import (
     es_linea_subreceta,
     norm_cod_receta,
 )
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -377,23 +377,40 @@ def resumen_plato_costo(
     }
 
 
-def cargar_contexto_costos(sh=None):
+_COSTOS_CTX_CACHE: tuple | None = None
+_COSTOS_CTX_CACHE_AT: float = 0.0
+_COSTOS_CTX_TTL_SEC = 300.0
+
+
+def cargar_contexto_costos(sh=None, *, usar_cache: bool = True):
     """(costos_mp, unitarios_sub, por_plato, lineas_detalle)."""
+    global _COSTOS_CTX_CACHE, _COSTOS_CTX_CACHE_AT
     import gspread
-    from google.oauth2.service_account import Credentials
+    import time
+
+    now = time.monotonic()
+    if (
+        usar_cache
+        and sh is None
+        and _COSTOS_CTX_CACHE is not None
+        and (now - _COSTOS_CTX_CACHE_AT) < _COSTOS_CTX_TTL_SEC
+    ):
+        return _COSTOS_CTX_CACHE
 
     if sh is None:
-        creds = Credentials.from_service_account_file(
-            os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-        )
+        creds = google_credentials(SCOPES)
         sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     detalle = cargar_bd_recetas_detalle(sh)
-    return (
+    ctx = (
         cargar_costos_mp(sh),
         cargar_unitarios_subreceta(sh),
         agrupar_por_plato(detalle),
         detalle,
     )
+    if sh is not None or usar_cache:
+        _COSTOS_CTX_CACHE = ctx
+        _COSTOS_CTX_CACHE_AT = now
+    return ctx
 
 
 def calcular_costos_platos(
@@ -537,9 +554,7 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
 
     print("Cargando maestros...")

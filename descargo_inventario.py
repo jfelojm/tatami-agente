@@ -8,7 +8,6 @@ from datetime import datetime
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
 
@@ -30,6 +29,7 @@ from descargo_subreceta import (
     procesar_linea_sub_venta,
 )
 from recetas_detalle import es_linea_mp
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -173,9 +173,7 @@ def _ingredientes_mejor_variedad_por_similitud(
 
 # ── GOOGLE SHEETS ─────────────────────────────────────────────
 def _get_sheet():
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
 
 
@@ -584,7 +582,27 @@ def _cargar_lineas_ya_descargadas(
     return keys
 
 
-def procesar_descargo(fecha: str | None = None) -> dict:
+def _fecha_min_descargo_ventas() -> str:
+    """Ventas anteriores a esta fecha no generan SALIDA_VENTA (carga histórica sin stock)."""
+    return (os.getenv("TATAMI_FECHA_MIN_DESCARGO_VENTAS") or "2026-03-01").strip()[:10]
+
+
+def _venta_anterior_a_descargo_operativo(fecha_venta: str) -> bool:
+    f = (fecha_venta or "").strip()[:10]
+    if not f or len(f) < 10:
+        return False
+    return f < _fecha_min_descargo_ventas()
+
+
+def procesar_descargo(fecha: str | None = None, cod_smart_menu: str | None = None) -> dict:
+    fecha_min = _fecha_min_descargo_ventas()
+    if fecha and _venta_anterior_a_descargo_operativo(fecha):
+        print(
+            f"  SKIP descargo: fecha {fecha} < {fecha_min} "
+            "(ventas históricas sin movimiento de inventario)"
+        )
+        return {"sin_receta": [], "omitidas_historicas": True}
+
     query = (
         supabase.table("hist_ventas")
         .select("*")
@@ -595,6 +613,26 @@ def procesar_descargo(fecha: str | None = None) -> dict:
         query = query.eq("fecha", fecha)
 
     ventas = query.execute().data
+    cod_sm_filtro = (cod_smart_menu or "").strip()
+    if cod_sm_filtro:
+        ventas = [
+            v
+            for v in ventas
+            if _cod_smart_menu_venta(v) == cod_sm_filtro
+        ]
+        print(f"  Filtro cod_smart_menu={cod_sm_filtro}: {len(ventas)} venta(s)")
+    if fecha_min:
+        antes = len(ventas)
+        ventas = [
+            v
+            for v in ventas
+            if not _venta_anterior_a_descargo_operativo(str(v.get("fecha") or ""))
+        ]
+        omitidas = antes - len(ventas)
+        if omitidas:
+            print(
+                f"  {omitidas} venta(s) omitida(s): fecha < {fecha_min} (histórico sin descargo)"
+            )
     print(f"  {len(ventas)} ventas pendientes de descargo")
 
     sin_receta: list[dict] = []
@@ -993,6 +1031,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Borra SALIDA_VENTA del día y resetea descargado antes de descargar",
     )
+    p.add_argument(
+        "--cod-sm",
+        help="Solo ventas de este cod_smart_menu / cod_producto (ej. 578)",
+        default=None,
+    )
     a = p.parse_args()
 
     fecha = (a.fecha or "").strip() or None
@@ -1009,7 +1052,7 @@ if __name__ == "__main__":
         resetear_descargo_dia(fecha)
 
     print("\n[2] Procesando descargo...")
-    resumen = procesar_descargo(fecha)
+    resumen = procesar_descargo(fecha, cod_smart_menu=(a.cod_sm or "").strip() or None)
     mov_err = int(resumen.get("movimientos_err") or 0)
     if mov_err > 0:
         print(

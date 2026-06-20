@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250620-permisos-cocina-v28"
+TATAMI_WA_BUILD = "20250620-costo-cache-v29"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -3370,13 +3370,70 @@ def tool_costo_plato(args):
                     "nombre_receta": (ln0.get("nombre_receta") or "").strip(),
                 }
             )
+        # Si hay pocas variedades del mismo producto, devolver costos de todas (ej. Fernet SHOT/BOTELLA).
+        if len(matches) <= 4 and all(
+            (lineas[0].get("nombre_receta") or "").strip().upper()
+            == (matches[0][1][0].get("nombre_receta") or "").strip().upper()
+            for _, lineas in matches
+        ):
+            try:
+                costos_mp, unitarios_sub, _, _ = cargar_contexto_costos()
+            except Exception as e:
+                err = str(e).strip()
+                if "429" in err or "Quota exceeded" in err:
+                    return {
+                        "error": (
+                            "Google Sheets saturado (cuota de lecturas). "
+                            "Intenta de nuevo en 1 minuto."
+                        ),
+                    }
+                if "credenciales" in err.lower() or "GOOGLE_CREDENTIALS" in err:
+                    return {
+                        "error": (
+                            "Sin acceso a Google Sheets. "
+                            "Verifica GOOGLE_CREDENTIALS_JSON en Railway."
+                        ),
+                    }
+                return {"error": err}
+            lines = [f"Costos de {(matches[0][1][0].get('nombre_receta') or nombre).strip()}:"]
+            for _key, lineas in matches:
+                res = resumen_plato_costo(lineas, costos_mp, unitarios_sub)
+                var_out = (res.get("variedad_smart_menu") or "").strip() or "base"
+                costo_v = float(res.get("costo_plato_estandar") or 0.0)
+                lines.append(f"- {var_out}: {costo_v:.2f} USD")
+            texto = "\n".join(lines)
+            return {
+                "encontrado": True,
+                "ambiguo_resuelto": True,
+                "opciones": opciones,
+                "texto_whatsapp": texto,
+            }
         return {
             "ambiguo": True,
             "opciones": opciones,
             "mensaje": "Varias variedades o coincidencias; repite con cod_receta y variedad_smart_menu.",
         }
 
-    costos_mp, unitarios_sub, _, _ = cargar_contexto_costos()
+    try:
+        costos_mp, unitarios_sub, _, _ = cargar_contexto_costos()
+    except Exception as e:
+        err = str(e).strip()
+        if "429" in err or "Quota exceeded" in err:
+            return {
+                "error": (
+                    "Google Sheets saturado (cuota de lecturas). "
+                    "Intenta de nuevo en 1 minuto."
+                ),
+            }
+        if "credenciales" in err.lower() or "GOOGLE_CREDENTIALS" in err:
+            return {
+                "error": (
+                    "Sin acceso a Google Sheets. "
+                    "Verifica GOOGLE_CREDENTIALS_JSON en Railway."
+                ),
+            }
+        return {"error": err}
+
     _key, lineas = matches[0]
     res = resumen_plato_costo(lineas, costos_mp, unitarios_sub)
     detalle = sorted(
