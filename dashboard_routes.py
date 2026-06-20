@@ -355,33 +355,59 @@ def _sanitize_fecha(fecha: str | None) -> str | None:
         return date(y, m, min(max(d, 1), last)).isoformat()
 
 
+def _parse_meses_query(values: list[str] | None) -> set[str] | None:
+    """Meses YYYY-MM explícitos (subconjunto no contiguo del año)."""
+    raw = _parse_list_query(values)
+    if not raw:
+        return None
+    meses: set[str] = set()
+    for m in raw:
+        m = str(m).strip()[:7]
+        if re.fullmatch(r"\d{4}-\d{2}", m):
+            meses.add(m)
+    return meses or None
+
+
+def _fetch_paginated(q, *, order: tuple[tuple[str, bool], ...] = ()) -> list[dict]:
+    """Paginación estable en Supabase (requiere ORDER BY para >1000 filas)."""
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        req = q
+        for col, desc in order:
+            req = req.order(col, desc=desc)
+        chunk = req.range(offset, offset + 999).execute().data or []
+        rows.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        offset += 1000
+    return rows
+
+
 def _query_hist_ventas(
     sb,
     *,
     desde: str | None,
     hasta: str | None,
+    meses: set[str] | None = None,
 ) -> list[dict]:
-    rows: list[dict] = []
-    offset = 0
-    while True:
-        q = sb.table("hist_ventas").select(
-            "fecha,cod_smart_menu,variedad_smart_menu,nombre_producto,cod_receta,"
-            "cantidad_vendida,subtotal,descuento_valor,estado_documento"
-        )
-        if desde:
-            q = q.gte("fecha", desde)
-        if hasta:
-            q = q.lte("fecha", hasta)
-        chunk = q.range(offset, offset + 999).execute().data or []
-        rows.extend(chunk)
-        if len(chunk) < 1000:
-            break
-        offset += 1000
-    return [
-        r
-        for r in rows
-        if not estado_documento_excluye_neto_operativo(r.get("estado_documento"))
-    ]
+    q = sb.table("hist_ventas").select(
+        "fecha,cod_smart_menu,variedad_smart_menu,nombre_producto,cod_receta,"
+        "cantidad_vendida,subtotal,descuento_valor,estado_documento"
+    )
+    if desde:
+        q = q.gte("fecha", desde)
+    if hasta:
+        q = q.lte("fecha", hasta)
+    rows = _fetch_paginated(q, order=(("fecha", False), ("cod_venta", False)))
+    out: list[dict] = []
+    for r in rows:
+        if estado_documento_excluye_neto_operativo(r.get("estado_documento")):
+            continue
+        if meses and (r.get("fecha") or "")[:7] not in meses:
+            continue
+        out.append(r)
+    return out
 
 
 def _neto_linea(row: dict) -> float:
@@ -516,6 +542,7 @@ def ventas(
     punto_venta: list[str] | None = Query(default=None),
     categoria: list[str] | None = Query(default=None),
     plato: list[str] | None = Query(default=None),
+    mes: list[str] | None = Query(default=None),
     orden: str = Query(default="desc"),
     incluir_socios: bool = Query(default=False),
 ):
@@ -527,7 +554,7 @@ def ventas(
     hasta = _sanitize_fecha(hasta)
     if desde and hasta and desde > hasta:
         raise HTTPException(status_code=400, detail="desde no puede ser posterior a hasta")
-    rows = _query_hist_ventas(sb, desde=desde, hasta=hasta)
+    rows = _query_hist_ventas(sb, desde=desde, hasta=hasta, meses=_parse_meses_query(mes))
 
     pv_filtros = _parse_punto_venta_query(punto_venta)
     cat_filtros = [_norm_key(c) for c in _parse_list_query(categoria)]
@@ -791,41 +818,29 @@ def ventas(
 
 
 def _query_mov_inventario(sb, *, desde: str | None, hasta: str | None) -> list[dict]:
-    rows: list[dict] = []
-    offset = 0
-    while True:
-        q = sb.table("mov_inventario").select(
-            "fecha,tipo_mov,cod_mp_sistema,nombre_mp,cantidad_mov,"
-            "costo_unitario,costo_total,num_documento,cod_bodega_origen,cod_bodega_destino,observaciones"
-        )
-        if desde:
-            q = q.gte("fecha", desde)
-        if hasta:
-            q = q.lte("fecha", hasta + "T23:59:59")
-        chunk = q.range(offset, offset + 999).execute().data or []
-        rows.extend(chunk)
-        if len(chunk) < 1000:
-            break
-        offset += 1000
-    return rows
+    q = sb.table("mov_inventario").select(
+        "fecha,tipo_mov,cod_mp_sistema,nombre_mp,cantidad_mov,"
+        "costo_unitario,costo_total,num_documento,cod_bodega_origen,cod_bodega_destino,observaciones"
+    )
+    if desde:
+        q = q.gte("fecha", desde)
+    if hasta:
+        q = q.lte("fecha", hasta + "T23:59:59")
+    return _fetch_paginated(
+        q,
+        order=(("fecha", False), ("cod_mov", False)),
+    )
 
 
 def _query_facturas_procesadas(sb, *, desde: str | None, hasta: str | None) -> list[dict]:
-    rows: list[dict] = []
-    offset = 0
-    while True:
-        q = sb.table("facturas_procesadas").select(
-            "num_factura,ruc_proveedor,fecha_factura,estado,meta"
-        )
-        if desde:
-            q = q.gte("fecha_factura", desde)
-        if hasta:
-            q = q.lte("fecha_factura", hasta)
-        chunk = q.range(offset, offset + 999).execute().data or []
-        rows.extend(chunk)
-        if len(chunk) < 1000:
-            break
-        offset += 1000
+    q = sb.table("facturas_procesadas").select(
+        "num_factura,ruc_proveedor,fecha_factura,estado,meta"
+    )
+    if desde:
+        q = q.gte("fecha_factura", desde)
+    if hasta:
+        q = q.lte("fecha_factura", hasta)
+    rows = _fetch_paginated(q, order=(("fecha_factura", False), ("num_factura", False)))
     out = []
     for r in rows:
         meta = r.get("meta") or {}

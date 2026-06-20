@@ -1549,7 +1549,7 @@ function renderSocios() {
     cardSocios('Unidades', Math.round(a.uds).toLocaleString(), `vs ant. ${deltaHtml(cmp.uds.delta_pct)}`),
     cardSocios('Ticket promedio', '$' + a.ticket.toFixed(2), `vs ant. ${deltaHtml(cmp.ticket.delta_pct)}`),
     cardSocios('Fin de semana', a.finde_pct + '%', 'Vie + Sáb + Dom del período'),
-    cardSocios('Acumulado ' + s.periodo.hasta.slice(0,4), '$' + ytd.vta.toLocaleString('es-EC', {maximumFractionDigits:0}), `${Math.round(ytd.uds).toLocaleString()} uds · ticket $${ytd.ticket.toFixed(2)}`),
+    cardSocios('Acumulado ' + s.periodo.hasta.slice(0,4), '$' + ytd.vta.toLocaleString('es-EC', {maximumFractionDigits:0}), `${Math.round(ytd.uds).toLocaleString()} uds · ene→${hasta.slice(5,7)}/${hasta.slice(0,4)}`),
     cardSocios('Descuentos', '$' + a.descuentos.toLocaleString('es-EC', {maximumFractionDigits:0}), `${a.pct_otro}% líneas sin catálogo (OTRO)`),
   ].join('');
 
@@ -1885,7 +1885,7 @@ function onMesSelectionChange() {
 }
 
 function onPeriodCheckChange() {
-  if ((ag === 'semana' || ag === 'dia') && audience === 'socios') {
+  if (ag === 'semana' || ag === 'dia') {
     cargar();
     return;
   }
@@ -1919,14 +1919,25 @@ function getSelectedPeriodRange() {
     const total = document.querySelectorAll('#chk-meses input[type=checkbox]').length;
     // Todos los meses marcados = año completo.
     if (total && meses.length >= total) {
-      return { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: ag === 'anio' ? 'anio' : 'mes' };
+      return {
+        desde: `${anio}-01-01`,
+        hasta: capHastaVentas(`${anio}-12-31`),
+        agrup: ag === 'anio' ? 'anio' : 'mes',
+      };
     }
-    // Subconjunto = solo esos meses.
+    // Subconjunto = solo esos meses (puede ser no contiguo).
     if (meses.length > 0) {
-      return { ...rangeFromMeses(meses, anio), agrup: 'mes' };
+      const r = rangeFromMeses(meses, anio);
+      return {
+        desde: r.desde,
+        hasta: capHastaVentas(r.hasta),
+        agrup: 'mes',
+        _filterLabels: meses,
+        _mesesQuery: meses,
+      };
     }
     // Sin selección activa: no forzar año completo.
-    return { desde: `${anio}-01-01`, hasta: `${anio}-01-31`, agrup: 'mes' };
+    return { desde: `${anio}-01-01`, hasta: capHastaVentas(`${anio}-01-31`), agrup: 'mes' };
   }
   if (ag === 'semana') {
     const sems = getCheckedValues(document.getElementById('chk-semanas'));
@@ -1946,7 +1957,20 @@ function getSelectedPeriodRange() {
     const sorted = [...dias].sort();
     return { desde: sorted[0], hasta: sorted[sorted.length - 1], agrup: 'dia', _filterLabels: dias };
   }
-  return { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'dia', _filterLabels: dias };
+  return { desde: `${anio}-${mes}-01`, hasta: capHastaVentas(`${anio}-${mes}-${finMes}`), agrup: 'dia', _filterLabels: dias };
+}
+
+function capHastaVentas(hasta) {
+  const vh = ventasHastaIso();
+  if (!hasta || !vh) return hasta;
+  const h = String(hasta).slice(0, 10);
+  const v = String(vh).slice(0, 10);
+  return h > v ? v : h;
+}
+
+function appendMesesToQuery(q, ranges) {
+  const meses = (ranges && ranges._mesesQuery) || null;
+  if (meses && meses.length) q.set('mes', meses.join(','));
 }
 
 function getRangesLegacy() {
@@ -2231,11 +2255,14 @@ function applySociosPvFilter(socios) {
 
 function buildUrl() {
   const p = getRanges();
+  const mesesQuery = p._mesesQuery;
   delete p._filterLabels;
+  delete p._mesesQuery;
   const orden = document.getElementById('so').value;
   const q = new URLSearchParams({ token: TOKEN, orden, ...p });
   appendPlatoCatToQuery(q);
   appendPvToQuery(q);
+  appendMesesToQuery(q, { _mesesQuery: mesesQuery });
   return `${BASE}/api/dashboard/ventas?${q}`;
 }
 
@@ -2249,6 +2276,7 @@ async function cargar() {
     document.getElementById('socios-metrics').innerHTML = '<div class="loading">Cargando...</div>';
     try {
       const r = getSociosRange();
+      const ranges = getRanges();
       const q = new URLSearchParams({
         token: TOKEN,
         ...r,
@@ -2258,6 +2286,7 @@ async function cargar() {
       });
       appendPvToQuery(q);
       appendPlatoCatToQuery(q);
+      appendMesesToQuery(q, ranges);
       let res = await fetch(`${BASE}/api/dashboard/ventas?${q}`);
       if (!res.ok) {
         q.delete('incluir_socios');
@@ -2315,16 +2344,39 @@ async function cargar() {
 }
 
 
+function sumChartPeriodTotals(d, idx) {
+  let tvta = 0;
+  idx.forEach(i => {
+    if (pvIncludes('BARRA')) tvta += Number((d.barra || [])[i]) || 0;
+    if (pvIncludes('COCINA')) tvta += Number((d.cocina || [])[i]) || 0;
+    if (pvIncludes('OTRO')) tvta += Number((d.otro || [])[i]) || 0;
+  });
+  return tvta;
+}
+
 function render() {
   if (!_data) return;
   const d = _data;
+  const idx = chartIndices(d.labels || []);
   let tvta = 0, tuds = 0;
-  PV_KEYS.forEach(k => {
-    if (pvIncludes(k)) {
-      tvta += (d.desglose?.[k]?.vta) || 0;
-      tuds += (d.desglose?.[k]?.uds) || 0;
+  if (window._periodFilter && window._periodFilter.length && d.labels && d.labels.length) {
+    tvta = sumChartPeriodTotals(d, idx);
+    const allVta = (d.total_barra || 0) + (d.total_cocina || 0) + (d.total_otro || 0);
+    PV_KEYS.forEach(k => {
+      if (pvIncludes(k)) tuds += (d.desglose?.[k]?.uds) || 0;
+    });
+    if (allVta > 0 && tvta < allVta) {
+      const ratio = tvta / allVta;
+      tuds = Math.round(tuds * ratio);
     }
-  });
+  } else {
+    PV_KEYS.forEach(k => {
+      if (pvIncludes(k)) {
+        tvta += (d.desglose?.[k]?.vta) || 0;
+        tuds += (d.desglose?.[k]?.uds) || 0;
+      }
+    });
+  }
   _tv = tvta || 1;
 
   const pct = (v) => tvta > 0 ? Math.round(v / tvta * 100) : 0;
