@@ -146,8 +146,8 @@ def _cfg_bool(key: str, default: bool = False) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "si", "sí")
 
 
-def roles_con_permiso(clave_csv: str) -> set[str]:
-    return _cfg_tokens(clave_csv)
+def roles_con_permiso(clave_csv: str, default: str = "") -> set[str]:
+    return _cfg_tokens(clave_csv, default)
 
 
 def puede_ver_costos(telefono: str) -> bool:
