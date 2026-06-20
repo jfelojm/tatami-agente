@@ -3808,7 +3808,7 @@ _COCINA_ALIASES: list[tuple[tuple[str, ...], str]] = [
     (("salsa agridulce",), "039"),
     (("salsa tonkatsu",), "042"),
     (("salsa oriental",), "058"),
-    (("salsa drunken",), "059"),
+    (("salsa drunken",), "060"),
     (("aceite jengibre", "aceite de jengibre"), "044"),
     (("torta de chocolate", "tortas de chocolate", "torta chocolate", "tortas de choclate", "torta choclate"), "061"),
 ]
@@ -3821,9 +3821,10 @@ def _aliases_subrecetas() -> list[tuple[str, str]]:
     if _sub_alias_cache and (now - _sub_alias_cache_at) < _SUB_ALIAS_TTL_SEC:
         return _sub_alias_cache
     pairs: list[tuple[str, str]] = []
+    nombre_por_cod: dict[str, str] = {}
     for groups, cod in _BATCH_ALIASES + _COCINA_ALIASES:
         for g in groups:
-            pairs.append((g.lower(), cod))
+            pairs.append((g.lower(), cod.zfill(3)))
     try:
         from codigos_subreceta import cod_sub_canonico
         from subrecetas_detalle import cargar_bd_subrecetas
@@ -3834,18 +3835,28 @@ def _aliases_subrecetas() -> list[tuple[str, str]]:
                 continue
             cod = cod_sub_canonico(cod_raw).replace("SUB-", "").zfill(3)
             nom = (info.get("nombre_subreceta") or "").strip().lower()
+            nombre_por_cod[cod] = nom
             if len(nom) >= 3:
                 pairs.append((nom, cod))
     except Exception as e:
         print(f"WARN aliases subrecetas: {e}")
-    seen: set[str] = set()
+
+    # Una frase → un cod: si BD y alias estático difieren, gana nombre exacto en BD.
+    by_phrase: dict[str, set[str]] = defaultdict(set)
+    for phrase, cod in pairs:
+        by_phrase[phrase].add(cod.zfill(3))
+
     uniq: list[tuple[str, str]] = []
-    for phrase, cod in sorted(pairs, key=lambda x: (-len(x[0]), x[0])):
-        key = f"{phrase}|{cod}"
-        if key in seen:
+    for phrase in sorted(by_phrase.keys(), key=lambda p: (-len(p), p)):
+        cods = by_phrase[phrase]
+        if len(cods) == 1:
+            uniq.append((phrase, next(iter(cods))))
             continue
-        seen.add(key)
-        uniq.append((phrase, cod))
+        exact = [c for c in cods if nombre_por_cod.get(c, "") == phrase]
+        if exact:
+            uniq.append((phrase, sorted(exact)[0]))
+        else:
+            uniq.append((phrase, sorted(cods)[0]))
     _sub_alias_cache = uniq
     _sub_alias_cache_at = now
     return uniq

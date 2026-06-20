@@ -250,6 +250,14 @@ class TestTrasladoVsProduccion(unittest.TestCase):
         self.assertEqual(sub["cod_sub"], "061")
         self.assertAlmostEqual(float(sub["cantidad"]), 5270.0)
 
+    def test_salsa_drunken_no_udon(self):
+        from whatsapp_webhook import _match_sub_codigos_en_texto, _resolver_subreceta_para_traslado
 
-if __name__ == "__main__":
+        t = "trasladar salsa drunken de 005 a 001"
+        cods = _match_sub_codigos_en_texto(t)
+        self.assertEqual(cods, ["060"])
+        sub = _resolver_subreceta_para_traslado(t)
+        self.assertIsNotNone(sub)
+        self.assertEqual(sub["cod_sub"], "060")
+        self.assertNotIn("udon", (sub.get("nombre") or "").lower())
     unittest.main()
