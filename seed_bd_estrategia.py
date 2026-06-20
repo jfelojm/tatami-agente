@@ -16,8 +16,7 @@ import sys
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
-
+from google_credentials import google_credentials, has_google_credentials
 load_dotenv(override=True)
 
 SCOPES = [
@@ -110,7 +109,7 @@ BD_CONFIG_ROWS: list[list[str]] = [
     ["perm_receta_sin_costos_tool", "receta_sin_costo", "Tool futura sin USD", "string"],
     [
         "perm_inventario_consulta_roles",
-        "ADMIN,SOCIO,ADMIN_COMPRAS,JEFE_BARRA,JEFE_COCINA,STAFF_BARRA,STAFF_COCINA",
+        "ADMIN,SOCIO,ADMIN_COMPRAS,JEFE_BARRA,STAFF_BARRA",
         "Stock, PAR, negativos",
         "csv",
     ],
@@ -124,13 +123,13 @@ BD_CONFIG_ROWS: list[list[str]] = [
     ["perm_conteo_aprobar_roles", "ADMIN,JEFE_BARRA,JEFE_COCINA", "APROBAR conteo", "csv"],
     ["perm_conteo_bodegas_JEFE_BARRA", "BOD-002,BOD-003", "Bodegas Eduardo", "csv"],
     ["perm_conteo_bodegas_JEFE_COCINA", "BOD-001,BOD-005", "Bodegas Jacky", "csv"],
-    ["perm_traslado_roles", "ADMIN,JEFE_BARRA,JEFE_COCINA", "trasladar_mp", "csv"],
+    ["perm_traslado_roles", "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA", "trasladar_mp", "csv"],
     ["perm_producir_sub_roles", "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_BARRA,STAFF_COCINA", "PRODUCIR SUB", "csv"],
     ["perm_producir_sub_bodegas_STAFF_BARRA", "BOD-002", "Staff barra batches", "csv"],
     ["perm_producir_sub_bodegas_STAFF_COCINA", "BOD-001", "Staff cocina batches", "csv"],
     [
         "perm_ventas_consulta_roles",
-        "ADMIN,SOCIO,ADMIN_COMPRAS,JEFE_BARRA,JEFE_COCINA,STAFF_BARRA,STAFF_COCINA",
+        "ADMIN,SOCIO,ADMIN_COMPRAS,JEFE_BARRA,STAFF_BARRA",
         "Consulta ventas",
         "csv",
     ],
@@ -148,11 +147,11 @@ BD_CONFIG_ROWS: list[list[str]] = [
     ["pipe_descargo_wa", "nadie", "WA si OK", "string"],
     ["pipe_descargo_wa_stock_negativo", "inmediato_digest", "inmediato_digest | solo_8am | nadie", "string"],
     ["pipe_facturas_sri_activo", "true", "Paso 3", "bool"],
-    ["pipe_facturas_sri_modo", "descarga_y_proceso", "descarga_y_proceso | solo_proceso_cola", "string"],
+    ["pipe_facturas_sri_modo", "solo_proceso_cola", "descarga_y_proceso | solo_proceso_cola", "string"],
     [
         "pipe_facturas_sri_horas_descarga",
-        "7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,0",
-        "Horas con login portal SRI",
+        "",
+        "Horas pipeline con descarga portal (vacío = usar tareas AM/PM)",
         "csv",
     ],
     ["pipe_facturas_sri_wa_ok", "nadie", "WA corrida SRI OK", "string"],
@@ -444,13 +443,12 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    cred_path = os.getenv("GOOGLE_CREDENTIALS_PATH")
     sheet_id = os.getenv("SPREADSHEET_ID")
-    if not cred_path or not sheet_id:
-        print("ERROR: GOOGLE_CREDENTIALS_PATH y SPREADSHEET_ID en .env", file=sys.stderr)
+    if not has_google_credentials() or not sheet_id:
+        print("ERROR: credenciales Google (GOOGLE_CREDENTIALS_JSON o GOOGLE_CREDENTIALS_PATH) y SPREADSHEET_ID en .env", file=sys.stderr)
         raise SystemExit(1)
 
-    creds = Credentials.from_service_account_file(cred_path, scopes=SCOPES)
+    creds = google_credentials(SCOPES)
     sh = gspread.authorize(creds).open_by_key(sheet_id)
 
     added, updated = _ensure_bd_config(sh, force=args.force)

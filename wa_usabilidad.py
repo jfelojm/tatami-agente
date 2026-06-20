@@ -5,7 +5,12 @@ from __future__ import annotations
 import re
 import time
 
-from estrategia_config import phone_roles, primary_role
+from estrategia_config import (
+    phone_roles,
+    primary_role,
+    puede_consultar_inventario,
+    puede_consultar_ventas,
+)
 
 _MENU_CTX: dict[str, float] = {}
 MENU_CTX_TTL_SEC = 900
@@ -67,25 +72,50 @@ def parse_seleccion_menu(texto: str) -> int | None:
     return None
 
 
+def opciones_menu(telefono: str) -> list[tuple[int, str, int]]:
+    """(número mostrado, etiqueta, id submenú legacy 1-5)."""
+    opts: list[tuple[int, str, int]] = [
+        (1, "Trasladar insumo o semi", 1),
+        (2, "Producir subreceta", 2),
+    ]
+    n = 3
+    if puede_consultar_ventas(telefono):
+        opts.append((n, "Ventas de hoy", 3))
+        n += 1
+    opts.append((n, "Conteo físico", 4))
+    n += 1
+    if puede_consultar_inventario(telefono):
+        opts.append((n, "Buscar stock de un producto", 5))
+    return opts
+
+
+def resolve_menu_seleccion(telefono: str, texto: str) -> int | None:
+    """Traduce el número elegido al id de submenú (1-5)."""
+    sel = parse_seleccion_menu(texto)
+    if sel is None:
+        return None
+    for num, _, sub_id in opciones_menu(telefono):
+        if num == sel:
+            return sub_id
+    return None
+
+
 def msg_menu_principal(telefono: str) -> str:
     rol = primary_role(telefono) or ""
     operativo = es_personal_operativo(telefono)
     lines = ["*Tatami Agente*", "", "¿Qué necesitas? Responde con el número:"]
-    lines.append("1 Trasladar insumo o semi")
-    lines.append("2 Producir subreceta")
-    if not operativo or es_admin_o_socio(telefono):
-        lines.append("3 Ventas de hoy")
-    else:
-        lines.append("3 Ventas de hoy")
-    lines.append("4 Conteo físico")
-    lines.append("5 Buscar stock de un producto")
+    for num, label, _ in opciones_menu(telefono):
+        lines.append(f"{num} {label}")
     lines.append("")
     lines.append(
         "También puedes escribir directo, por ejemplo:\n"
         "• *2 tortas de chocolate de externa a cocina*\n"
-        "• *producir pan bao cocina*\n"
-        "• *ventas de hoy*"
+        "• *producir pan bao cocina*"
     )
+    if puede_consultar_ventas(telefono):
+        lines.append("• *ventas de hoy*")
+    if puede_consultar_inventario(telefono):
+        lines.append("• *stock de papa*")
     if operativo:
         lines.append("")
         lines.append("_Tip: en traslados y producción responde SÍ o NO para confirmar._")

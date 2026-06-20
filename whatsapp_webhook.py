@@ -53,6 +53,7 @@ from wa_usabilidad import (
     msg_traslado_ejecutado,
     parece_nueva_operacion,
     parse_seleccion_menu,
+    resolve_menu_seleccion,
 )
 
 load_dotenv(override=False)
@@ -60,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250620-fix-roles-permiso-v27"
+TATAMI_WA_BUILD = "20250620-permisos-cocina-v28"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -77,10 +78,13 @@ def _norm_tel(telefono: str) -> str:
 
 
 from estrategia_config import (
-    autorizado_comando as _estrategia_autorizado_comando,
     autorizado_tool as _estrategia_autorizado_tool,
+    autorizado_comando as _estrategia_autorizado_comando,
     get_rol,
     phone_roles,
+    puede_consultar_inventario,
+    puede_consultar_ventas,
+    puede_trasladar,
     puede_ver_costos,
 )
 
@@ -96,6 +100,10 @@ COMANDOS_OPERATIVO = {
 }
 
 MSG_NO_AUTORIZADO = "No tienes acceso a este agente."
+MSG_SIN_PERMISO_CONSULTA = (
+    "No tienes permiso para esa consulta.\n"
+    "En cocina puedes: *producir subrecetas*, *trasladar* insumos/semis y ver *recetas*."
+)
 MSG_ERROR_PROCESO = (
     "Hubo un error procesando tu mensaje. Intenta de nuevo en un momento."
 )
@@ -4852,11 +4860,17 @@ async def _manejar_ajuste_traslado_wa(
 
 
 async def _manejar_menu_wa(wa_id: str, texto: str, msg: dict | None) -> None:
-    sel = parse_seleccion_menu(texto)
-    if sel is not None and menu_ctx_activo(wa_id):
+    sel = resolve_menu_seleccion(wa_id, texto) if menu_ctx_activo(wa_id) else None
+    if sel is not None:
         menu_ctx_touch(wa_id)
         if sel == 3:
+            if not puede_consultar_ventas(wa_id):
+                await enviar_mensaje_meta(wa_id, MSG_SIN_PERMISO_CONSULTA)
+                return
             await _manejar_consulta_ventas_wa(wa_id, msg, texto="ventas de hoy")
+            return
+        if sel == 5 and not puede_consultar_inventario(wa_id):
+            await enviar_mensaje_meta(wa_id, MSG_SIN_PERMISO_CONSULTA)
             return
         await enviar_mensaje_meta(wa_id, msg_submenu(sel, wa_id))
         return
@@ -5770,7 +5784,7 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             # Menú principal (hola / ayuda / 1-5)
             if es_comando_menu(texto) or (
-                menu_ctx_activo(wa_id) and parse_seleccion_menu(texto) is not None
+                menu_ctx_activo(wa_id) and resolve_menu_seleccion(wa_id, texto) is not None
             ):
                 print(f"[Meta] {wa_id}: route=menu")
                 await _manejar_menu_wa(wa_id, texto, msg)
@@ -5793,6 +5807,9 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     and _es_continuacion_traslado_pendiente(texto)
                 )
             ):
+                if not puede_trasladar(wa_id):
+                    await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+                    return
                 print(f"[Meta] {wa_id}: route=traslado")
                 await _manejar_traslado_mp_wa(wa_id, texto_traslado, msg)
                 return
@@ -5835,6 +5852,9 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             # Ventas de hoy — sin LLM
             if _es_consulta_ventas_simple(texto):
+                if not puede_consultar_ventas(wa_id):
+                    await enviar_mensaje_meta(wa_id, MSG_SIN_PERMISO_CONSULTA)
+                    return
                 print(f"[Meta] {wa_id}: route=ventas_hoy")
                 await _manejar_consulta_ventas_wa(wa_id, msg, texto)
                 return

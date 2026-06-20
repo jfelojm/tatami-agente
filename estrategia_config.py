@@ -27,6 +27,10 @@ ROLE_PRIORITY: tuple[str, ...] = (
     "OPS_ALERTAS",
 )
 
+ROLES_COCINA = frozenset({"JEFE_COCINA", "STAFF_COCINA"})
+
+_DEFAULT_PRODUCIR_SUB_ROLES = "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_BARRA,STAFF_COCINA"
+
 # Rol → variable .env con lista de teléfonos (chat)
 ROLE_ALLOWLIST_ENV: dict[str, str] = {
     "SOCIO": "ALLOWLIST_SOCIO",
@@ -169,6 +173,34 @@ def tools_receta_sin_costos() -> set[str]:
     return frozenset({"costo_plato", "receta_ingredientes", "costo_subreceta"})
 
 
+def _tools_inventario_consulta() -> set[str]:
+    return _cfg_tokens(
+        "perm_inventario_consulta_tools",
+        "stock_critico,stocks_negativos,stock_ingrediente,bodega_producto,mp_incompletas,kardex",
+    )
+
+
+_TOOLS_VENTAS_COMPRAS = frozenset({
+    "compras_facturas_rango",
+    "compras_factura_detalle",
+    "consumo_ingrediente_recetas",
+    "ventas_por_plato",
+    "ventas_dia",
+    "ventas_por_dia",
+    "rotacion_baja",
+    "facturas_parciales",
+    "items_pendientes_factura",
+})
+
+
+def _consulta_bloqueada_personal_cocina(tool_name: str) -> bool:
+    if tool_name in _tools_inventario_consulta():
+        return True
+    if tool_name.startswith("ventas"):
+        return True
+    return tool_name in _TOOLS_VENTAS_COMPRAS
+
+
 def autorizado_tool(telefono: str, tool_name: str) -> bool:
     roles = phone_roles(telefono)
     if not roles:
@@ -177,6 +209,12 @@ def autorizado_tool(telefono: str, tool_name: str) -> bool:
     if "ADMIN" in roles:
         return True
 
+    if roles & ROLES_COCINA:
+        if tool_name == "trasladar_mp":
+            return True
+        if _consulta_bloqueada_personal_cocina(tool_name):
+            return False
+
     if tool_name in tools_requieren_costos():
         if tool_name in tools_receta_sin_costos():
             if puede_ver_costos(telefono):
@@ -184,39 +222,49 @@ def autorizado_tool(telefono: str, tool_name: str) -> bool:
             return bool(roles & roles_con_permiso("perm_receta_sin_costos_roles"))
         return puede_ver_costos(telefono)
 
-    inv_tools = _cfg_tokens(
-        "perm_inventario_consulta_tools",
-        "stock_critico,stocks_negativos,stock_ingrediente,bodega_producto,mp_incompletas,kardex",
-    )
+    inv_tools = _tools_inventario_consulta()
     if tool_name in inv_tools:
-        return bool(roles & roles_con_permiso("perm_inventario_consulta_roles"))
+        return bool(
+            roles
+            & roles_con_permiso(
+                "perm_inventario_consulta_roles",
+                "ADMIN,SOCIO,ADMIN_COMPRAS,JEFE_BARRA,STAFF_BARRA",
+            )
+        )
 
     ventas_ok = roles_con_permiso(
         "perm_ventas_consulta_roles",
-        "ADMIN,SOCIO,ADMIN_COMPRAS,JEFE_BARRA,JEFE_COCINA,STAFF_BARRA,STAFF_COCINA",
+        "ADMIN,SOCIO,ADMIN_COMPRAS,JEFE_BARRA,STAFF_BARRA",
     )
-    if tool_name.startswith("ventas") or tool_name in (
-        "compras_facturas_rango",
-        "compras_factura_detalle",
-        "consumo_ingrediente_recetas",
-        "ventas_por_plato",
-        "ventas_dia",
-        "ventas_por_dia",
-        "rotacion_baja",
-        "facturas_parciales",
-        "items_pendientes_factura",
-    ):
+    if tool_name.startswith("ventas") or tool_name in _TOOLS_VENTAS_COMPRAS:
         if tool_name in tools_requieren_costos():
             return puede_ver_costos(telefono)
         return bool(roles & ventas_ok)
 
+    if tool_name == "listar_subrecetas":
+        return bool(
+            roles
+            & roles_con_permiso("perm_producir_sub_roles", _DEFAULT_PRODUCIR_SUB_ROLES)
+        )
+
     if tool_name in TOOLS_ESCRITURA:
         if tool_name == "trasladar_mp":
-            return bool(roles & roles_con_permiso("perm_traslado_roles"))
+            if roles & ROLES_COCINA:
+                return True
+            return bool(
+                roles
+                & roles_con_permiso(
+                    "perm_traslado_roles",
+                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA",
+                )
+            )
         if tool_name == "conteo_iniciar":
             return bool(roles & roles_con_permiso("perm_conteo_iniciar_roles"))
         if tool_name == "produccion_subreceta":
-            return bool(roles & roles_con_permiso("perm_producir_sub_roles"))
+            return bool(
+                roles
+                & roles_con_permiso("perm_producir_sub_roles", _DEFAULT_PRODUCIR_SUB_ROLES)
+            )
 
     if tool_name.startswith("conteo_"):
         return bool(
@@ -230,8 +278,8 @@ def autorizado_tool(telefono: str, tool_name: str) -> bool:
     if "SOCIO" in roles and not _cfg_bool("perm_socio_escritura", False):
         return tool_name not in TOOLS_ESCRITURA
 
-    # Staff / jefes: lectura general permitida si no es tool de costos bloqueado
-    if roles & {"JEFE_BARRA", "JEFE_COCINA", "STAFF_BARRA", "STAFF_COCINA", "ADMIN_COMPRAS"}:
+    # Staff barra / compras: lectura general; cocina solo vía permisos explícitos arriba
+    if roles & {"JEFE_BARRA", "STAFF_BARRA", "ADMIN_COMPRAS"}:
         return True
 
     return "SOCIO" in roles
@@ -251,7 +299,7 @@ def autorizado_comando(telefono: str, comando: str) -> bool:
             roles
             & (
                 roles_con_permiso("perm_conteo_iniciar_roles")
-                | roles_con_permiso("perm_producir_sub_roles")
+                | roles_con_permiso("perm_producir_sub_roles", _DEFAULT_PRODUCIR_SUB_ROLES)
                 | roles_con_permiso("perm_conteo_aprobar_roles")
                 | {"SOCIO"}
             )
@@ -260,7 +308,10 @@ def autorizado_comando(telefono: str, comando: str) -> bool:
 
 
 def _autorizado_produccion_sub(telefono: str) -> bool:
-    return bool(phone_roles(telefono) & roles_con_permiso("perm_producir_sub_roles"))
+    return bool(
+        phone_roles(telefono)
+        & roles_con_permiso("perm_producir_sub_roles", _DEFAULT_PRODUCIR_SUB_ROLES)
+    )
 
 
 _BODEGA_DEFAULT_PROD_SUB: dict[str, str] = {
@@ -327,8 +378,19 @@ def periodo_pruebas_cocina_activo() -> bool:
 
 
 def es_personal_cocina(telefono: str) -> bool:
-    roles = phone_roles(telefono)
-    return bool(roles & {"JEFE_COCINA", "STAFF_COCINA"})
+    return bool(phone_roles(telefono) & ROLES_COCINA)
+
+
+def puede_consultar_ventas(telefono: str) -> bool:
+    return autorizado_tool(telefono, "ventas_dia")
+
+
+def puede_consultar_inventario(telefono: str) -> bool:
+    return autorizado_tool(telefono, "stock_ingrediente")
+
+
+def puede_trasladar(telefono: str) -> bool:
+    return autorizado_tool(telefono, "trasladar_mp")
 
 
 def periodo_pruebas_ignorar_stock(telefono: str) -> bool:

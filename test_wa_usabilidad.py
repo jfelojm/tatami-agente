@@ -18,6 +18,14 @@ class TestMenu(unittest.TestCase):
         self.assertEqual(wu.parse_seleccion_menu("3"), 3)
         self.assertIsNone(wu.parse_seleccion_menu("23"))
 
+    def test_menu_cocina_tres_opciones(self):
+        with patch("wa_usabilidad.puede_consultar_ventas", return_value=False), patch(
+            "wa_usabilidad.puede_consultar_inventario", return_value=False
+        ):
+            opts = wu.opciones_menu("593983242667")
+            self.assertEqual(len(opts), 3)
+            self.assertEqual([o[2] for o in opts], [1, 2, 4])
+
 
 class TestMensajesPorRol(unittest.TestCase):
     def test_operativo_mensaje_corto(self):
