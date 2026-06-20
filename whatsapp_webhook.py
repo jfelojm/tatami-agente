@@ -38,15 +38,20 @@ from conteo_operaciones import (
 from kardex_inventario import get_kardex, formatear_kardex_wa, generar_xlsx
 from google_credentials import google_credentials
 from wa_usabilidad import (
+    es_cancelacion_corta,
     es_comando_menu,
+    es_confirmacion_corta,
     menu_ctx_activo,
     menu_ctx_touch,
     msg_confirmacion_traslado,
     msg_menu_principal,
     msg_produccion_pie_confirmacion,
+    msg_recordatorio_confirmacion_produccion,
+    msg_recordatorio_confirmacion_traslado,
     msg_submenu,
     msg_traslado_cancelado,
     msg_traslado_ejecutado,
+    parece_nueva_operacion,
     parse_seleccion_menu,
 )
 
@@ -55,7 +60,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250620-usabilidad-v24"
+TATAMI_WA_BUILD = "20250620-confirm-typo-v25"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -5010,43 +5015,15 @@ def _es_comando_conteo(texto_upper: str) -> bool:
 
 
 def _es_confirmacion_produccion(texto: str) -> bool:
-    return _es_confirmacion_corta(texto)
+    return es_confirmacion_corta(texto)
 
 
 def _es_confirmacion_corta(texto: str) -> bool:
-    t = (texto or "").strip().lower().replace("í", "i")
-    if t in (
-        "si",
-        "sí",
-        "si confirmo",
-        "confirmo",
-        "confirmar",
-        "ok",
-        "dale",
-        "aplicar",
-        "yes",
-        "listo",
-        "de acuerdo",
-        "si confirmo el traslado",
-        "confirmo el traslado",
-    ):
-        return True
-    return t.startswith("si ") and "confirm" in t
+    return es_confirmacion_corta(texto)
 
 
 def _es_cancelacion_corta(texto: str) -> bool:
-    t = (texto or "").strip().lower().replace("í", "i")
-    return t in (
-        "no",
-        "cancelar",
-        "cancela",
-        "cancel",
-        "olvida",
-        "olvidalo",
-        "no confirmo",
-        "detener",
-        "stop",
-    )
+    return es_cancelacion_corta(texto)
 
 
 def _parse_iniciar_conteo_comando(texto: str) -> str | None:
@@ -5763,6 +5740,32 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 if ajuste:
                     print(f"[Meta] {wa_id}: route=traslado_ajuste_cantidad")
                     await _manejar_ajuste_traslado_wa(wa_id, texto, msg, ajuste)
+                    return
+                if not parece_nueva_operacion(texto):
+                    print(f"[Meta] {wa_id}: route=traslado_confirm_recordatorio")
+                    await enviar_mensaje_meta(wa_id, msg_recordatorio_confirmacion_traslado())
+                    return
+
+            # Producción pendiente de confirmación — no caer al LLM con «ai» u otros typos
+            if wa_id in _pending_prod_sub:
+                if _es_cancelacion_corta(texto):
+                    _pending_prod_sub.pop(wa_id, None)
+                    await enviar_mensaje_meta(wa_id, "Producción cancelada.")
+                    return
+                if _es_confirmacion_corta(texto):
+                    print(f"[Meta] {wa_id}: route=produccion_confirm")
+                    await _manejar_produccion_sub(
+                        wa_id,
+                        {**_pending_prod_sub[wa_id], "confirmar": True},
+                        msg,
+                        texto=texto,
+                    )
+                    return
+                if not parece_nueva_operacion(texto):
+                    print(f"[Meta] {wa_id}: route=produccion_confirm_recordatorio")
+                    await enviar_mensaje_meta(
+                        wa_id, msg_recordatorio_confirmacion_produccion()
+                    )
                     return
 
             # Menú principal (hola / ayuda / 1-5)

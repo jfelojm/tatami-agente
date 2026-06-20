@@ -523,6 +523,7 @@ class TestConfirmacionTraslado(unittest.TestCase):
 
         self.assertTrue(_es_confirmacion_corta("confirmo"))
         self.assertTrue(_es_confirmacion_corta("si confirmo el traslado"))
+        self.assertTrue(_es_confirmacion_corta("ai"))
 
     def test_cancelar_traslado(self):
         from whatsapp_webhook import _es_cancelacion_corta

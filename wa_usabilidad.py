@@ -201,3 +201,108 @@ def msg_traslado_cancelado() -> str:
 
 def msg_produccion_pie_confirmacion() -> str:
     return "\n\nResponde *SÍ* o *confirmo* para registrar en inventario."
+
+
+def _normalizar_respuesta_corta(texto: str) -> str:
+    t = (texto or "").strip().lower()
+    for old, new in (("í", "i"), ("á", "a"), ("é", "e"), ("ó", "o"), ("ú", "u")):
+        t = t.replace(old, new)
+    return t
+
+
+def _edit_distance(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            ins = cur[j - 1] + 1
+            delete = prev[j] + 1
+            sub = prev[j - 1] + (ca != cb)
+            cur.append(min(ins, delete, sub))
+        prev = cur
+    return prev[-1]
+
+
+def es_confirmacion_corta(texto: str) -> bool:
+    """SÍ, confirmo, y typos frecuentes en móvil (ej. «ai» por «si»)."""
+    t = _normalizar_respuesta_corta(texto)
+    if not t:
+        return False
+    if t in (
+        "si",
+        "si confirmo",
+        "confirmo",
+        "confirmar",
+        "ok",
+        "dale",
+        "aplicar",
+        "yes",
+        "listo",
+        "de acuerdo",
+        "claro",
+        "si confirmo el traslado",
+        "confirmo el traslado",
+        "ai",
+        "sii",
+        "sip",
+        "sep",
+        "sim",
+    ):
+        return True
+    if t.startswith("si ") and "confirm" in t:
+        return True
+    if 2 <= len(t) <= 3 and t.isalpha() and _edit_distance(t, "si") <= 1:
+        return True
+    return False
+
+
+def es_cancelacion_corta(texto: str) -> bool:
+    t = _normalizar_respuesta_corta(texto)
+    return t in (
+        "no",
+        "cancelar",
+        "cancela",
+        "cancel",
+        "olvida",
+        "olvidalo",
+        "no confirmo",
+        "detener",
+        "stop",
+        "nop",
+    )
+
+
+def msg_recordatorio_confirmacion_traslado() -> str:
+    return (
+        "Tienes un *traslado pendiente* de confirmar.\n\n"
+        "Responde *SÍ* para ejecutarlo o *NO* para cancelar.\n"
+        "También puedes ajustar la cantidad (ej. *3 tortas*)."
+    )
+
+
+def msg_recordatorio_confirmacion_produccion() -> str:
+    return (
+        "Tienes una *producción pendiente* de confirmar.\n\n"
+        "Responde *SÍ* o *confirmo* para registrar, o *NO* para cancelar."
+    )
+
+
+def parece_nueva_operacion(texto: str) -> bool:
+    """True si el mensaje no debería bloquearse ante un pending de confirmación."""
+    t = (texto or "").strip()
+    if len(t) > 45:
+        return True
+    tl = _normalizar_respuesta_corta(t)
+    if es_comando_menu(t):
+        return True
+    if re.search(r"\b(ventas?|traslad|transfer|produc|prepar|conteo|stock|inventar)\w*", tl):
+        return True
+    if re.search(r"\bde\b.*\ba\b", tl) and re.search(r"\b0?\d{3}\b|cocina|barra|externa", tl):
+        return True
+    return False

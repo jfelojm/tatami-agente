@@ -56,5 +56,20 @@ class TestMensajesPorRol(unittest.TestCase):
         self.assertIn("Sincroniza maestro", msg)
 
 
+class TestConfirmacionTypo(unittest.TestCase):
+    def test_ai_es_si(self):
+        self.assertTrue(wu.es_confirmacion_corta("ai"))
+
+    def test_si_normal(self):
+        self.assertTrue(wu.es_confirmacion_corta("si"))
+        self.assertTrue(wu.es_confirmacion_corta("SÍ"))
+
+    def test_ventas_es_nueva_operacion(self):
+        self.assertTrue(wu.parece_nueva_operacion("ventas de hoy"))
+
+    def test_ai_no_es_nueva_operacion(self):
+        self.assertFalse(wu.parece_nueva_operacion("ai"))
+
+
 if __name__ == "__main__":
     unittest.main()
