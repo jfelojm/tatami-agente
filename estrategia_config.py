@@ -332,8 +332,11 @@ def es_personal_cocina(telefono: str) -> bool:
 
 
 def periodo_pruebas_ignorar_stock(telefono: str) -> bool:
-    """Jacky y staff cocina: no bloquear por stock insuficiente durante pruebas."""
-    return periodo_pruebas_cocina_activo() and es_personal_cocina(telefono)
+    """Cocina + admin/socio en periodo pruebas: no bloquear por stock/filas faltantes en simulación."""
+    if not periodo_pruebas_cocina_activo():
+        return False
+    roles = phone_roles(telefono)
+    return bool(roles & {"JEFE_COCINA", "STAFF_COCINA", "ADMIN", "SOCIO"})
 
 
 def telefonos_por_roles(role_codes: Iterable[str]) -> list[tuple[str, str]]:

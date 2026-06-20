@@ -104,6 +104,36 @@ class TestResolverMpPorNombre(unittest.TestCase):
         self.assertFalse(r.get("ok"))
         self.assertIn("error", r)
 
+    def test_sub_061_sin_fila_maestro(self):
+        from whatsapp_webhook import _resolver_mp_por_nombre
+
+        with patch(
+            "whatsapp_webhook._match_sub_codigos_en_texto",
+            return_value=["061"],
+        ):
+            with patch(
+                "whatsapp_webhook.conectar_sheets",
+                side_effect=RuntimeError("offline"),
+            ):
+                with patch(
+                    "unidades_operativas.cargar_rendimiento_subrecetas",
+                    return_value={
+                        "SUB-061": {
+                            "rendimiento_estandar": 1054.0,
+                            "unidad": "gr",
+                            "nombre_subreceta": "torta de chocolate",
+                        }
+                    },
+                ):
+                    r = _resolver_mp_por_nombre(
+                        [],
+                        nombre_mp="torta de chocolate",
+                        bodega_origen="BOD-005",
+                    )
+        self.assertTrue(r.get("ok"))
+        self.assertEqual(r["cod_mp"], "SUB-061")
+        self.assertTrue(r.get("es_subreceta"))
+
 
 class TestTrasladarPorNombre(unittest.TestCase):
     def test_traslado_solo_nombre(self):
@@ -185,6 +215,51 @@ class TestTrasladoVsProduccion(unittest.TestCase):
             self.assertIsNone(_resolver_prod_sub("trasladar producto", "59399"))
         self.assertTrue(_es_traslado_generico_sin_detalle("trasladar producto"))
         self.assertTrue(_es_traslado_generico_sin_detalle("trasladar materia prima"))
+        self.assertTrue(_es_traslado_generico_sin_detalle("trasladar"))
+
+    def test_traslado_implicito_extrae_nombre(self):
+        from whatsapp_webhook import _extraer_nombre_mp_traslado
+
+        self.assertEqual(
+            _extraer_nombre_mp_traslado("torta de chocolate de 005 a 001"),
+            "torta de chocolate",
+        )
+
+    def test_traslado_sub_sin_maestro_simula(self):
+        from whatsapp_webhook import tool_trasladar_mp
+
+        with patch("whatsapp_webhook.leer_bd_mp_sistema", return_value=[]):
+            with patch(
+                "whatsapp_webhook._resolver_mp_por_nombre",
+                return_value={
+                    "ok": True,
+                    "cod_mp": "SUB-061",
+                    "nombre_mp": "torta de chocolate",
+                    "es_subreceta": True,
+                    "unidad_base": "gr",
+                },
+            ):
+                with patch(
+                    "unidades_operativas.resolver_cantidad_traslado_mp",
+                    return_value={
+                        "cantidad_base": 1054.0,
+                        "interpretacion": "1 lote (1054 gr)",
+                    },
+                ):
+                    r = tool_trasladar_mp(
+                        {
+                            "cod_mp_sistema": "SUB-061",
+                            "nombre_mp": "torta de chocolate",
+                            "bodega_origen": "BOD-005",
+                            "bodega_destino": "BOD-001",
+                            "cantidad": 1,
+                            "confirmado": False,
+                            "ignorar_stock": True,
+                        }
+                    )
+        self.assertTrue(r.get("requiere_confirmacion"))
+        self.assertIn("torta de chocolate", r.get("mensaje", ""))
+        self.assertIn("BD_MP_SISTEMA", r.get("mensaje", ""))
 
     def test_traslado_con_unicode_invisible(self):
         from whatsapp_webhook import _es_mensaje_traslado, _normalizar_texto_comando_wa

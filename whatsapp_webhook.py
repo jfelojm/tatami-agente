@@ -954,6 +954,30 @@ def _elegir_mp_automatico(hits: list[dict], bodega_origen: str = "") -> str | No
     return None
 
 
+def _resolver_sub_mp_inventario(
+    cod_mp: str = "",
+    nombre_mp: str = "",
+) -> dict | None:
+    """Semi SUB-xxx en BD_SUBRECETAS aunque falte fila en BD_MP_SISTEMA."""
+    texto = " ".join(x for x in ((cod_mp or "").strip(), (nombre_mp or "").strip()) if x).strip()
+    if not texto:
+        return None
+    sub = _resolver_subreceta_para_traslado(texto)
+    if not sub and (cod_mp or "").upper().startswith("SUB-"):
+        sub = _resolver_subreceta_para_traslado(_texto_item_traslado(cod_mp) or cod_mp)
+    if not sub and nombre_mp:
+        sub = _resolver_subreceta_para_traslado(nombre_mp)
+    if not sub:
+        return None
+    return {
+        "ok": True,
+        "cod_mp": sub["cod_mp"],
+        "nombre_mp": sub["nombre"],
+        "es_subreceta": True,
+        "unidad_base": (sub.get("unidad") or "gr").strip(),
+    }
+
+
 def _resolver_mp_por_nombre(
     rows: list[dict],
     *,
@@ -963,7 +987,7 @@ def _resolver_mp_por_nombre(
 ) -> dict:
     """
     Resuelve materia prima por nombre (prioridad) o código solo si existe en maestro.
-    Nunca confía en códigos inventados.
+    Subrecetas semi (SUB-xxx) se resuelven desde BD_SUBRECETAS aunque falte en maestro.
 
     Retorna:
       {"ok": True, "cod_mp", "nombre_mp"}
@@ -974,6 +998,11 @@ def _resolver_mp_por_nombre(
 
     nom = (nombre_mp or "").strip()
     cod_raw = _limpiar_cod_mp_usuario(cod_mp) if cod_mp else ""
+
+    sub_hit = _resolver_sub_mp_inventario(cod_raw or cod_mp, nom)
+    if sub_hit:
+        return sub_hit
+
     cod_confiable = (
         norm_mp(cod_raw) if cod_raw and _filas_mp_maestro(rows, cod_raw) else ""
     )
@@ -996,6 +1025,10 @@ def _resolver_mp_por_nombre(
             "ok": False,
             "error": "¿Qué producto? Dime el nombre (ej. Buchanan's 18, papa, hielo).",
         }
+
+    sub_hit = _resolver_sub_mp_inventario("", texto)
+    if sub_hit:
+        return sub_hit
 
     hits = _buscar_mp_por_nombre_o_codigo(texto)
     if not hits:
@@ -2728,6 +2761,7 @@ def tool_trasladar_mp(args):
         return {"error": res_mp.get("error", "No se pudo identificar el producto.")}
     cod_mp = res_mp["cod_mp"]
     nombre_mp_resuelto = res_mp.get("nombre_mp", "")
+    es_subreceta = bool(res_mp.get("es_subreceta")) or str(cod_mp).upper().startswith("SUB-")
 
     from unidades_operativas import resolver_cantidad_traslado_mp
 
@@ -2775,11 +2809,19 @@ def tool_trasladar_mp(args):
             break
 
     if stock_origen is None:
-        if ignorar_stock:
+        if ignorar_stock or (es_subreceta and not confirmado):
             stock_origen = 0.0
-            unidad_base = unidad_base or "UNI"
+            unidad_base = (
+                res_mp.get("unidad_base") or unidad_base or ("gr" if es_subreceta else "UNI")
+            )
         else:
             etiqueta = nombre_mp_resuelto or nombre_mp or cod_mp
+            hint = (
+                "\nEs una *subreceta* (semi). Si falta en inventario, sincroniza con "
+                "sync_stock_subrecetas_maestro.py o confirma en periodo pruebas."
+                if es_subreceta
+                else ""
+            )
             return {
                 "error": (
                     f"{etiqueta} no está registrado en "
@@ -2787,6 +2829,7 @@ def tool_trasladar_mp(args):
                     + _hint_fila_maestro_traslado(
                         rows, cod_mp, bodega_origen, rol="origen"
                     )
+                    + hint
                 )
             }
 
@@ -2810,15 +2853,20 @@ def tool_trasladar_mp(args):
         None,
     )
     if fila_destino is None:
-        return {
-            "error": (
-                f"No existe fila para {cod_mp} en {nombre_bodega(bodega_destino)}. "
-                "Debe crearse primero en BD_MP_SISTEMA."
-                + _hint_fila_maestro_traslado(
-                    rows, cod_mp, bodega_destino, rol="destino"
-                )
+        if es_subreceta and (ignorar_stock or not confirmado):
+            unidad_base = (
+                res_mp.get("unidad_base") or unidad_base or "gr"
             )
-        }
+        else:
+            return {
+                "error": (
+                    f"No existe fila para {cod_mp} en {nombre_bodega(bodega_destino)}. "
+                    "Debe crearse primero en BD_MP_SISTEMA."
+                    + _hint_fila_maestro_traslado(
+                        rows, cod_mp, bodega_destino, rol="destino"
+                    )
+                )
+            }
 
     if not confirmado:
         etiqueta = (nombre_mp or nombre_mp_resuelto or cod_mp).strip()
@@ -2826,8 +2874,19 @@ def tool_trasladar_mp(args):
         aviso_pruebas = ""
         if ignorar_stock and stock_insuficiente:
             aviso_pruebas = (
-                f"\n⚠ Periodo pruebas cocina: stock insuficiente "
+                f"\n⚠ Periodo pruebas: stock insuficiente "
                 f"({round(stock_origen, 4)} {unidad_base} disponible) — se permitirá igual."
+            )
+        sin_fila_maestro = es_subreceta and not any(
+            norm_mp(r.get("cod_mp_sistema")) == cod_mp
+            and normalizar_cod_bodega(r.get("cod_bodega", "")) in (bodega_origen, bodega_destino)
+            for r in rows
+        )
+        aviso_maestro = ""
+        if sin_fila_maestro:
+            aviso_maestro = (
+                "\n⚠ Subreceta sin fila en BD_MP_SISTEMA — simulación OK; "
+                "ejecuta sync_stock_subrecetas_maestro.py antes de confirmar en producción."
             )
         return {
             "requiere_confirmacion": True,
@@ -2842,7 +2901,7 @@ def tool_trasladar_mp(args):
                 f"a {nombre_bodega(bodega_destino)}? "
                 f"Stock en origen: {round(stock_origen, 4)} {unidad_base}. "
                 "Responde 'si confirmo el traslado' para ejecutar."
-                f"{aviso_pruebas}"
+                f"{aviso_pruebas}{aviso_maestro}"
             ),
         }
 
@@ -4122,6 +4181,10 @@ def _extraer_nombre_mp_traslado(texto: str) -> str:
         re.I,
     )
     if not m:
+        if m_bod:
+            frag = _fragmento_insumo_traslado(t)
+            if frag and _normaliza_busqueda_mp(frag) not in _NOMBRES_MP_GENERICOS:
+                return frag
         return ""
     cand = m.group(1).strip(" .,;")
     if not cand:
@@ -4153,12 +4216,23 @@ def _es_traslado_generico_sin_detalle(texto: str) -> bool:
         return False
     if _resolver_subreceta_para_traslado(t):
         return False
+    if re.match(
+        r"^(?:traslad\w*|transfer\w*|transfi\w*|muev\w*|pasar?|pasa|pase)\s*$",
+        t,
+        re.I,
+    ):
+        return True
     frag = _texto_item_traslado(t)
     if frag and _normaliza_busqueda_mp(frag) not in _NOMBRES_MP_GENERICOS:
-        return False
+        if not re.match(
+            r"^(?:traslad\w*|transfer\w*|transfi\w*|muev\w*|pasar?|pasa|pase)\s*$",
+            frag,
+            re.I,
+        ):
+            return False
     return bool(
         re.match(
-            r"^(?:traslad\w*|transfer\w*|transfi\w*|muev\w*|pasar?|pasa|pase)\s+"
+            r"^(?:traslad\w*|transfer\w*|transfi\w*|muev\w*|pasar?|pasa|pase)\s*"
             r"(?:(?:una?|un)\s+)?"
             r"(?:mp|materia\s+prima|producto?s?|insumo?s?|semi?s?|subrecetas?)?\s*$",
             t,
@@ -4449,7 +4523,7 @@ async def _manejar_traslado_mp_wa(
             if _es_traslado_generico_sin_detalle(texto)
             else (
                 "Para trasladar dime:\n"
-                "1. Qué insumo o subreceta (ej. papa, torta de chocolate, SUB-010)\n"
+                "1. Qué insumo o subreceta (ej. papa, torta de chocolate, SUB-061)\n"
                 "2. De qué bodega a cuál (ej. de cocina a externa, o de 005 a 001)\n"
                 "3. Cantidad (ej. 5 tortas, 1 botella, 750 ml)\n\n"
                 "Ejemplo: Traslada 5 tortas de chocolate de cocina a externa"
