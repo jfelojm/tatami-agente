@@ -259,7 +259,9 @@ class TestTrasladoVsProduccion(unittest.TestCase):
                     )
         self.assertTrue(r.get("requiere_confirmacion"))
         self.assertIn("torta de chocolate", r.get("mensaje", ""))
-        self.assertIn("BD_MP_SISTEMA", r.get("mensaje", ""))
+        self.assertIn("simulación", r.get("mensaje", ""))
+        self.assertNotIn("BD_MP_SISTEMA", r.get("mensaje", ""))
+        self.assertNotIn("sin conversión", r.get("mensaje", "").lower())
 
     def test_traslado_con_unicode_invisible(self):
         from whatsapp_webhook import _es_mensaje_traslado, _normalizar_texto_comando_wa
@@ -393,7 +395,7 @@ class TestPeriodoPruebasCocina(unittest.TestCase):
                         }
                     )
         self.assertTrue(r.get("requiere_confirmacion"))
-        self.assertIn("Periodo pruebas", r.get("mensaje", ""))
+        self.assertIn("periodo de pruebas", r.get("mensaje", "").lower())
 
     def test_combinar_traslado_generico_con_detalle(self):
         from whatsapp_webhook import _texto_traslado_combinado, _traslado_ctx_touch

@@ -2728,6 +2728,42 @@ def tool_buscar_bodega(args):
         x["stock_total_mp"] = round(por_mp.get(x["cod_mp"], 0.0), 2)
     return {"encontrado": True, "resultados": resultados}
 
+def _fmt_cantidad_traslado_wa(
+    cantidad: float,
+    unidad_base: str,
+    interpretacion: str,
+    *,
+    es_subreceta: bool = False,
+) -> str:
+    """Texto legible para WhatsApp (evita «1054 gr (sin conversión)»)."""
+    interp = (interpretacion or "").strip()
+    ub = (unidad_base or "gr").strip()
+    if es_subreceta and interp:
+        m_std = re.match(r"lote\s+est[aá]ndar\s+([\d.,]+)\s*(\w+)", interp, re.I)
+        if m_std:
+            return f"1 lote ({m_std.group(1)} {m_std.group(2)})"
+        m_lotes = re.match(
+            r"([\d.,]+)\s+lote\(s\)\s*[×x]\s*([\d.,]+)\s*(\w+)",
+            interp,
+            re.I,
+        )
+        if m_lotes:
+            n = float(m_lotes.group(1).replace(",", "."))
+            rend = m_lotes.group(2)
+            u = m_lotes.group(3)
+            lbl = "lote" if n == 1 else "lotes"
+            return f"{n:g} {lbl} ({rend} {u} c/u)"
+        if "(sin conversión" not in interp.lower():
+            return interp
+    if interp and "(sin conversión" not in interp.lower():
+        bare = f"{cantidad:g} {ub}"
+        norm_interp = re.sub(r"\s*\(.*", "", interp).strip()
+        if norm_interp.lower() == bare.lower():
+            return bare
+        return f"{bare} ({interp})"
+    return f"{cantidad:g} {ub}"
+
+
 # ── TOOL 7 — trasladar MP ───────────────────────────────────
 def tool_trasladar_mp(args):
     from bodegas_config import (
@@ -2763,18 +2799,36 @@ def tool_trasladar_mp(args):
     nombre_mp_resuelto = res_mp.get("nombre_mp", "")
     es_subreceta = bool(res_mp.get("es_subreceta")) or str(cod_mp).upper().startswith("SUB-")
 
-    from unidades_operativas import resolver_cantidad_traslado_mp
+    texto_conv = (args.get("texto_original") or args.get("texto") or "")
+    if es_subreceta:
+        from unidades_operativas import resolver_cantidad_produccion_sub
 
-    conv = resolver_cantidad_traslado_mp(
-        cod_mp,
-        cantidad,
-        unidad_base="",
-        texto=(args.get("texto_original") or args.get("texto") or ""),
-        cantidad_presentacion=args.get("cantidad_presentacion"),
-        unidad_presentacion=(args.get("unidad_presentacion") or args.get("unidad_pedida") or ""),
-    )
-    cantidad = float(conv.get("cantidad_base") or 0)
-    interpretacion_cant = conv.get("interpretacion") or ""
+        cod_sub = str(cod_mp).upper().replace("SUB-", "").strip()
+        lotes_hint = args.get("cantidad_lotes")
+        conv = resolver_cantidad_produccion_sub(
+            cod_sub,
+            None if lotes_hint is not None else cantidad,
+            texto=texto_conv,
+            cantidad_lotes=lotes_hint,
+        )
+        if conv.get("cantidad_base") is not None:
+            cantidad = float(conv["cantidad_base"])
+        interpretacion_cant = (conv.get("interpretacion") or "").strip()
+        unidad_base_sub = (res_mp.get("unidad_base") or conv.get("unidad") or "gr").strip()
+    else:
+        from unidades_operativas import resolver_cantidad_traslado_mp
+
+        conv = resolver_cantidad_traslado_mp(
+            cod_mp,
+            cantidad,
+            unidad_base="",
+            texto=texto_conv,
+            cantidad_presentacion=args.get("cantidad_presentacion"),
+            unidad_presentacion=(args.get("unidad_presentacion") or args.get("unidad_pedida") or ""),
+        )
+        cantidad = float(conv.get("cantidad_base") or 0)
+        interpretacion_cant = conv.get("interpretacion") or ""
+        unidad_base_sub = ""
 
     if cantidad <= 0:
         return {"error": "La cantidad debe ser mayor que cero."}
@@ -2788,7 +2842,7 @@ def tool_trasladar_mp(args):
             )
         }
 
-    unidad_base = "UNI"
+    unidad_base = unidad_base_sub if es_subreceta and unidad_base_sub else "UNI"
     nombre_mp = ""
     stock_origen = None
     costo_ref_origen = 0.0
@@ -2870,24 +2924,22 @@ def tool_trasladar_mp(args):
 
     if not confirmado:
         etiqueta = (nombre_mp or nombre_mp_resuelto or cod_mp).strip()
-        det_cant = f" ({interpretacion_cant})" if interpretacion_cant else ""
-        aviso_pruebas = ""
+        cant_txt = _fmt_cantidad_traslado_wa(
+            cantidad, unidad_base, interpretacion_cant, es_subreceta=es_subreceta
+        )
+        aviso_extra = ""
         if ignorar_stock and stock_insuficiente:
-            aviso_pruebas = (
-                f"\n⚠ Periodo pruebas: stock insuficiente "
-                f"({round(stock_origen, 4)} {unidad_base} disponible) — se permitirá igual."
+            aviso_extra = (
+                f"\n⚠ Stock insuficiente ({round(stock_origen, 4):g} {unidad_base} disponible) "
+                "— periodo de pruebas, se permite igual."
             )
         sin_fila_maestro = es_subreceta and not any(
             norm_mp(r.get("cod_mp_sistema")) == cod_mp
             and normalizar_cod_bodega(r.get("cod_bodega", "")) in (bodega_origen, bodega_destino)
             for r in rows
         )
-        aviso_maestro = ""
         if sin_fila_maestro:
-            aviso_maestro = (
-                "\n⚠ Subreceta sin fila en BD_MP_SISTEMA — simulación OK; "
-                "ejecuta sync_stock_subrecetas_maestro.py antes de confirmar en producción."
-            )
+            aviso_extra += "\n⚠ La subreceta aún no está en inventario; esto es una simulación."
         return {
             "requiere_confirmacion": True,
             "cod_mp_sistema": cod_mp,
@@ -2896,12 +2948,11 @@ def tool_trasladar_mp(args):
             "cantidad_interpretada": round(cantidad, 4),
             "interpretacion_cantidad": interpretacion_cant,
             "mensaje": (
-                f"Confirmas trasladar {cantidad:g} {unidad_base} de {etiqueta}{det_cant} "
-                f"de {nombre_bodega(bodega_origen)} "
-                f"a {nombre_bodega(bodega_destino)}? "
-                f"Stock en origen: {round(stock_origen, 4)} {unidad_base}. "
-                "Responde 'si confirmo el traslado' para ejecutar."
-                f"{aviso_pruebas}{aviso_maestro}"
+                f"¿Confirmas trasladar *{cant_txt}* de *{etiqueta}* "
+                f"de {nombre_bodega(bodega_origen)} a {nombre_bodega(bodega_destino)}?\n\n"
+                f"Stock en origen: {round(stock_origen, 4):g} {unidad_base}.\n"
+                "Responde *si confirmo el traslado* para ejecutar."
+                f"{aviso_extra}"
             ),
         }
 
@@ -4300,7 +4351,7 @@ def _es_continuacion_traslado_pendiente(texto: str) -> bool:
 
 def _msg_traslado_inicio() -> str:
     return (
-        "*Traslado entre bodegas* (sin usar el modelo de IA).\n\n"
+        "*Traslado entre bodegas*\n\n"
         "Dime en un mensaje:\n"
         "1. Qué mueves (MP, subreceta o semi)\n"
         "2. Cantidad (ej. 5 tortas, 1 botella, 750 ml)\n"
@@ -4561,7 +4612,12 @@ async def _manejar_traslado_mp_wa(
         if sub.get("cantidad"):
             cantidad = float(sub["cantidad"])
         interpretacion = sub.get("interpretacion") or ""
+        if (interpretacion or "").lower().startswith("lote estándar"):
+            cantidad_lotes = 1.0
+        else:
+            cantidad_lotes = sub.get("lotes")
     else:
+        cantidad_lotes = None
         expl = parse_cantidad_explicita_base(texto)
         pres = parse_cantidad_presentacion(texto)
         if expl is not None:
@@ -4583,6 +4639,8 @@ async def _manejar_traslado_mp_wa(
     if cod_mp:
         args["cod_mp_sistema"] = cod_mp
         args["nombre_mp"] = nombre_mp
+        if cantidad_lotes is not None:
+            args["cantidad_lotes"] = cantidad_lotes
     else:
         args["nombre_mp"] = nombre_mp
 
@@ -4611,8 +4669,6 @@ async def _manejar_traslado_mp_wa(
         out = r.get("mensaje") or "Varios productos coinciden; indica cuál por nombre."
     elif r.get("requiere_confirmacion"):
         out = r.get("mensaje") or "Confirma el traslado."
-        if interpretacion and interpretacion not in out:
-            out = f"{interpretacion}\n\n{out}"
     elif r.get("error"):
         out = str(r.get("error"))
     elif r.get("mensaje"):
