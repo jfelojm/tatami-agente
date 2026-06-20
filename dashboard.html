@@ -1771,8 +1771,11 @@ function setMode(m, btn) {
   document.getElementById('pp').classList.toggle('hid', m !== 'p');
   cargar();
 }
-function semanasHastaIso() {
+function ventasHastaIso() {
   return (_meta && _meta.ventas_hasta) || null;
+}
+function semanasHastaIso() {
+  return ventasHastaIso();
 }
 
 function captureSemanasSelection() {
@@ -1796,7 +1799,7 @@ function onSemanasCheckChange() {
 }
 
 function diasHastaIso() {
-  return (_meta && _meta.ventas_hasta) || null;
+  return ventasHastaIso();
 }
 
 function captureDiasSelection() {
