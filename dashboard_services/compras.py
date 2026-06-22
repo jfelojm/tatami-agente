@@ -420,8 +420,8 @@ def build_resumen_compras(
         "acumulado_anio": {"vta": ytd["vta"], "lineas": ytd["lineas"]},
         "facturas_parciales": parciales,
         "nota": (
-            "Solo inventario: ENTRADA/ENTRADA_COSTO_HIST con MP en BD_MP_SISTEMA, "
-            "bodegas 001/002/003/005. Excluye MP 000 y líneas sin catálogo. "
-            "Proveedor desde BD_PROV o razón social de la factura."
+            "Compras: ENTRADA (stock real) y ENTRADA_COSTO_HIST (solo costo, cantidad=0, "
+            "no modifica stock). MP en BD_MP_SISTEMA, bodegas 001/002/003/005. "
+            "Excluye MP 000 y líneas sin catálogo. Proveedor desde BD_PROV o factura."
         ),
     }

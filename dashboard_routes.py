@@ -418,6 +418,27 @@ def _query_hist_ventas(
     return out
 
 
+def _query_mov_inventario(
+    sb,
+    *,
+    desde: str | None,
+    hasta: str | None,
+) -> list[dict]:
+    """Lectura mov_inventario para dashboards (compras, rentabilidad, roturas). Solo lectura."""
+    q = sb.table("mov_inventario").select(
+        "fecha,tipo_mov,cod_mp_sistema,nombre_mp,cantidad_mov,"
+        "costo_unitario,costo_total,num_documento,cod_bodega_origen,cod_bodega_destino,observaciones"
+    )
+    if desde:
+        q = q.gte("fecha", desde)
+    if hasta:
+        q = q.lte("fecha", hasta + "T23:59:59")
+    return _fetch_paginated(
+        q,
+        order=(("fecha", False), ("cod_mov", False)),
+    )
+
+
 def _neto_linea(row: dict) -> float:
     subtotal = float(row.get("subtotal") or 0)
     descuento = float(row.get("descuento_valor") or 0)
@@ -823,18 +844,6 @@ def ventas(
             hasta=date.fromisoformat(hasta),
         )
     return _json_no_store(result)
-    q = sb.table("mov_inventario").select(
-        "fecha,tipo_mov,cod_mp_sistema,nombre_mp,cantidad_mov,"
-        "costo_unitario,costo_total,num_documento,cod_bodega_origen,cod_bodega_destino,observaciones"
-    )
-    if desde:
-        q = q.gte("fecha", desde)
-    if hasta:
-        q = q.lte("fecha", hasta + "T23:59:59")
-    return _fetch_paginated(
-        q,
-        order=(("fecha", False), ("cod_mov", False)),
-    )
 
 
 def _query_facturas_procesadas(sb, *, desde: str | None, hasta: str | None) -> list[dict]:
