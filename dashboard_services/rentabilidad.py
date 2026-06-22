@@ -167,6 +167,7 @@ def build_rentabilidad_from_catalog(
     desde: date,
     hasta: date,
     agrup: str = "mes",
+    costo_compras_dashboard: float | None = None,
 ) -> dict:
     recetas_por_plato = _recetas_por_plato_cached()
     costo_mp_global = costo_promedio_mp_periodo(rows_entrada)
@@ -269,7 +270,11 @@ def build_rentabilidad_from_catalog(
     out_platos.sort(key=lambda x: x["vta"], reverse=True)
     margen_t_pct = round((vta_total - costo_t_total) / vta_total * 100, 1) if vta_total else 0
     margen_r_pct = round((vta_total - costo_r_total) / vta_total * 100, 1) if vta_total else 0
-    costo_compras = costo_compras_periodo(rows_entrada)
+    costo_compras = (
+        round(costo_compras_dashboard, 2)
+        if costo_compras_dashboard is not None
+        else costo_compras_periodo(rows_entrada)
+    )
     margen_compras = round(vta_total - costo_compras, 2)
     margen_compras_pct = round(margen_compras / vta_total * 100, 1) if vta_total else 0
 
@@ -324,7 +329,7 @@ def build_rentabilidad_from_catalog(
         },
         "platos": out_platos[:50],
         "nota_costo": (
-            "Margen por plato usa costo promedio ENTRADA/ENTRADA_COSTO_HIST por MP. "
-            "margen_compras = ventas − Σ compras del período (incluye líneas aproximadas sin catálogo)."
+            "Margen bruto = ventas − food cost (recetas de lo vendido). "
+            "Compras inventario = Σ ENTRADA del período (tab Compras); incluye stock no vendido."
         ),
     }

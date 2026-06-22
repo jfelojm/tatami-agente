@@ -1014,6 +1014,15 @@ def dashboard_rentabilidad(
             m for m in _query_mov_inventario(sb, desde=desde, hasta=hasta)
             if (m.get("tipo_mov") or "") in ("ENTRADA", "ENTRADA_COSTO_HIST")
         ]
+        from dashboard_services.compras import total_compras_dashboard
+
+        try:
+            rows_mp = leer_bd_mp_sistema()
+            rows_prov = leer_bd_prov()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"No se pudo leer Sheets: {e}") from e
+        facturas = _query_facturas_procesadas(sb, desde=desde, hasta=hasta)
+        compras_total = total_compras_dashboard(entradas, facturas, rows_mp, rows_prov)
         return build_rentabilidad_from_catalog(
             rows_ventas=ventas,
             rows_entrada=entradas,
@@ -1023,6 +1032,7 @@ def dashboard_rentabilidad(
             desde=date.fromisoformat(desde),
             hasta=date.fromisoformat(hasta),
             agrup=agrup,
+            costo_compras_dashboard=compras_total,
         )
     except HTTPException:
         raise

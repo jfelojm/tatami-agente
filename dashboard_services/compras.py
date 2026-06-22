@@ -349,6 +349,21 @@ def listar_facturas_inventario_dashboard(
     return out
 
 
+def total_compras_dashboard(
+    rows: list[dict],
+    facturas: list[dict],
+    rows_mp: list[dict],
+    rows_prov: list[dict],
+) -> float:
+    """Mismo total que el tab Compras (filtros proveedor, bodega, catálogo)."""
+    mps_validos = {norm_mp(r.get("cod_mp_sistema")) for r in rows_mp if norm_mp(r.get("cod_mp_sistema"))}
+    mp_area = _mapa_mp_area(rows_mp)
+    prov_inv = _mapa_proveedores_inventario(rows_prov)
+    return float(
+        _metricas_compras(rows, facturas, prov_inv, mps_validos, mp_area).get("vta") or 0
+    )
+
+
 def build_resumen_compras(
     *,
     query_mov_fn,

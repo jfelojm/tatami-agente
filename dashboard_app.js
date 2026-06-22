@@ -270,19 +270,21 @@
 
     if (aud === 'socios') {
       const fmt = window.rentSocioFmt || 'valor';
-      const pctCosto = s.vta ? Math.round(s.costo_real / s.vta * 1000) / 10 : 0;
+      const pctFood = s.vta ? Math.round(s.costo_real / s.vta * 1000) / 10 : 0;
+      const pctCompras = s.vta ? Math.round((s.costo_compras_periodo || 0) / s.vta * 1000) / 10 : 0;
+      const compras = s.costo_compras_periodo || 0;
       const metrics = fmt === 'pct'
         ? [
           card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), d.nota_costo || ''),
-          card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
-          card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
-          card('Costo MP / ventas', pctCosto + '%', '$' + s.costo_real.toLocaleString('es-EC')),
+          card('Margen bruto', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
+          card('Food cost vendido', pctFood + '%', '$' + s.costo_real.toLocaleString('es-EC')),
+          card('Compras inventario', pctCompras + '%', '$' + compras.toLocaleString('es-EC')),
         ]
         : [
           card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), d.nota_costo || ''),
-          card('Margen real', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
-          card('Margen teórico', '$' + s.margen_teorico.toLocaleString('es-EC'), s.margen_teorico_pct + '% del neto'),
-          card('Costo MP período', '$' + s.costo_real.toLocaleString('es-EC'), 'Promedio compras ENTRADA'),
+          card('Margen bruto', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
+          card('Food cost vendido', '$' + s.costo_real.toLocaleString('es-EC'), pctFood + '% ventas · recetas'),
+          card('Compras inventario', '$' + compras.toLocaleString('es-EC'), pctCompras + '% ventas · tab Compras'),
         ];
       document.getElementById('rent-socios-metrics').innerHTML = metrics.join('');
 
@@ -328,19 +330,21 @@
 
     const filtroLbl = typeof filtroLabelSuffix === 'function' ? filtroLabelSuffix() : '';
     const fmtOp = window.rentSocioFmt || 'valor';
-    const pctCostoOp = s.vta ? Math.round(s.costo_real / s.vta * 1000) / 10 : 0;
+    const pctFoodOp = s.vta ? Math.round(s.costo_real / s.vta * 1000) / 10 : 0;
+    const pctComprasOp = s.vta ? Math.round((s.costo_compras_periodo || 0) / s.vta * 1000) / 10 : 0;
+    const comprasOp = s.costo_compras_periodo || 0;
     document.getElementById('rent-metrics').innerHTML = fmtOp === 'pct'
       ? [
         card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
-        card('Margen real', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
-        card('Margen teórico', s.margen_teorico_pct + '%', '$' + s.margen_teorico.toLocaleString('es-EC')),
-        card('Costo MP / ventas', pctCostoOp + '%', '$' + s.costo_real.toLocaleString('es-EC')),
+        card('Margen bruto', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
+        card('Food cost vendido', pctFoodOp + '%', '$' + s.costo_real.toLocaleString('es-EC')),
+        card('Compras inventario', pctComprasOp + '%', '$' + comprasOp.toLocaleString('es-EC')),
       ].join('')
       : [
         card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
-        card('Margen real', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
-        card('Margen teórico', '$' + s.margen_teorico.toLocaleString('es-EC'), s.margen_teorico_pct + '% del neto'),
-        card('Costo real', '$' + s.costo_real.toLocaleString('es-EC'), d.nota_costo || ''),
+        card('Margen bruto', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
+        card('Food cost vendido', '$' + s.costo_real.toLocaleString('es-EC'), pctFoodOp + '% ventas · recetas'),
+        card('Compras inventario', '$' + comprasOp.toLocaleString('es-EC'), pctComprasOp + '% ventas · tab Compras'),
       ].join('');
 
     const slicedOp = window.sliceRentSeries(d, window._periodFilter);
