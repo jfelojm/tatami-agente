@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250620-par-level-routing-v30"
+TATAMI_WA_BUILD = "20250623-conteo-aprobar-routing-v31"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -298,6 +298,10 @@ def _es_mensaje_conteo(texto: str, wa_id: str | None = None) -> bool:
     raw = (texto or "").strip()
     if not raw:
         return False
+    t_upper = raw.upper()
+    # APROBAR TODO / RECHAZAR / KARDEX no son consulta de ciclos abiertos
+    if _es_comando_conteo(t_upper):
+        return False
     t = raw.lower()
     ultima = _ultima_linea_usuario(raw).lower()
     # Producción / subreceta no es conteo aunque diga «cocina» o «barra»
@@ -318,7 +322,9 @@ def _es_mensaje_conteo(texto: str, wa_id: str | None = None) -> bool:
         for fragment in (ultima, t):
             if len(fragment) <= 48 and _parse_bodega_conteo(fragment):
                 return True
-    if re.search(r"\b(revisar|iniciar|nuevo|enviar|aprobar)\b", ultima):
+    if re.search(r"\b(revisar|iniciar|nuevo|enviar)\s+conteo\b", ultima):
+        return True
+    if ultima in ("revisar", "iniciar", "nuevo", "enviar") and ctx.get("active"):
         return True
     return False
 
