@@ -16,13 +16,13 @@ import os
 import sys
 
 from dotenv import load_dotenv
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
 
 def main():
     import gspread
-    from google.oauth2.service_account import Credentials
     from gspread.utils import ValueInputOption, rowcol_to_a1
     from numeros_sheets import parse_numero_sheets
 
@@ -45,10 +45,7 @@ def main():
 
     filt = {norm_mp(m) for m in args.mp} if args.mp else None
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     prov = cargar_costo_desde_items_prov(sh)
 

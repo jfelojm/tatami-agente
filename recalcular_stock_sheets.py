@@ -28,10 +28,10 @@ from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from supabase import create_client
 import gspread
-from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 
 from bodegas_config import normalizar_cod_bodega
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -354,9 +354,7 @@ def recalcular(
     )
 
     print("\n[2] Leyendo BD_MP_SISTEMA en Sheets...")
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     sh = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
     ws = sh.worksheet("BD_MP_SISTEMA")
     values = ws.get_all_values()

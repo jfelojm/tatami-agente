@@ -26,9 +26,8 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 import gspread
-from google.oauth2.service_account import Credentials
-
 from sheet_numbers import parse_sheet_number
+from google_credentials import google_credentials, has_google_credentials
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -42,12 +41,11 @@ def _float(v) -> float:
 
 def cargar_filas_bd_mp_sistema() -> tuple[list[str], list[dict]]:
     load_dotenv(override=True)
-    creds_path = os.getenv("GOOGLE_CREDENTIALS_PATH")
     sid = os.getenv("SPREADSHEET_ID")
-    if not creds_path or not sid:
-        raise SystemExit("Faltan GOOGLE_CREDENTIALS_PATH o SPREADSHEET_ID en .env")
+    if not has_google_credentials() or not sid:
+        raise SystemExit("Faltan credenciales Google o SPREADSHEET_ID en .env")
 
-    creds = Credentials.from_service_account_file(creds_path, scopes=SCOPES)
+    creds = google_credentials(SCOPES)
     sh = gspread.authorize(creds).open_by_key(sid)
     ws = sh.worksheet("BD_MP_SISTEMA")
     values = ws.get_all_values()

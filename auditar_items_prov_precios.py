@@ -15,6 +15,7 @@ from collections import Counter, defaultdict
 from datetime import datetime
 
 from dotenv import load_dotenv
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -142,16 +143,11 @@ def clasificar_fila(d: dict) -> str:
 
 def main() -> None:
     import gspread
-    from google.oauth2.service_account import Credentials
-
     p = argparse.ArgumentParser()
     p.add_argument("-o", "--output", default="")
     args = p.parse_args()
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     _, items = cargar_items_prov(sh)
 

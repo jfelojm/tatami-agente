@@ -15,22 +15,18 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
 
 def _costo_mp_por_bodega() -> dict[tuple[str, str], float]:
     import gspread
-    from google.oauth2.service_account import Credentials
-
     from bodegas_config import normalizar_cod_bodega
     from numeros_sheets import parse_numero_sheets
     from recalcular_stock_sheets import _cod_mp_norm
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     ws = sh.worksheet("BD_MP_SISTEMA")
     vals = ws.get_all_values()

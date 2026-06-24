@@ -22,11 +22,11 @@ from typing import Any
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from supabase import create_client
 
 from config_sheets import delta_abs_tol_conteo
 from recalcular_stock_sheets import _clave_stock, build_stock_calculado
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -58,9 +58,7 @@ def _sb():
 
 
 def _get_sheet():
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
 
 

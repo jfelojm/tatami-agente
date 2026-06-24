@@ -333,13 +333,15 @@ def run_step(
         print(f"\nWARN: paso termino con codigo {r.returncode} (se continua)")
     if r.returncode == 0 and step is not None and fecha_objetivo:
         _checkpoint_step_ok(fecha_objetivo, step, name)
-    if r.returncode == 0:
-        try:
-            from alertas_pipeline import ping_wa_paso_proceso
+    try:
+        from alertas_pipeline import ping_wa_paso_proceso
 
-            ping_wa_paso_proceso(name)
-        except Exception as e:
-            print(f"  WARN: ping WA paso: {e}")
+        if r.returncode == 0:
+            ping_wa_paso_proceso(name, ok=True)
+        elif not check:
+            ping_wa_paso_proceso(name, ok=False)
+    except Exception as e:
+        print(f"  WARN: ping WA paso: {e}")
     return r.returncode
 
 

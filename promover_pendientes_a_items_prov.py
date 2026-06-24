@@ -22,7 +22,6 @@ import os
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 
 from codigo_factura_match import (
@@ -31,6 +30,7 @@ from codigo_factura_match import (
     normalizar_cod_item_para_match,
     normalizar_cod_proveedor_para_match,
 )
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -45,9 +45,7 @@ SHEET_MP = "BD_MP_SISTEMA"
 
 
 def _auth():
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
 
 
@@ -288,6 +286,8 @@ def run(*, dry_run: bool) -> int:
     insertadas = 0
     omitidas = 0
     errores = 0
+    filas_nuevas: list[list[str]] = []
+    estado_updates: list[tuple[int, int]] = []
 
     for sheet_row, pend in filas_pend:
         estado = (pend.get("estado") or "").strip().upper()
@@ -337,14 +337,7 @@ def run(*, dry_run: bool) -> int:
         items_prov_list.append(
             {headers_prov[j]: nueva[j] for j in range(len(headers_prov))}
         )
-
-        col_estado = idx_estado + 1
-        rng = rowcol_to_a1(sheet_row, col_estado)
-        ws_p.update(
-            range_name=rng,
-            values=[["REGISTRADO"]],
-            value_input_option=ValueInputOption.user_entered,
-        )
+        estado_updates.append((sheet_row, idx_estado + 1))
 
         extra = f" cod_item_prov={cod_cat}" if cod_cat and cod_cat != cod_xml else ""
         print(f"  OK fila {sheet_row}: alta BD_ITEMS_PROV | {cod_prov} | {cod_xml}{extra} -> {cod_mp}")
@@ -359,6 +352,15 @@ def run(*, dry_run: bool) -> int:
             value_input_option=ValueInputOption.user_entered,
         )
         print(f"  → BD_ITEMS_PROV: escritas filas {start_row}-{end_row}")
+
+    if not dry_run and estado_updates:
+        for sheet_row, col_estado in estado_updates:
+            rng = rowcol_to_a1(sheet_row, col_estado)
+            ws_p.update(
+                range_name=rng,
+                values=[["REGISTRADO"]],
+                value_input_option=ValueInputOption.user_entered,
+            )
 
     print(
         f"\nListo: insertadas={insertadas} omitidas_duplicado={omitidas} "

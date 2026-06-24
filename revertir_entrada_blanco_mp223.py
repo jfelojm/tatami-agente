@@ -21,6 +21,7 @@ import sys
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -98,13 +99,9 @@ def main() -> int:
         print("Ajuste insertado y ENTRADA marcada REVERTIDO.")
 
         import gspread
-        from google.oauth2.service_account import Credentials
         from gspread.utils import ValueInputOption, rowcol_to_a1
 
-        creds = Credentials.from_service_account_file(
-            os.environ["GOOGLE_CREDENTIALS_PATH"],
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
-        )
+        creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
         sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
         ws = sh.worksheet("BD_ITEMS_PROV")
         vals = ws.get_all_values()

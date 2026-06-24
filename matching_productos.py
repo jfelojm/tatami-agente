@@ -3,7 +3,6 @@ import os
 import gspread
 from dotenv import load_dotenv
 from google_credentials import google_credentials
-
 load_dotenv(override=True)
 
 SCOPES = [
@@ -107,11 +106,21 @@ def resolver_match(cod_smart_menu: str, detalle_plato: str, lookup: dict) -> dic
         return _match_ok(f)
 
     # Caso 2: múltiples variedades → buscar cuál está en detalle_plato
-    for i, variedad in enumerate(variedades):
+    # Priorizar extras explícitos (CAMARON, LOMO…) antes que la fila clásica (variedad vacía).
+    orden = sorted(
+        range(len(filas)),
+        key=lambda i: (0 if (variedades[i] or "").strip() else 1, -len(variedades[i] or "")),
+    )
+    for i in orden:
+        variedad = variedades[i]
         if variedad and variedad.upper() in detalle:
             return _match_ok(filas[i])
 
-    # Caso 3: ninguna variedad matchea → PENDIENTE
+    # Caso 3: sin extra en detalle → clásico (variedad vacía en BD_PRODUCTOS)
+    for i, variedad in enumerate(variedades):
+        if not (variedad or "").strip():
+            return _match_ok(filas[i])
+
     return _sin_match(f"No match variedad para cod={cod} detalle='{detalle_plato}'")
 
 

@@ -1,13 +1,11 @@
-# Desactiva schedulers legacy (cuadrante + SRI AM/PM + pipeline horario viejo).
+# Desactiva schedulers legacy (cuadrante). SRI AM/PM se registran aparte.
 # Uso: .\desactivar_schedulers_legacy.ps1
 
 $Legacy = @(
     "TatamiCuadrante_Mediodia",
     "TatamiCuadrante_Tarde",
     "TatamiCuadrante_Medianoche",
-    "TatamiCuadrante_Seguridad",
-    "TatamiFacturasSRI_AM",
-    "TatamiFacturasSRI_PM"
+    "TatamiCuadrante_Seguridad"
 )
 
 Write-Host "Desactivando tareas legacy..."

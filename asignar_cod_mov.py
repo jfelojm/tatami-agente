@@ -17,15 +17,14 @@ import json
 from datetime import datetime
 from dotenv import load_dotenv
 import gspread
-from google.oauth2.service_account import Credentials
 from supabase import create_client
 from postgrest.exceptions import APIError
+from google_credentials import google_credentials
 
 load_dotenv()
 
 # ── Config ──────────────────────────────────────────────────────────────────
 SPREADSHEET_ID      = os.getenv("SPREADSHEET_ID")
-GOOGLE_CREDS_PATH   = os.getenv("GOOGLE_CREDENTIALS_PATH")
 SUPABASE_URL        = os.getenv("SUPABASE_URL")
 SUPABASE_KEY        = os.getenv("SUPABASE_KEY")
 HOJA_MOV            = "MOV_INVENTARIO"
@@ -49,7 +48,7 @@ def conectar_sheets():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
-    creds = Credentials.from_service_account_file(GOOGLE_CREDS_PATH, scopes=scopes)
+    creds = google_credentials(scopes)
     gc = gspread.authorize(creds)
     return gc.open_by_key(SPREADSHEET_ID)
 

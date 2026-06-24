@@ -6,8 +6,6 @@ import os
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
-
 from calcular_costo_subrecetas import (
     calcular_costos,
     cargar_costos_mp,
@@ -20,6 +18,7 @@ from subrecetas_detalle import (
     cargar_bd_subrecetas,
     cargar_bd_subrecetas_detalle,
 )
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -33,9 +32,7 @@ def _match_suspiro(cod: str, nombre: str) -> bool:
 
 
 def main() -> None:
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
 
     cab = cargar_bd_subrecetas(sh)

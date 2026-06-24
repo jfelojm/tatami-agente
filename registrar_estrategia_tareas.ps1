@@ -1,5 +1,5 @@
-# Registra tareas Task Scheduler de la estrategia BD_CONFIG (horario + digest + PAR).
-# Desactiva cuadrante legacy y SRI AM/PM sueltos.
+# Registra tareas Task Scheduler de la estrategia BD_CONFIG (horario + digest + PAR + SRI).
+# Desactiva cuadrante legacy.
 #
 # Requiere PowerShell como administrador:
 #   .\registrar_estrategia_tareas.ps1
@@ -106,8 +106,12 @@ Register-TatamiTask `
     -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At "20:00")
 
 Write-Host ""
+Write-Host "Registrando descarga SRI AM/PM (10:00 y 18:00)..."
+& (Join-Path $Root "registrar_facturas_sri_tareas.ps1") -SinAdmin:$false
+
+Write-Host ""
 Write-Host "Tareas activas:"
-foreach ($n in @("TatamiPipelineHorario", "TatamiDigestMatutino", "TatamiPARSemanal")) {
+foreach ($n in @("TatamiPipelineHorario", "TatamiDigestMatutino", "TatamiPARSemanal", "TatamiFacturasSRI_AM", "TatamiFacturasSRI_PM")) {
     $task = Get-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue
     if ($task) {
         $info = Get-ScheduledTaskInfo -TaskName $n

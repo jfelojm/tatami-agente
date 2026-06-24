@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -36,8 +37,6 @@ MPS_LICOR_ML = frozenset(
 
 def auditar(*, strict: bool = False) -> tuple[list[dict], int]:
     import gspread
-    from google.oauth2.service_account import Credentials
-
     from costo_mp_canonico import (
         _elegir_costo_mp_final,
         cargar_costo_desde_bd_mp,
@@ -46,10 +45,7 @@ def auditar(*, strict: bool = False) -> tuple[list[dict], int]:
     )
     from numeros_sheets import parse_numero_sheets
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     prov = cargar_costo_desde_items_prov(sh)
     bd = cargar_costo_desde_bd_mp(sh)

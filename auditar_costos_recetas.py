@@ -24,6 +24,7 @@ from calcular_costo_recetas import (
     resumen_plato_costo,
 )
 from calcular_costo_subrecetas import _safe_float
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -127,12 +128,7 @@ def auditar(
     umbral_cu_gr: float,
 ) -> tuple[list[dict], list[dict]]:
     import gspread
-    from google.oauth2.service_account import Credentials
-
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
 
     costos_mp, unitarios_sub, por_plato, _ = cargar_contexto_costos(sh)

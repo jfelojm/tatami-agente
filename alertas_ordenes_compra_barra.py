@@ -13,11 +13,18 @@ Variables (.env):
 from __future__ import annotations
 
 import os
-from datetime import date
+import re
+import time
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
+import pytz
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
+
+LOG_WEBHOOK = Path(__file__).resolve().parent / "logs" / "webhook_inbound.log"
+TZ_GYE = pytz.timezone("America/Guayaquil")
 
 
 def alertas_ordenes_compra_barra_habilitadas() -> bool:
@@ -170,6 +177,96 @@ def _formatear_bloque_revision(ordenes: list[dict], hoy: date) -> list[str]:
     return bloques
 
 
+def _solo_digitos(numero: str) -> str:
+    return "".join(c for c in (numero or "") if c.isdigit())
+
+
+def usuario_en_ventana_24h(numero: str, *, horas: float = 24.0) -> bool:
+    """
+    True si el usuario escribió al bot en las últimas N horas (log webhook).
+    Fuera de ventana Meta solo entrega plantillas, no texto libre.
+    """
+    digits = _solo_digitos(numero)
+    if not digits or not LOG_WEBHOOK.is_file():
+        return False
+    pat = re.compile(rf"^(\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}:\d{{2}}) IN from={re.escape(digits)} ")
+    ultimo: datetime | None = None
+    try:
+        lines = LOG_WEBHOOK.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return False
+    for line in lines[-800:]:
+        m = pat.match(line)
+        if m:
+            ultimo = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+    if not ultimo:
+        return False
+    ahora = datetime.now(TZ_GYE).replace(tzinfo=None)
+    return (ahora - ultimo) < timedelta(hours=horas)
+
+
+def _enviar_plantilla_bienvenida(numero: str) -> tuple[bool, str]:
+    import requests
+
+    pid = (os.getenv("WHATSAPP_PHONE_NUMBER_ID") or "").strip()
+    tok = (os.getenv("WHATSAPP_ACCESS_TOKEN") or "").strip()
+    ver = (os.getenv("WHATSAPP_API_VERSION", "v21.0") or "v21.0").strip()
+    if not pid or not tok:
+        return False, "sin credenciales WA"
+    url = f"https://graph.facebook.com/{ver}/{pid}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": _solo_digitos(numero),
+        "type": "template",
+        "template": {"name": "tatami_bienvenida", "language": {"code": "es_EC"}},
+    }
+    try:
+        r = requests.post(
+            url,
+            json=payload,
+            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+            timeout=30,
+        )
+        if r.status_code >= 400:
+            return False, r.text[:200]
+        return True, "template tatami_bienvenida"
+    except Exception as e:
+        return False, str(e)
+
+
+def mensajes_ordenes_barra_por_proveedor(
+    ordenes: list[dict],
+    hoy: date,
+) -> list[str]:
+    """Un mensaje WA por proveedor (texto dentro de ventana 24h)."""
+    from generar_ordenes_compra import formatear_mensaje_whatsapp
+
+    n = len(ordenes)
+    out: list[str] = []
+    for i, oc in enumerate(ordenes, 1):
+        prov = oc["proveedor"]
+        lineas = oc["lineas"]
+        bloque = [
+            f"[{i}/{n}] {prov['razon_social']}",
+            f"Fecha: {hoy.strftime('%d/%m/%Y')} | Solo revision",
+            "--- STOCK / PAR ---",
+        ]
+        for ln in lineas:
+            desc = (ln.get("descripcion_proveedor") or ln.get("nombre_mp", ""))[:40]
+            ub = (ln.get("unidad_base") or "").strip()
+            cant = (ln.get("texto_cantidad") or "").strip()
+            bloque.append(f"* {desc}")
+            bloque.append(f"  Pedir: {cant}")
+            bloque.append(
+                f"  Stock {ln.get('stock_actual')} / PAR {ln.get('par_level')} {ub}"
+            )
+        bloque.append("")
+        bloque.append("--- TEXTO PARA PROVEEDOR ---")
+        bloque.append(formatear_mensaje_whatsapp(prov, lineas))
+        out.append("\n".join(bloque)[:4096])
+    return out
+
+
 def _partir_mensajes(bloques: list[str], max_len: int = 4000) -> list[str]:
     """Divide en varios WA si supera límite Meta."""
     partes: list[str] = []
@@ -237,34 +334,51 @@ def enviar_alertas_ordenes_compra_barra(
         res["omitido"] = "sin ítems bajo PAR ni MPs en cero en barra/consignación"
         return res
 
-    bloques: list[str] = []
-    if origen:
-        bloques.append(f"Origen: {origen}")
-    if ordenes:
-        bloques.extend(_formatear_bloque_revision(ordenes, hoy))
-    else:
-        bloques.extend(
-            [
-                "🛒 Órdenes compra BARRA (revisión)",
-                f"Fecha: {hoy.strftime('%d/%m/%Y')}",
-                "Sin líneas bajo PAR con catálogo y ventana hoy.",
-                "",
-            ]
-        )
-    if stock_cero:
-        bloques.append("")
-        bloques.extend(_formatear_bloque_stock_cero(stock_cero))
-
-    mensajes = _partir_mensajes(bloques)
-
     from alertas_tatami import enviar_alerta, enviar_whatsapp_texto, log_envio_wa
 
-    for cuerpo in mensajes:
-        enviar_alerta("Órdenes compra barra", cuerpo, estado="INFO")
-        for numero, etiqueta in destinos:
+    msgs_por_prov = mensajes_ordenes_barra_por_proveedor(ordenes, hoy) if ordenes else []
+    intro = (
+        f"ORDENES COMPRA BARRA ({len(ordenes)} proveedores) — {hoy.strftime('%d/%m/%Y')}.\n"
+        f"Van {len(msgs_por_prov)} mensajes (uno por proveedor)."
+    )
+
+    for numero, etiqueta in destinos:
+        if not usuario_en_ventana_24h(numero):
+            ok_tpl, det_tpl = _enviar_plantilla_bienvenida(numero)
+            log_envio_wa(f"{etiqueta} plantilla (fuera 24h)", numero, ok_tpl, det_tpl)
+            if ok_tpl:
+                res["enviados"] += 1
+            else:
+                res["fallos"] += 1
+            res["omitido"] = "fuera_ventana_24h: responder PEDIDOS BARRA al bot Tatami"
+            print(
+                f"  WA [{etiqueta}] fuera ventana 24h — solo plantilla; "
+                "responder PEDIDOS BARRA al +593 96 279 3109"
+            )
+            continue
+
+        ok0, d0 = enviar_whatsapp_texto(numero, intro)
+        log_envio_wa(f"{etiqueta} intro ordenes", numero, ok0, d0)
+        if ok0:
+            res["enviados"] += 1
+        else:
+            res["fallos"] += 1
+
+        for j, cuerpo in enumerate(msgs_por_prov, 1):
+            enviar_alerta("Órdenes compra barra", cuerpo, estado="INFO")
             ok, msg = enviar_whatsapp_texto(numero, cuerpo)
-            log_envio_wa(f"{etiqueta} órdenes barra", numero, ok, msg)
+            log_envio_wa(f"{etiqueta} orden prov {j}", numero, ok, msg)
             if ok:
+                res["enviados"] += 1
+            else:
+                res["fallos"] += 1
+            time.sleep(2)
+
+        if stock_cero:
+            anexo = "\n".join(_formatear_bloque_stock_cero(stock_cero))[:4096]
+            ok_a, msg_a = enviar_whatsapp_texto(numero, anexo)
+            log_envio_wa(f"{etiqueta} anexo stock cero", numero, ok_a, msg_a)
+            if ok_a:
                 res["enviados"] += 1
             else:
                 res["fallos"] += 1
@@ -272,7 +386,7 @@ def enviar_alertas_ordenes_compra_barra(
     print(
         f"  WA órdenes barra: {res['proveedores']} prov, {res['lineas']} líneas, "
         f"{res.get('mp_stock_cero', 0)} MPs stock cero → "
-        f"{len(destinos)} destinatario(s), {len(mensajes)} mensaje(s)"
+        f"{len(destinos)} destinatario(s), modo por proveedor"
     )
     return res
 

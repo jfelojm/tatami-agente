@@ -40,7 +40,7 @@ SHEET_INGRESO = "INGRESO_FACTURA"
 SHEET_REGISTRO = "REGISTRO_FACTURAS"
 SHEET_CAT = "CAT_FM"
 
-PROVEEDORES_MANUALES = ["161", "164"]  # Sumba Chocho, Loja Lasso
+PROVEEDORES_MANUALES = ["161", "164", "165"]  # Sumba Chocho, Loja Lasso, Inguil Lazo
 
 FILA_LINEAS_INICIO = 7  # fila donde empiezan las líneas
 MAX_LINEAS = 40
@@ -280,9 +280,11 @@ def main() -> None:
     print(f"  Staging: https://docs.google.com/spreadsheets/d/{sid}")
     print(f"  Pestañas: {SHEET_INGRESO} (captura) | {SHEET_REGISTRO} (historial)")
     print()
-    print("  Falta (una vez): pegar scripts_apps_script/ingreso_factura_manual.gs")
-    print("  en Extensiones → Apps Script del libro staging y configurar")
-    print("  TATAMI_FACTURA_API_URL y TATAMI_FACTURA_SECRET en Propiedades del script.")
+    print("  Falta (una vez): pegar scripts_apps_script/tatami_staging.gs")
+    print("  en Extensiones → Apps Script del libro staging.")
+    print("  Activar appsscript.json (ver scripts_apps_script/appsscript.json)")
+    print("  y ejecutar solicitarPermisosExternos para autorizar UrlFetchApp.")
+    print("  Configurar TATAMI_FACTURA_API_URL y TATAMI_FACTURA_SECRET en Propiedades del script.")
     print("=" * 70 + "\n")
 
 

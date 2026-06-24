@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
 
@@ -26,6 +25,7 @@ from subrecetas_detalle import (
     orden_produccion,
 )
 from ventas_smartmenu import estado_documento_excluye_neto_operativo
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -38,9 +38,7 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 
 def _get_sheet():
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
 
 

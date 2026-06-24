@@ -12,11 +12,11 @@ from pathlib import Path
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from supabase import create_client
 
 from bodegas_config import normalizar_cod_bodega
 from recalcular_stock_sheets import TIPOS_RESTA_ORIGEN, TIPOS_SUMA_DESTINO, _bodega_mov, _clave_stock, _cod_mp_norm
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -95,9 +95,7 @@ def _aplicar_mov(saldos: dict[tuple[str, str], float], m: dict) -> tuple[str, st
 
 
 def _cargar_stock_sheets(mps: set[str]) -> dict[tuple[str, str], float]:
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     sh = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
     ws = sh.worksheet("BD_MP_SISTEMA")
     values = ws.get_all_values()

@@ -72,13 +72,17 @@ foreach ($t in $Tasks) {
                 -Force `
                 -ErrorAction Stop | Out-Null
         } else {
+            # Interactive: Chrome visible requiere sesión Windows iniciada a las 10:00/18:00
+            $Principal = New-ScheduledTaskPrincipal `
+                -UserId $env:USERNAME `
+                -LogonType Interactive `
+                -RunLevel Highest
             Register-ScheduledTask `
                 -TaskName $t.Name `
                 -Action $Action `
                 -Trigger $Trigger `
                 -Settings $Settings `
-                -User $env:USERNAME `
-                -RunLevel Highest `
+                -Principal $Principal `
                 -Force `
                 -ErrorAction Stop | Out-Null
         }

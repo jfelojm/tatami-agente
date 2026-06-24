@@ -1,10 +1,13 @@
-# Descarga y procesa facturas recibidas del SRI (independiente del pipeline diario).
-# Task Scheduler sugerido:
-#   TatamiFacturasSRI_AM  -> diario 10:00  -> .\ejecutar_facturas_sri.ps1 AM
-#   TatamiFacturasSRI_PM  -> diario 18:00  -> .\ejecutar_facturas_sri.ps1 PM
+# Descarga y procesa facturas recibidas del SRI.
+# Chrome + manual (recomendado):
+#   .\configurar_sri_chrome.ps1              # primera vez: login
+#   .\configurar_sri_chrome.ps1 -Descargar   # descarga (usted clic CONSULTAR)
 #
-# Primera vez (login + captcha portal):
-#   .\ejecutar_facturas_sri.ps1 --init-portal-session
+# Flujo automatico (SRI_CONSULTA_MODO=auto en .env):
+#   TatamiFacturasSRI_AM 10:00 | TatamiFacturasSRI_PM 18:00
+#   TatamiPipelineHorario -> solo --solo-proceso (PIPELINE_SRI_SOLO_PROCESO=1)
+# Habilitar tareas (PowerShell como admin): .\habilitar_facturas_sri.ps1
+# Ene-feb u otros meses: subir XML a Drive y usar sync_drive_xml_supabase.py
 #
 # Ver log en vivo:
 #   Get-Content .\logs\facturas_sri_20260610_AM.log -Wait -Tail 40
@@ -53,6 +56,16 @@ if ($Corrida -match '^(AM|PM)$') {
 }
 if ($ExtraArgs) {
     $pyArgs += $ExtraArgs
+}
+
+$isInit = ($Corrida -eq '--init-portal-session') -or ($ExtraArgs -contains '--init-portal-session')
+if ($isInit) {
+    Write-Host "Abriendo ventana NUEVA (PowerShell + Chrome) para login SRI..."
+    $cmd = "Set-Location -LiteralPath '$Root'; `$env:PYTHONIOENCODING='utf-8'; & '$Py' '$Root\procesar_facturas_sri.py' --init-portal-session"
+    Start-Process powershell -ArgumentList @('-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
+    Write-Host "Listo: revise la ventana de PowerShell y Chrome que se acaban de abrir."
+    try { Stop-Transcript | Out-Null } catch { }
+    exit 0
 }
 
 $code = 1

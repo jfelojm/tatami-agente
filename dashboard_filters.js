@@ -222,6 +222,33 @@
     return labels.sort();
   };
 
+  w.weekLabelsForMonth = function (year, monthStr, hastaIso) {
+    const y = parseInt(year, 10);
+    const m = parseInt(monthStr, 10);
+    if (!y || !m) return [];
+    const mm = String(m).padStart(2, '0');
+    let maxDay = parseInt(w.monthEnd(String(y), mm), 10);
+    if (hastaIso) {
+      const parts = String(hastaIso).slice(0, 10).split('-');
+      if (parts.length >= 3) {
+        const hy = parseInt(parts[0], 10);
+        const hm = parseInt(parts[1], 10);
+        const hd = parseInt(parts[2], 10);
+        if (hy === y && hm === m && hd > 0 && hd < maxDay) maxDay = hd;
+      }
+    }
+    const seen = new Set();
+    const labels = [];
+    for (let d = 1; d <= maxDay; d++) {
+      const key = w.isoWeekKeyFromDate(new Date(y, m - 1, d));
+      if (!seen.has(key)) {
+        seen.add(key);
+        labels.push(key);
+      }
+    }
+    return labels.sort();
+  };
+
   w.isoWeekMonday = function (isoYear, week) {
     const simple = new Date(isoYear, 0, 1 + (week - 1) * 7);
     const dow = simple.getDay();
@@ -264,8 +291,10 @@
     }
   };
 
-  w.initSemanasPanel = function (year, containerId, labelId, onChange, selectedValues, hastaIso) {
-    const labels = w.weekLabelsForYear(year, hastaIso);
+  w.initSemanasPanel = function (year, containerId, labelId, onChange, selectedValues, hastaIso, monthStr) {
+    const labels = monthStr
+      ? w.weekLabelsForMonth(year, monthStr, hastaIso)
+      : w.weekLabelsForYear(year, hastaIso);
     w.syncSemanasFromData(labels, containerId, labelId, onChange, selectedValues);
   };
 

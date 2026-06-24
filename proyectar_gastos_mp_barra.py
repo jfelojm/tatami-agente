@@ -21,6 +21,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -159,12 +160,7 @@ def _leer_bd_mp_sistema() -> list[dict]:
     import os
 
     import gspread
-    from google.oauth2.service_account import Credentials
-
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"),
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sh = gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
     vals = sh.worksheet("BD_MP_SISTEMA").get_all_values()
     hi = next(

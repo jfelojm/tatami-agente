@@ -2,8 +2,8 @@ import os
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from supabase import create_client
+from google_credentials import google_credentials
 
 load_dotenv()
 
@@ -16,10 +16,7 @@ def test_sheets():
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ]
-        creds = Credentials.from_service_account_file(
-            os.getenv("GOOGLE_CREDENTIALS_PATH"),
-            scopes=scopes,
-        )
+        creds = google_credentials(scopes)
         gc = gspread.authorize(creds)
         sh = gc.open_by_key(os.getenv("SPREADSHEET_ID"))
         hojas = [ws.title for ws in sh.worksheets()]

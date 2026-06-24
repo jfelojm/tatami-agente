@@ -19,6 +19,7 @@ from functools import lru_cache
 from config_sheets import cfg
 from costo_mp_canonico import norm_mp
 from descargo_subreceta import PREFIJO_PSEUDO_MP
+from google_credentials import google_credentials
 
 _COL_FRECUENCIA_PROV = ("frecuencia_compra_dias", "frecuencia_entrega_dias")
 
@@ -78,13 +79,8 @@ def _columna_frecuencia_prov(headers: list[str]) -> str | None:
 def _abrir_maestro():
     import gspread
     from dotenv import load_dotenv
-    from google.oauth2.service_account import Credentials
-
     load_dotenv(override=True)
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"),
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     return gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
 
 

@@ -5,10 +5,10 @@ import pytz
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from collections import defaultdict
 
 from config_sheets import cfg_tokens
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -28,9 +28,7 @@ PROVEEDORES_PILOTO_TOKENS = cfg_tokens(
 
 # ── Conexiones ───────────────────────────────────────────────
 def conectar_sheets():
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
 
 

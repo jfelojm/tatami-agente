@@ -66,7 +66,7 @@ def _en_ventana_horaria() -> bool:
 
 def main() -> int:
     from config_sheets import cfg
-    from estrategia_config import horas_pipeline_sri_descarga
+    from estrategia_config import horas_pipeline_sri_descarga, pipeline_sri_solo_proceso
     from pipeline_diario import (
         _checkpoint_complete,
         _checkpoint_start,
@@ -95,7 +95,7 @@ def main() -> int:
     print("=" * 60)
 
     if args.dry_run:
-        sri_desc = hora in horas_pipeline_sri_descarga()
+        sri_desc = not pipeline_sri_solo_proceso() and hora in horas_pipeline_sri_descarga()
         print(
             f"  [dry-run] ventas({'progresivo' if progresivo else 'cierre'})"
             f" → {'omit reconciliar' if progresivo else 'reconciliar'}"
@@ -123,16 +123,86 @@ def main() -> int:
             fecha_objetivo=fecha,
         )
         if progresivo:
+            from ventas_completitud import auditar_fecha_remota, mensaje_completitud
+
+            rep_prog = auditar_fecha_remota(fecha)
+            if not rep_prog.get("ok") and not rep_prog.get("sin_ventas"):
+                print(
+                    f"\n  INFO: carga progresiva — {mensaje_completitud(rep_prog)}\n"
+                    "  Los tickets nocturnos se completan en el cierre de medianoche (00:00 EC)."
+                )
             print("\n  INFO: reconciliar omitido en horario progresivo (día en curso)")
             _checkpoint_step_ok(fecha, 1, "ventas progresivo (sin reconciliar)")
         else:
-            run_step(
+            rc_rec = run_step(
                 "1/4 — Reconciliar ventas (cierre ayer)",
                 ["reconciliar_ventas_dia.py", "--fecha", fecha],
-                check=check,
+                check=False,
                 step=1,
                 fecha_objetivo=fecha,
             )
+            if rc_rec != 0:
+                print(
+                    "\n  WARN: reconciliar falló — reintentando ventas + reconciliar "
+                    "(típico tras carga progresiva diurna incompleta)"
+                )
+                run_step(
+                    "1/4 — Ventas Smart Menu (reintento cierre)",
+                    ["ventas_smartmenu.py", "--fecha", fecha],
+                    check=False,
+                    step=1,
+                    fecha_objetivo=fecha,
+                )
+                rc_rec = run_step(
+                    "1/4 — Reconciliar ventas (reintento)",
+                    ["reconciliar_ventas_dia.py", "--fecha", fecha],
+                    check=True,
+                    step=1,
+                    fecha_objetivo=fecha,
+                )
+
+            from ventas_completitud import (
+                asegurar_ventas_dia,
+                auditar_fecha_remota,
+                dias_con_huecos_recientes,
+                mensaje_completitud,
+            )
+
+            rep_cierre = auditar_fecha_remota(fecha)
+            if not rep_cierre.get("ok") and not rep_cierre.get("sin_ventas"):
+                print(f"\n  WARN: huecos tras cierre — {mensaje_completitud(rep_cierre)}")
+                rep_fix = asegurar_ventas_dia(fecha)
+                if not rep_fix.get("ok"):
+                    run_step(
+                        "1/4 — Reconciliar ventas (post-reparación)",
+                        ["reconciliar_ventas_dia.py", "--fecha", fecha],
+                        check=True,
+                        step=1,
+                        fecha_objetivo=fecha,
+                    )
+                elif rep_fix.get("reparado"):
+                    print(f"  OK: día {fecha} reparado ({rep_fix['grid_docs']} docs)")
+
+            dias_rep = int(os.getenv("VENTAS_BACKFILL_DIAS", "3") or "3")
+            for f_hueco in dias_con_huecos_recientes(dias_rep):
+                if f_hueco == fecha:
+                    continue
+                print(f"\n  WARN: hueco detectado en {f_hueco} — reparando...")
+                rep_h = asegurar_ventas_dia(f_hueco)
+                if rep_h.get("reparado"):
+                    print(f"  OK: {f_hueco} reparado")
+                elif not rep_h.get("ok"):
+                    print(f"  ERROR: {f_hueco} sigue incompleto: {mensaje_completitud(rep_h)}")
+                    try:
+                        from alertas_tatami import enviar_alerta
+
+                        enviar_alerta(
+                            f"Ventas incompletas {f_hueco}",
+                            mensaje_completitud(rep_h),
+                            estado="ERROR",
+                        )
+                    except Exception as e:
+                        print(f"  WARN: alerta no enviada: {e}")
     except SystemExit as e:
         if check:
             return int(e.code or 1)
@@ -152,9 +222,9 @@ def main() -> int:
             return int(e.code or 1)
         print("  WARN: descargo con error (continúa)")
 
-    # 3 Facturas SRI
+    # 3 Facturas SRI — descarga en tareas AM/PM; horario solo procesa cola
     sri_argv = ["procesar_facturas_sri.py", "--corrida", f"H{hora:02d}"]
-    if hora not in horas_pipeline_sri_descarga():
+    if pipeline_sri_solo_proceso() or hora not in horas_pipeline_sri_descarga():
         sri_argv.append("--solo-proceso")
     try:
         run_step(

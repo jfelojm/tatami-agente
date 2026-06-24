@@ -49,10 +49,8 @@ import os
 
 
 from dotenv import load_dotenv
-
-from google.oauth2.service_account import Credentials
-
 from googleapiclient.discovery import build
+from google_credentials import google_credentials
 
 
 
@@ -73,8 +71,6 @@ SCOPES = [
 ]
 
 MASTER_ID = os.environ["SPREADSHEET_ID"]
-
-CREDS_PATH = os.environ["GOOGLE_CREDENTIALS_PATH"]
 
 
 
@@ -144,7 +140,7 @@ _HDR_FG = {"red": 0.95, "green": 0.88, "blue": 0.75}
 
 def get_creds() -> Credentials:
 
-    return Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
+    return google_credentials(SCOPES)
 
 
 

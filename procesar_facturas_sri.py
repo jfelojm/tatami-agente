@@ -187,12 +187,23 @@ def fase_descarga(
     print(f"{'=' * 60}")
 
     portal = SriPortalClient(config)
-    soap = SriSoapClient(config)
     sb = _supabase()
+    modo_descarga = config.descarga_modo
+    usar_portal = modo_descarga in ("portal", "auto")
+    usar_soap = modo_descarga in ("soap", "auto")
+    soap = SriSoapClient(config) if usar_soap else None
 
     print("Consultando portal (comprobantes recibidos)...")
+    descarga_xml_portal = modo_descarga == "portal"
+    if usar_portal:
+        if descarga_xml_portal:
+            print("  Modo descarga: portal (lista + XML portal)")
+        else:
+            print("  Modo descarga: auto (lista portal + XML SOAP)")
     try:
-        listados = portal.listar_recibidos(fecha_desde, fecha_hasta)
+        listados = portal.listar_recibidos(
+            fecha_desde, fecha_hasta, descargar_xml=descarga_xml_portal
+        )
     except Exception as e:
         print(f"ERROR portal SRI: {e}")
         raise
@@ -224,13 +235,68 @@ def fase_descarga(
             continue
 
         print(f"  [{i}/{len(listados)}] Descargando {clave[:12]}...")
+        xml = (comp.extra or {}).get("xml_autorizado")
+        origen = "portal"
+        if xml:
+            print("    OK XML ya descargado del portal")
+        elif usar_soap and soap is not None:
+            try:
+                xml = soap.descargar_xml_autorizado(clave)
+                origen = "soap"
+            except Exception as e:
+                errores += 1
+                err_txt = str(e)
+                print(f"    ERROR descarga SOAP: {e}")
+                errores_detalle.append(
+                    {
+                        "num_factura": comp.num_factura or "",
+                        "clave": clave[:12],
+                        "error": err_txt,
+                    }
+                )
+                if not dry_run:
+                    try:
+                        sb.table("sri_comprobantes_recibidos").upsert(
+                            {
+                                "clave_acceso": clave,
+                                "num_factura": comp.num_factura or "",
+                                "ruc_emisor": comp.ruc_emisor or "",
+                                "razon_social": comp.razon_social or "",
+                                "fecha_emision": _fecha_iso(comp.fecha_emision),
+                                "estado": "ERROR",
+                                "fecha_descarga": datetime.now().isoformat(),
+                                "meta": {**meta_corrida, "error_descarga": err_txt},
+                            },
+                            on_conflict="clave_acceso",
+                        ).execute()
+                    except Exception as e2:
+                        print(f"    WARN no se pudo registrar error: {e2}")
+                continue
+        else:
+            err_portal = (comp.extra or {}).get("xml_error") or "sin XML portal"
+            errores += 1
+            print(f"    ERROR descarga: {err_portal}")
+            errores_detalle.append(
+                {
+                    "num_factura": comp.num_factura or "",
+                    "clave": clave[:12],
+                    "error": err_portal,
+                }
+            )
+            continue
+
         try:
-            xml = soap.descargar_xml_autorizado(clave)
-            guardar_descarga(sb, comp, xml, meta_corrida, dry_run=dry_run)
+            guardar_descarga(
+                sb,
+                comp,
+                xml,
+                {**meta_corrida, "descarga_origen": origen},
+                dry_run=dry_run,
+            )
             descargados += 1
         except Exception as e:
             errores += 1
-            print(f"    ERROR descarga SOAP: {e}")
+            print(f"    ERROR guardar: {e}")
             errores_detalle.append(
                 {
                     "num_factura": comp.num_factura or "",
@@ -238,23 +304,6 @@ def fase_descarga(
                     "error": str(e),
                 }
             )
-            if not dry_run:
-                try:
-                    sb.table("sri_comprobantes_recibidos").upsert(
-                        {
-                            "clave_acceso": clave,
-                            "num_factura": comp.num_factura or "",
-                            "ruc_emisor": comp.ruc_emisor or "",
-                            "razon_social": comp.razon_social or "",
-                            "fecha_emision": _fecha_iso(comp.fecha_emision),
-                            "estado": "ERROR",
-                            "fecha_descarga": datetime.now().isoformat(),
-                            "meta": {**meta_corrida, "error_descarga": str(e)},
-                        },
-                        on_conflict="clave_acceso",
-                    ).execute()
-                except Exception as e2:
-                    print(f"    WARN no se pudo registrar error: {e2}")
 
     print(
         f"\nResumen descarga: {descargados} nuevos, {omitidos} ya en DB, {errores} errores"
@@ -285,6 +334,7 @@ def fase_proceso(
     meta_corrida = {"corrida": corrida, "origen": "SRI", "fase": "proceso"}
     ok = parcial = omitido = err = 0
     sin_match_corrida: list[dict] = []
+    ingresos_detalle: list[str] = []
 
     for i, row in enumerate(pendientes, 1):
         clave = row["clave_acceso"]
@@ -361,8 +411,10 @@ def fase_proceso(
 
         if estado == "COMPLETA":
             ok += 1
+            ingresos_detalle.append(f"✅ {num} ({items_mat} ítems)")
         else:
             parcial += 1
+            ingresos_detalle.append(f"⚠️ {num} PARCIAL ({items_mat} ítems)")
 
     print(
         f"\nResumen proceso: {ok} completas, {parcial} parciales, "
@@ -376,6 +428,7 @@ def fase_proceso(
         "omitidas": omitido,
         "errores": err,
         "sin_match": sin_match_corrida,
+        "ingresos_detalle": ingresos_detalle,
     }
 
 
@@ -408,9 +461,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Login manual en navegador; guarda sesión para corridas headless",
     )
+    parser.add_argument(
+        "--portal-visible",
+        action="store_true",
+        help="Abre Chrome visible (recomendado para modo auto en Task Scheduler)",
+    )
+    parser.add_argument(
+        "--consulta-manual",
+        action="store_true",
+        help="Usted hace click en CONSULTAR por cada dia (depuracion)",
+    )
     args = parser.parse_args(argv)
 
     config = SriConfig.from_env()
+    if args.consulta_manual:
+        config.consulta_modo = "manual"
+        config.portal_headless = False
+    if args.portal_visible:
+        config.portal_headless = False
     faltantes = config.validar()
     if faltantes and not args.init_portal_session:
         print(f"ERROR: faltan variables en .env: {', '.join(faltantes)}")
@@ -423,6 +491,20 @@ def main(argv: list[str] | None = None) -> int:
         f"Ambiente SOAP: {config.ambiente} | ventana descarga: "
         f"{fecha_desde} .. {fecha_hasta} ({config.ventana_dias} dias previos + hoy)"
     )
+    print(
+        f"Portal: modo={config.consulta_modo} | "
+        f"navegador={'headless' if config.portal_headless else 'visible'}"
+    )
+    if config.consulta_modo == "solver" and not config.captcha_solver_key:
+        print("ERROR: SRI_CONSULTA_MODO=solver requiere SRI_CAPTCHA_2CAPTCHA_KEY en .env")
+        return 1
+    if config.captcha_solver_key:
+        print(
+            f"2captcha: activo | enterprise={config.recaptcha_enterprise} | "
+            f"reintentos={config.consulta_retries}"
+        )
+    if args.consulta_manual:
+        print("Consulta MANUAL: debe hacer click en CONSULTAR por cada dia.")
     if args.dry_run:
         print("MODO DRY-RUN (sin persistir)")
     print("=" * 60)
@@ -435,6 +517,14 @@ def main(argv: list[str] | None = None) -> int:
     resumen_proc: dict = {"ejecutada": False}
     fatal_error: str | None = None
     exit_code = 0
+    checkpoint_prev = None
+
+    try:
+        from sri_checkpoint import leer_checkpoint
+
+        checkpoint_prev = leer_checkpoint()
+    except Exception:
+        pass
 
     try:
         if not args.solo_proceso:
@@ -452,6 +542,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nFATAL: {e}")
         exit_code = 1
     finally:
+        from sri_checkpoint import construir_checkpoint, escribir_checkpoint, evaluar_estado_corrida
+
+        status_corrida, exit_code = evaluar_estado_corrida(
+            resumen_desc=resumen_desc,
+            resumen_proc=resumen_proc,
+            fatal_error=fatal_error,
+        )
+        try:
+            escribir_checkpoint(
+                construir_checkpoint(
+                    corrida=args.corrida,
+                    ventana=f"{fecha_desde} .. {fecha_hasta}",
+                    resumen_desc=resumen_desc,
+                    resumen_proc=resumen_proc,
+                    fatal_error=fatal_error,
+                    prev=checkpoint_prev,
+                )
+            )
+        except Exception as e:
+            print(f"  WARN checkpoint SRI: {e}")
+
         if not args.dry_run:
             cola = {"descargado": 0, "error": 0}
             try:
@@ -468,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
                         "descarga": resumen_desc,
                         "proceso": resumen_proc,
                         "cola": cola,
+                        "status_corrida": status_corrida,
+                        "checkpoint_prev": checkpoint_prev,
                     },
                     fatal_error=fatal_error,
                 )
@@ -477,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
     if exit_code:
         return exit_code
 
-    print("\nCorrida SRI finalizada.")
+    print(f"\nCorrida SRI finalizada (estado {status_corrida}).")
     return 0
 
 

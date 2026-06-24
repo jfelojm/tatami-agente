@@ -17,8 +17,8 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -58,10 +58,7 @@ def main():
         print("Indica --dry-run o --produccion")
         sys.exit(2)
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sheets = build("sheets", "v4", credentials=creds)
     sid = os.environ["SPREADSHEET_ID"]
     ws_id = _sheet_id(sheets, sid, SHEET)

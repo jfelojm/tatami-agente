@@ -21,10 +21,10 @@ import sys
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 
 from costo_mp_canonico import norm_mp
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -32,9 +32,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def _abrir():
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
 
 

@@ -940,6 +940,38 @@ def _main_carga_historica(
     print(f"  Errores:     {total_err}")
     print(f"{'=' * 50}")
 
+    marcadas = marcar_rango_sin_descargo_inventario(fecha_inicio, fecha_fin)
+    if marcadas:
+        print(
+            f"\n  -> {marcadas} línea(s) marcadas descargado=true "
+            f"(carga histórica; no afectan stock)"
+        )
+
+
+def marcar_rango_sin_descargo_inventario(fecha_inicio: str, fecha_fin: str) -> int:
+    """Marca hist_ventas del rango como descargado para que descargo_inventario las omita."""
+    fecha_inicio = (fecha_inicio or "").strip()[:10]
+    fecha_fin = (fecha_fin or "").strip()[:10]
+    if not fecha_inicio or not fecha_fin:
+        return 0
+    try:
+        res = (
+            supabase.table("hist_ventas")
+            .update(
+                {
+                    "descargado": True,
+                    "fecha_descargo": datetime.now().isoformat(),
+                }
+            )
+            .gte("fecha", fecha_inicio)
+            .lte("fecha", fecha_fin)
+            .execute()
+        )
+        return len(res.data or [])
+    except Exception as e:
+        print(f"  WARN marcar sin descargo {fecha_inicio}..{fecha_fin}: {e}")
+        return 0
+
 
 # ── MAIN ──────────────────────────────────────────────────────
 if __name__ == "__main__":

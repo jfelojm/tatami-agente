@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -45,7 +46,6 @@ def _diffiere(cu_hoja: float, cu_esperado: float) -> bool:
 
 def main() -> int:
     import gspread
-    from google.oauth2.service_account import Credentials
     from gspread.utils import ValueInputOption, rowcol_to_a1
 
     from costo_mp_canonico import cargar_costo_desde_items_prov, norm_mp
@@ -56,10 +56,7 @@ def main() -> int:
     p.add_argument("-o", "--output", default="", help="CSV de discrepancias")
     args = p.parse_args()
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     prov = cargar_costo_desde_items_prov(sh)
 

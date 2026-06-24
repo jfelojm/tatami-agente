@@ -5,7 +5,6 @@ from datetime import date, timedelta
 import gspread
 import pytz
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from supabase import create_client
 
 load_dotenv(override=True)
@@ -19,6 +18,7 @@ TZ = pytz.timezone("America/Guayaquil")
 
 # Fuente oficial de total de ventas: Smart Menu grid (SUBTOTAL sin IVA por documento)
 from ventas_smartmenu_total import calcular_total_smartmenu
+from google_credentials import google_credentials
 
 
 def conectar_supabase():
@@ -26,9 +26,7 @@ def conectar_supabase():
 
 
 def conectar_sheets():
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
 
 

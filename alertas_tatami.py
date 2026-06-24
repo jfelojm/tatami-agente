@@ -40,7 +40,7 @@ try:
 except ImportError:
     pass
 
-WA_GRAPH_VERSION = os.getenv("WHATSAPP_API_VERSION", "v21.0").strip() or "v21.0"
+WA_GRAPH_VERSION = os.getenv("WHATSAPP_API_VERSION", "v25.0").strip() or "v25.0"
 
 
 def enviar_alerta(
@@ -176,16 +176,78 @@ def enviar_whatsapp_texto(numero_raw: str, cuerpo: str) -> tuple[bool, str]:
             data = {}
         if r.status_code >= 400:
             err = data.get("error", {})
+            code = err.get("code", "")
             msg = err.get("message", r.text[:300])
-            return False, f"HTTP {r.status_code}: {msg}"
+            return False, f"HTTP {r.status_code} ({code}): {msg}"
         mid = ""
+        mstatus = ""
         try:
             msgs = (data.get("messages") or [])
             if msgs and isinstance(msgs[0], dict):
-                mid = str(msgs[0].get("id") or "")[:24]
+                mid = str(msgs[0].get("id") or "")[:48]
+                mstatus = str(msgs[0].get("message_status") or "")
         except (TypeError, KeyError, IndexError):
             pass
-        return True, f"ok id={mid}" if mid else "ok"
+        det = f"ok id={mid}" if mid else "ok"
+        if mstatus:
+            det += f" status={mstatus}"
+        return True, det
+    except Exception as e:
+        return False, str(e)
+
+
+def enviar_whatsapp_documento(
+    numero_raw: str,
+    contenido: bytes,
+    nombre_archivo: str,
+    *,
+    mime: str = "text/plain",
+    caption: str = "",
+) -> tuple[bool, str]:
+    """Envía documento por WA Cloud API (requiere ventana 24h como el texto)."""
+    if _wa_disabled():
+        return False, "TATAMI_WA_SKIP activo"
+    if not requests:
+        return False, "requests no instalado"
+    to = _solo_digitos(numero_raw)
+    if not to or not contenido:
+        return False, "numero o archivo vacio"
+    pid = (os.getenv("WHATSAPP_PHONE_NUMBER_ID") or "").strip()
+    token = (os.getenv("WHATSAPP_ACCESS_TOKEN") or "").strip()
+    if not pid or not token:
+        return False, "falta WHATSAPP_PHONE_NUMBER_ID o WHATSAPP_ACCESS_TOKEN"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        up = requests.post(
+            f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{pid}/media",
+            headers=headers,
+            files={"file": (nombre_archivo, contenido, mime)},
+            data={"messaging_product": "whatsapp"},
+            timeout=60,
+        )
+        media_id = (up.json() or {}).get("id")
+        if not media_id:
+            return False, f"upload fallo: {up.text[:200]}"
+        doc: dict = {"id": media_id, "filename": nombre_archivo}
+        if caption.strip():
+            doc["caption"] = caption.strip()[:1024]
+        r = requests.post(
+            f"https://graph.facebook.com/{WA_GRAPH_VERSION}/{pid}/messages",
+            json={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "document",
+                "document": doc,
+            },
+            headers={**headers, "Content-Type": "application/json"},
+            timeout=30,
+        )
+        data = r.json() if r.content else {}
+        if r.status_code >= 400:
+            err = data.get("error", {})
+            return False, f"HTTP {r.status_code}: {err.get('message', r.text[:200])}"
+        mid = ((data.get("messages") or [{}])[0] or {}).get("id", "")
+        return True, f"doc ok id={str(mid)[:48]}"
     except Exception as e:
         return False, str(e)
 

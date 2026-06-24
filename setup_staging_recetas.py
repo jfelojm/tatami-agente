@@ -29,15 +29,14 @@ Uso:
 import os
 import logging
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from google_credentials import google_credentials
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
 SCOPES     = ["https://www.googleapis.com/auth/spreadsheets"]
-CREDS_PATH = os.environ["GOOGLE_CREDENTIALS_PATH"]
 STAGING_ID = "1TJu70BNG4i3it4y51Eg3YlDNswLkh1QGRt6v-qAyexU"
 MASTER_ID  = os.environ["SPREADSHEET_ID"]
 SHEET_NAME = "STAGING_RECETAS"
@@ -45,7 +44,7 @@ ULTIMO_COD_RECETA = 207  # último cod_receta en BD_RECETAS_DETALLE
 
 
 def get_creds() -> Credentials:
-    return Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
+    return google_credentials(SCOPES)
 
 
 def crear_hoja_si_no_existe(sheets, spreadsheet_id: str, nombre: str) -> int:

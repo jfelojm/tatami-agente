@@ -19,9 +19,9 @@ import os
 import time
 
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from gspread.utils import ValueInputOption
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -30,7 +30,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 MASTER_ID = os.environ["SPREADSHEET_ID"]
-CREDS_PATH = os.environ["GOOGLE_CREDENTIALS_PATH"]
 SHEET = "BD_RECETAS_DETALLE"
 
 NEW_HEADERS = [
@@ -136,7 +135,7 @@ def _migrate_row(old: dict[str, str], mp_lookup: dict[str, dict]) -> list[str]:
 
 
 def migrate(dry_run: bool = False) -> None:
-    creds = Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
+    creds = google_credentials(SCOPES)
     sheets = build("sheets", "v4", credentials=creds)
 
     resp = (

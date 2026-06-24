@@ -8,10 +8,9 @@ from datetime import datetime, timezone
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
-
 from bodegas_config import normalizar_cod_bodega
 from recalcular_stock_sheets import _clave_stock, build_stock_calculado
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -25,9 +24,7 @@ def _parse_num(v) -> float:
 
 
 def cargar_maestro_mp() -> list[dict]:
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     ws = sh.worksheet("BD_MP_SISTEMA")
     values = ws.get_all_values()

@@ -19,18 +19,14 @@ from subrecetas_detalle import (
     es_linea_subreceta_hijo,
     orden_produccion,
 )
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
 
 def _cargar_mps() -> set[str]:
     import gspread
-    from google.oauth2.service_account import Credentials
-
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     values = sh.worksheet("BD_MP_SISTEMA").get_all_values()
     hi = next(i for i, r in enumerate(values) if "cod_mp_sistema" in r)

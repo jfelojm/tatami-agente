@@ -16,7 +16,7 @@ Uso:
   python plantilla_conteo_sheets.py --produccion --desde-ciclo-id <uuid>
   python plantilla_conteo_sheets.py --produccion --nombre-hoja CONTEO_PRUEBA
 
-Requiere .env: GOOGLE_CREDENTIALS_PATH, SPREADSHEET_ID; para --desde-ciclo-id también Supabase.
+Requiere .env: GOOGLE_CREDENTIALS_JSON o GOOGLE_CREDENTIALS_PATH, SPREADSHEET_ID; para --desde-ciclo-id también Supabase.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ import os
 
 from dotenv import load_dotenv
 import gspread
-from google.oauth2.service_account import Credentials
 from supabase import create_client
+from google_credentials import google_credentials, has_google_credentials
 
 load_dotenv(override=True)
 
@@ -84,9 +84,7 @@ def _paginar_lineas_ciclo(sb, ciclo_id: str) -> list[dict]:
 
 
 def _open_spreadsheet():
-    creds = Credentials.from_service_account_file(
-        os.getenv("GOOGLE_CREDENTIALS_PATH"), scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(os.getenv("SPREADSHEET_ID"))
 
 
@@ -155,8 +153,8 @@ def generar_plantilla_desde_ciclo(
             f"Sin filas en conteo_linea para {ciclo_id}. Ejecute snapshot antes de la plantilla."
         )
 
-    if not os.getenv("GOOGLE_CREDENTIALS_PATH") or not os.getenv("SPREADSHEET_ID"):
-        raise RuntimeError("GOOGLE_CREDENTIALS_PATH y SPREADSHEET_ID requeridos")
+    if not has_google_credentials() or not os.getenv("SPREADSHEET_ID"):
+        raise RuntimeError("Credenciales Google y SPREADSHEET_ID requeridos")
 
     sh = _open_spreadsheet()
     try:
@@ -236,8 +234,8 @@ def main() -> None:
         print("  Ejecutar con --produccion para escribir en Sheets.")
         return
 
-    if not os.getenv("GOOGLE_CREDENTIALS_PATH") or not os.getenv("SPREADSHEET_ID"):
-        print("ERROR: GOOGLE_CREDENTIALS_PATH y SPREADSHEET_ID requeridos")
+    if not has_google_credentials() or not os.getenv("SPREADSHEET_ID"):
+        print("ERROR: credenciales Google y SPREADSHEET_ID requeridos")
         raise SystemExit(1)
 
     sh = _open_spreadsheet()

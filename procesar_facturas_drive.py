@@ -10,8 +10,6 @@ from googleapiclient.discovery import build
 from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
 
-from google_credentials import google_credentials
-
 try:
     from alertas_tatami import enviar_whatsapp_texto as _enviar_whatsapp_texto
 
@@ -33,6 +31,7 @@ from sheets_formulas_es import (
     formula_pendientes_ref_columna,
     formula_pendientes_unidad_base,
 )
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -44,7 +43,12 @@ FECHA_MIN_INGRESO_FACTURA = (
     os.getenv("TATAMI_FECHA_MIN_INGRESO_FACTURA", "2026-05-29").strip()[:10]
 )
 COL_COSTO_TOTAL_PENDIENTES = "costo_total_xml"
+TIPO_MOV_ENTRADA_COSTO_HIST = "ENTRADA_COSTO_HIST"
+BACKFILL_COSTO_OBS_MARKER = "BACKFILL_COSTO|SIN_STOCK"
+APPROX_SIN_CATALOGO_MARKER = "APPROX_SIN_CATALOGO"
+APPROX_FACTOR_MARKER = "APPROX_FACTOR"
 COD_MP_SIN_CLASIFICAR = "000"
+REGISTRADO_POR_BACKFILL_COSTO = "BACKFILL_COSTO_HIST"
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -674,19 +678,29 @@ def _escribir_hist_precios(item_prov, factura, item_factura, precio_ref, variaci
         print(f"    ERROR insertando hist_precios: {e}")
 
 
+def _celda_a1_sin_hoja(rango: str | int) -> str:
+    """Solo referencia de celda (p. ej. O161), sin prefijo de pestaña."""
+    if isinstance(rango, str) and "!" in rango:
+        return rango.rsplit("!", 1)[-1].strip("'\"")
+    return str(rango)
+
+
 def _cell_a1_local(row_1based: int, col_1based: int) -> str:
     """A1 sin nombre de pestaña (ws.batch_update ya fija la hoja)."""
-    ref = rowcol_to_a1(row_1based, col_1based)
-    if "!" in ref:
-        return ref.rsplit("!", 1)[-1]
-    return ref
+    ref = rowcol_to_a1(int(row_1based), int(col_1based))
+    return _celda_a1_sin_hoja(ref)
 
 
 def _sheets_batch_update_con_retry(ws: gspread.Worksheet, data: list[dict]) -> None:
     """batch_update con backoff exponencial en 429 (hasta 3 intentos)."""
     for attempt in range(3):
         try:
-            ws.batch_update(data, value_input_option=ValueInputOption.user_entered)
+            # gspread muta data[*]["range"] in-place (añade título de hoja); copiar en cada intento.
+            payload = [
+                {"range": _celda_a1_sin_hoja(d["range"]), "values": d["values"]}
+                for d in data
+            ]
+            ws.batch_update(payload, value_input_option=ValueInputOption.user_entered)
             return
         except Exception as e:
             msg = str(e)
@@ -1055,6 +1069,250 @@ def registrar_entrada_inventario(
         return True
     except Exception as e:
         print(f"    ERROR insertando mov_inventario: {e}")
+        return False
+
+
+def _marker_item_xml(item_factura: dict) -> str:
+    cod_xml = (item_factura.get("cod_item_xml") or "").strip()
+    return f"ITEM_XML:{cod_xml}" if cod_xml else ""
+
+
+def mov_costo_historico_linea_ya_registrada(
+    num_documento: str,
+    item_factura: dict,
+) -> bool:
+    """True si ya existe ENTRADA_COSTO_HIST para esta línea (por ITEM_XML o descripción)."""
+    cod_xml = (item_factura.get("cod_item_xml") or "").strip()
+    desc = (item_factura.get("descripcion_proveedor") or "").strip()
+    try:
+        res = (
+            supabase.table("mov_inventario")
+            .select("observaciones")
+            .eq("num_documento", num_documento)
+            .eq("tipo_mov", TIPO_MOV_ENTRADA_COSTO_HIST)
+            .eq("origen_documento", "FACTURA")
+            .execute()
+        )
+    except Exception as e:
+        print(f"    WARN comprobando duplicados ENTRADA_COSTO_HIST: {e}")
+        return False
+
+    marker_xml = _marker_item_xml(item_factura)
+    for row in res.data or []:
+        obs = row.get("observaciones") or ""
+        if marker_xml and marker_xml in obs:
+            return True
+        if not cod_xml and desc and obs.strip().startswith(desc):
+            return True
+    return False
+
+
+def mov_costo_historico_ya_registrado(
+    num_documento: str,
+    cod_mp: str,
+    item_factura: dict,
+) -> bool:
+    """Compat: delega en deduplicación por línea de factura."""
+    _ = cod_mp
+    return mov_costo_historico_linea_ya_registrada(num_documento, item_factura)
+
+
+def _observaciones_costo_historico(
+    *,
+    desc: str,
+    cod_xml: str,
+    ruc: str,
+    factor: float,
+    cant_ref: float,
+    aproximado: bool,
+    sin_catalogo: bool,
+) -> str:
+    obs_parts = [desc]
+    if cod_xml:
+        obs_parts.append(f"ITEM_XML:{cod_xml}")
+    if ruc:
+        obs_parts.append(f"RUC:{ruc.strip()}")
+    obs_parts.append(BACKFILL_COSTO_OBS_MARKER)
+    if sin_catalogo:
+        obs_parts.append(APPROX_SIN_CATALOGO_MARKER)
+    elif aproximado:
+        obs_parts.append(APPROX_FACTOR_MARKER)
+    if cant_ref > 0:
+        obs_parts.append(f"CANT_REF:{cant_ref}")
+    if factor > 0 and (aproximado or sin_catalogo):
+        obs_parts.append(f"FACTOR_REF:{round(factor, 4)}")
+    return " | ".join(obs_parts)
+
+
+def registrar_entrada_costo_historico(
+    item_prov: dict,
+    item_factura: dict,
+    factura: dict,
+    *,
+    cod_bodega_destino: str | None = None,
+    dry_run: bool = False,
+    aproximado: bool = False,
+) -> bool:
+    """
+    Registra costo de compra histórica sin afectar stock (cantidad_mov=0).
+    tipo_mov=ENTRADA_COSTO_HIST — excluido de recalcular_stock_sheets.
+
+    aproximado=True: tolera factor_conversion faltante (usa 1) para valor aproximado.
+    """
+    ok_conv, motivo_conv = conversion_compra_definida(item_prov)
+    factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
+    if not ok_conv:
+        if not aproximado:
+            print(f"    ALERTA BACKFILL: {motivo_conv}")
+            return False
+        factor = factor or 1.0
+
+    cod_mp = (item_prov.get("cod_mp_sistema") or "").strip()
+    if not cod_mp:
+        if aproximado:
+            cod_mp = COD_MP_SIN_CLASIFICAR
+        else:
+            print("    ALERTA BACKFILL: ítem sin cod_mp_sistema")
+            return False
+
+    from bodegas_config import resolver_bodega_entrada_linea
+
+    bodega, err = resolver_bodega_entrada_linea(
+        item_prov,
+        bodega_override=cod_bodega_destino,
+        confirmada=bool(cod_bodega_destino),
+    )
+    if err or not bodega:
+        print(f"    ALERTA BACKFILL BODEGA: {err} — sin ENTRADA_COSTO_HIST para {cod_mp}")
+        return False
+
+    assert factor is not None and factor > 0
+    costo_u = item_factura["costo_efectivo"] / factor
+    costo_total = round(float(item_factura.get("precio_total_sin_impuesto") or 0), 4)
+    if costo_total <= 0:
+        print(f"    ALERTA BACKFILL: costo_total<=0 para {cod_mp}")
+        return False
+
+    unidad = (item_prov.get("unidad_base_sistema") or "").strip() or "UND"
+    cod_xml = (item_factura.get("cod_item_xml") or "").strip()
+    desc = (item_factura.get("descripcion_proveedor") or "").strip()
+    cant_ref = round(float(item_factura.get("cantidad") or 0) * factor, 4)
+    observaciones = _observaciones_costo_historico(
+        desc=desc,
+        cod_xml=cod_xml,
+        ruc=str(factura.get("ruc") or ""),
+        factor=factor,
+        cant_ref=cant_ref,
+        aproximado=aproximado and ok_conv,
+        sin_catalogo=False,
+    )
+
+    ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
+    cod_mov = f"MOV-BFCOST-{factura['fecha_factura'].replace('-', '')}-{cod_mp}-{ts}"
+    tag = "aprox" if aproximado else "ok"
+
+    mov = {
+        "cod_mov": cod_mov,
+        "fecha": f"{factura['fecha_factura']}T00:00:00",
+        "tipo_mov": TIPO_MOV_ENTRADA_COSTO_HIST,
+        "cod_mp_sistema": cod_mp,
+        "nombre_mp": item_prov.get("nombre_mp", desc)[:120],
+        "cod_bodega_origen": None,
+        "cod_bodega_destino": bodega,
+        "cantidad_mov": 0.0,
+        "unidad_base": unidad,
+        "costo_unitario": round(costo_u, 6),
+        "costo_total": costo_total,
+        "origen_documento": "FACTURA",
+        "num_documento": factura["num_factura"],
+        "registrado_por": REGISTRADO_POR_BACKFILL_COSTO,
+        "observaciones": observaciones,
+    }
+
+    if dry_run:
+        print(
+            f"    [DRY RUN] ENTRADA_COSTO_HIST ({tag}): {cod_mp} costo={costo_total} "
+            f"(cu={round(costo_u, 6)}, cant_ref={cant_ref})"
+        )
+        return True
+
+    try:
+        supabase.table("mov_inventario").insert(mov).execute()
+        print(
+            f"    -> ENTRADA_COSTO_HIST ({tag}): {cod_mp} ${costo_total} "
+            f"(sin stock, cant_ref={cant_ref})"
+        )
+        return True
+    except Exception as e:
+        print(f"    ERROR insertando ENTRADA_COSTO_HIST: {e}")
+        return False
+
+
+def registrar_entrada_costo_historico_sin_catalogo(
+    item_factura: dict,
+    factura: dict,
+    *,
+    cod_bodega_destino: str,
+    dry_run: bool = False,
+) -> bool:
+    """Costo de línea XML sin match en BD_ITEMS_PROV (valor aproximado por total de línea)."""
+    costo_total = round(float(item_factura.get("precio_total_sin_impuesto") or 0), 4)
+    if costo_total <= 0:
+        return False
+
+    cant_xml = float(item_factura.get("cantidad") or 0)
+    costo_u = round(costo_total / cant_xml, 6) if cant_xml > 0 else round(
+        float(item_factura.get("costo_efectivo") or 0), 6
+    )
+    cod_xml = (item_factura.get("cod_item_xml") or "").strip()
+    desc = (item_factura.get("descripcion_proveedor") or "").strip()
+    observaciones = _observaciones_costo_historico(
+        desc=desc,
+        cod_xml=cod_xml,
+        ruc=str(factura.get("ruc") or ""),
+        factor=1.0,
+        cant_ref=cant_xml,
+        aproximado=False,
+        sin_catalogo=True,
+    )
+
+    ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
+    cod_mov = (
+        f"MOV-BFCOST-{factura['fecha_factura'].replace('-', '')}-"
+        f"{COD_MP_SIN_CLASIFICAR}-{ts}"
+    )
+
+    mov = {
+        "cod_mov": cod_mov,
+        "fecha": f"{factura['fecha_factura']}T00:00:00",
+        "tipo_mov": TIPO_MOV_ENTRADA_COSTO_HIST,
+        "cod_mp_sistema": COD_MP_SIN_CLASIFICAR,
+        "nombre_mp": (desc or "Sin clasificar")[:120],
+        "cod_bodega_origen": None,
+        "cod_bodega_destino": cod_bodega_destino,
+        "cantidad_mov": 0.0,
+        "unidad_base": "UND",
+        "costo_unitario": costo_u,
+        "costo_total": costo_total,
+        "origen_documento": "FACTURA",
+        "num_documento": factura["num_factura"],
+        "registrado_por": REGISTRADO_POR_BACKFILL_COSTO,
+        "observaciones": observaciones,
+    }
+
+    if dry_run:
+        print(
+            f"    [DRY RUN] ENTRADA_COSTO_HIST (sin catálogo): "
+            f"${costo_total} | {desc[:50]}"
+        )
+        return True
+
+    try:
+        supabase.table("mov_inventario").insert(mov).execute()
+        print(f"    -> ENTRADA_COSTO_HIST (sin catálogo): ${costo_total} | {desc[:50]}")
+        return True
+    except Exception as e:
+        print(f"    ERROR insertando ENTRADA_COSTO_HIST sin catálogo: {e}")
         return False
 
 

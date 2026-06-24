@@ -9,20 +9,17 @@ import os
 from datetime import datetime
 
 from dotenv import load_dotenv
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
 
 def main():
     import gspread
-    from google.oauth2.service_account import Credentials
     from procesar_facturas_drive import _precio_ref_unidad_base
     from recalcular_stock_sheets import _precio_unitario_desde_items_prov
 
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"],
-        scopes=["https://www.googleapis.com/auth/spreadsheets"],
-    )
+    creds = google_credentials(["https://www.googleapis.com/auth/spreadsheets"])
     sh = gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
     ws = sh.worksheet("BD_ITEMS_PROV")
     vals = ws.get_all_values()

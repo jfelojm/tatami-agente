@@ -15,9 +15,10 @@
  *   • Simular promoción    → promoverPendientesAItemsProvSimular
  *   • Enviar conteo        → enviarConteoATatami   (solo en hoja plantilla CONTEO)
  *
- * CONTEO — Propiedades del script (⚙️ Ajustes del proyecto):
- *   TATAMI_CONTEO_API_URL  = https://tu-host/api/conteo/enviar
- *   TATAMI_CONTEO_SECRET   = mismo valor que CONTEO_SHEETS_INGEST_SECRET en .env
+ * CONTEO — Propiedades del script (⚙️ Ajustes del proyecto → Propiedades del script):
+ *   TATAMI_CONTEO_API_URL  = https://tatami-agente-production.up.railway.app/api/conteo/enviar
+ *   TATAMI_CONTEO_SECRET   = mismo valor que CONTEO_SHEETS_INGEST_SECRET en .env / Railway
+ *   (NO usar ngrok; el servidor está en Railway 24/7)
  *
  * Equivalente Python: promover_pendientes_a_items_prov.py
  * =============================================================================
@@ -86,6 +87,11 @@ function promoverPendientesAItemsProvCore_(dryRun) {
   }
 
   try {
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      'Promoción en curso…',
+      'Tatami',
+      -1
+    );
     var res = ejecutarPromocionPendientes_(dryRun);
     var detalle = res.lineas.join('\n');
     if (detalle.length > 3500) {
@@ -125,29 +131,44 @@ function ejecutarPromocionPendientes_(dryRun) {
     );
   }
 
-  var valsPend = wsP.getDataRange().getValues();
-  var hiPend = findHeaderRow_(valsPend, 'clave_unica');
+  var hiPend = findHeaderRowInSheet_(wsP, 'clave_unica');
   if (hiPend < 0) {
-    hiPend = findHeaderRow_(valsPend, 'cod_item_xml');
+    hiPend = findHeaderRowInSheet_(wsP, 'cod_item_xml');
   }
   if (hiPend < 0) {
     throw new Error('No se encontró cabecera en ' + SHEET_PEND);
   }
-  var headersPend = rowToHeaders_(valsPend[hiPend]);
+  var headersPend = readHeadersFromSheet_(wsP, hiPend);
   var idxEstado = headersPend.indexOf('estado');
   if (idxEstado < 0) {
     throw new Error('Columna estado no encontrada en ' + SHEET_PEND);
   }
 
-  var valsProv = wsProv.getDataRange().getValues();
-  var hiProv = findHeaderRow_(valsProv, 'cod_item_prov');
+  var filasPend = listarFilasEstadoPendiente_(wsP, hiPend, idxEstado);
+  if (filasPend.length === 0) {
+    return {
+      resumen: 'Ninguna fila con estado PENDIENTE.',
+      insertadas: 0,
+      omitidas: 0,
+      erroresMp: 0,
+      incompletas: 0,
+      sinCodMp: 0,
+      lineas: [],
+    };
+  }
+
+  var pendPorFila = leerFilasPendientes_(wsP, filasPend);
+
+  var hiProv = findHeaderRowInSheet_(wsProv, 'cod_item_prov');
   if (hiProv < 0) {
     throw new Error('No se encontró cabecera cod_item_prov en ' + SHEET_PROV);
   }
-  var headersProv = rowToHeaders_(valsProv[hiProv]);
+  var headersProv = readHeadersFromSheet_(wsProv, hiProv);
+  var valsProv = leerDatosDesdeCabecera_(wsProv, hiProv, headersProv.length);
   var itemsProv = loadItemsProv_(valsProv, hiProv, headersProv);
 
-  var mpLookup = loadMpLookup_(wsMp.getDataRange().getValues());
+  var valsMp = leerDatosDesdeCabecera_(wsMp, findHeaderRowInSheet_(wsMp, 'cod_mp_sistema'), wsMp.getLastColumn());
+  var mpLookup = loadMpLookup_(valsMp);
 
   var insertadas = 0;
   var omitidas = 0;
@@ -158,9 +179,13 @@ function ejecutarPromocionPendientes_(dryRun) {
   var estadoUpdates = [];
   var lineas = [];
 
-  for (var i = hiPend + 1; i < valsPend.length; i++) {
-    var sheetRow = i + 1;
-    var pend = rowToDict_(valsPend[i], headersPend);
+  for (var f = 0; f < filasPend.length; f++) {
+    var sheetRow = filasPend[f];
+    var rowVals = pendPorFila[sheetRow];
+    if (!rowVals) {
+      continue;
+    }
+    var pend = rowToDict_(rowVals, headersPend);
     var estado = String(pend.estado || '')
       .trim()
       .toUpperCase();
@@ -200,10 +225,12 @@ function ejecutarPromocionPendientes_(dryRun) {
 
     if (yaExisteEnProv_(itemsProv, codProv, codXml, razon, ruc)) {
       omitidas++;
-      lineas.push(
-        'fila ' + sheetRow + ': ya en catálogo (' + codProv + ' / ' + codXml + ')'
-      );
-      estadoUpdates.push({ row: sheetRow, col: idxEstado + 1, value: 'REGISTRADO' });
+      if (omitidas <= 20) {
+        lineas.push(
+          'fila ' + sheetRow + ': ya en catálogo (' + codProv + ' / ' + codXml + ')'
+        );
+      }
+      estadoUpdates.push({ row: sheetRow, col: idxEstado + 1 });
       continue;
     }
 
@@ -229,7 +256,7 @@ function ejecutarPromocionPendientes_(dryRun) {
 
     filasAppend.push(nueva);
     itemsProv.push(dictFromRow_(headersProv, nueva));
-    estadoUpdates.push({ row: sheetRow, col: idxEstado + 1, value: 'REGISTRADO' });
+    estadoUpdates.push({ row: sheetRow, col: idxEstado + 1 });
     insertadas++;
     lineas.push('fila ' + sheetRow + ': alta ' + codProv + ' | ' + codXml + ' → ' + codMp);
   }
@@ -245,15 +272,18 @@ function ejecutarPromocionPendientes_(dryRun) {
   }
 
   if (!dryRun && estadoUpdates.length > 0) {
-    for (var u = 0; u < estadoUpdates.length; u++) {
-      var up = estadoUpdates[u];
-      wsP.getRange(up.row, up.col).setValue(up.value);
-    }
+    aplicarEstadosRegistrado_(wsP, estadoUpdates);
+  }
+
+  if (omitidas > 20) {
+    lineas.push('… y ' + (omitidas - 20) + ' duplicado(s) más (marcados REGISTRADO)');
   }
 
   var resumen =
     (dryRun ? 'Simulación — ' : '') +
-    'insertadas=' +
+    'pendientes_revisados=' +
+    filasPend.length +
+    ' insertadas=' +
     insertadas +
     ' duplicados_marcados=' +
     omitidas +
@@ -284,6 +314,112 @@ function ejecutarPromocionPendientes_(dryRun) {
     sinCodMp: sinCodMp,
     lineas: lineas,
   };
+}
+
+/** Solo filas con estado PENDIENTE (1 lectura de columna estado). */
+function listarFilasEstadoPendiente_(ws, hiPend, idxEstado) {
+  var lastRow = ws.getLastRow();
+  if (lastRow <= hiPend + 1) {
+    return [];
+  }
+  var col = idxEstado + 1;
+  var numRows = lastRow - hiPend - 1;
+  var estados = ws.getRange(hiPend + 2, col, numRows, 1).getValues();
+  var out = [];
+  for (var i = 0; i < estados.length; i++) {
+    if (String(estados[i][0] || '').trim().toUpperCase() === 'PENDIENTE') {
+      out.push(hiPend + 2 + i);
+    }
+  }
+  return out;
+}
+
+function findHeaderRowInSheet_(sheet, marker, maxScanRows) {
+  maxScanRows = maxScanRows || 12;
+  var lastCol = sheet.getLastColumn();
+  var lastRow = sheet.getLastRow();
+  if (lastCol < 1 || lastRow < 1) {
+    return -1;
+  }
+  var scan = Math.min(maxScanRows, lastRow);
+  var vals = sheet.getRange(1, 1, scan, lastCol).getValues();
+  return findHeaderRow_(vals, marker);
+}
+
+function readHeadersFromSheet_(sheet, hiPend) {
+  var lastCol = sheet.getLastColumn();
+  return rowToHeaders_(sheet.getRange(hiPend + 1, 1, 1, lastCol).getValues()[0]);
+}
+
+/** Lee desde fila de cabecera hasta lastRow (sin getDataRange). */
+function leerDatosDesdeCabecera_(sheet, hi, numCols) {
+  if (hi < 0) {
+    return [];
+  }
+  var lastRow = sheet.getLastRow();
+  var startRow = hi + 1;
+  var numRows = lastRow - hi;
+  if (numRows < 1) {
+    return [];
+  }
+  numCols = numCols || sheet.getLastColumn();
+  return sheet.getRange(startRow, 1, numRows, numCols).getValues();
+}
+
+function agruparFilasConsecutivas_(filas) {
+  if (!filas.length) {
+    return [];
+  }
+  filas.sort(function (a, b) {
+    return a - b;
+  });
+  var groups = [];
+  var start = filas[0];
+  var prev = filas[0];
+  for (var i = 1; i < filas.length; i++) {
+    if (filas[i] === prev + 1) {
+      prev = filas[i];
+    } else {
+      groups.push({ start: start, end: prev });
+      start = filas[i];
+      prev = filas[i];
+    }
+  }
+  groups.push({ start: start, end: prev });
+  return groups;
+}
+
+/** Lee solo las filas PENDIENTE (bloques consecutivos, no toda la hoja). */
+function leerFilasPendientes_(ws, filasPend) {
+  var groups = agruparFilasConsecutivas_(filasPend);
+  var lastCol = ws.getLastColumn();
+  var byRow = {};
+  for (var g = 0; g < groups.length; g++) {
+    var gr = groups[g];
+    var numRows = gr.end - gr.start + 1;
+    var block = ws.getRange(gr.start, 1, numRows, lastCol).getValues();
+    for (var r = 0; r < block.length; r++) {
+      byRow[gr.start + r] = block[r];
+    }
+  }
+  return byRow;
+}
+
+/** Una sola llamada API para marcar REGISTRADO (en vez de setValue por fila). */
+function aplicarEstadosRegistrado_(wsP, estadoUpdates) {
+  if (!estadoUpdates.length) {
+    return;
+  }
+  if (estadoUpdates.length === 1) {
+    var up0 = estadoUpdates[0];
+    wsP.getRange(up0.row, up0.col).setValue('REGISTRADO');
+    return;
+  }
+  var notations = [];
+  for (var u = 0; u < estadoUpdates.length; u++) {
+    notations.push(wsP.getRange(estadoUpdates[u].row, estadoUpdates[u].col).getA1Notation());
+  }
+  wsP.getRangeList(notations).setValue('REGISTRADO');
 }
 
 function normalizarCodProveedorParaMatch_(cod) {

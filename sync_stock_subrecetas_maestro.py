@@ -22,7 +22,6 @@ import sys
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from gspread.utils import ValueInputOption, rowcol_to_a1
 
 from bodegas_config import normalizar_cod_bodega
@@ -33,6 +32,7 @@ from descargo_subreceta import PREFIJO_PSEUDO_MP, cargar_metadata_subrecetas, ps
 from numeros_sheets import parse_numero_sheets
 from recalcular_stock_sheets import build_stock_calculado, _clave_stock
 from subrecetas_bodegas_stock import mapa_bodegas_todas_subs
+from google_credentials import google_credentials
 
 load_dotenv(override=True)
 
@@ -48,9 +48,7 @@ _METRICAS_COLS = (
 
 
 def _abrir_maestro():
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-    )
+    creds = google_credentials(SCOPES)
     return gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
 
 

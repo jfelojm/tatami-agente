@@ -14,8 +14,8 @@ Al terminar imprime el link del Form para compartir con Jacky, Edu y Mary.
 import os
 import logging
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from google_credentials import google_credentials
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -28,11 +28,9 @@ SCOPES = [
 ]
 
 MASTER_ID  = os.environ["SPREADSHEET_ID"]
-CREDS_PATH = os.environ["GOOGLE_CREDENTIALS_PATH"]
-
 
 def get_creds() -> Credentials:
-    return Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
+    return google_credentials(SCOPES)
 
 
 # ─── CREAR GOOGLE FORM ───────────────────────────────────────────────────────

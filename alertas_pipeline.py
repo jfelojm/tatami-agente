@@ -25,6 +25,16 @@ def enviar_mensaje_wa(numero_raw: str, texto: str, *, etiqueta: str = "alerta") 
     """
     from alertas_tatami import enviar_whatsapp_texto, log_envio_wa
 
+    try:
+        from wa_chat_guard import chat_activo
+
+        if chat_activo(numero_raw):
+            print(f"  WA [omitido] {etiqueta}: chat activo con {numero_raw}")
+            log_envio_wa(etiqueta, numero_raw, True, "omitido_chat_activo")
+            return True
+    except Exception:
+        pass
+
     ok, msg = enviar_whatsapp_texto(numero_raw, texto)
     log_envio_wa(etiqueta, numero_raw, ok, msg)
     return ok
@@ -160,18 +170,26 @@ def enviar_resumen_facturas_sri(
 ) -> None:
     """
     Aviso WhatsApp post-corrida SRI (procesar_facturas_sri.py).
-    Solo envía si hay ítems pendientes, errores o fallo fatal.
-    Destinos: ADMIN_COMPRAS (Mary) + copia ADMIN (Felipe) si hay pendientes;
-    ADMIN solo en fallo fatal / errores de corrida.
+    Envía siempre que haya ingresos nuevos, errores o fallo fatal.
+    Destinos: ADMIN_COMPRAS (Mary) + copia ADMIN en pendientes/errores;
+    ADMIN en fallo fatal / corrida PARTIAL o FAILED.
     """
     from config_sheets import cfg
     from estrategia_config import telefonos_alerta, telefonos_por_roles
+    from sri_checkpoint import horas_desde_ultima_ok, resumen_ultima_ok
 
     corrida = (resumen.get("corrida") or "?").strip()
     ventana = (resumen.get("ventana") or "").strip()
     desc = resumen.get("descarga") or {}
     proc = resumen.get("proceso") or {}
     cola = resumen.get("cola") or {}
+    status_corrida = (resumen.get("status_corrida") or "").strip().upper()
+    checkpoint_prev = resumen.get("checkpoint_prev")
+
+    completas = int(proc.get("completas") or 0)
+    parciales = int(proc.get("parciales") or 0)
+    descargados = int(desc.get("descargados") or 0)
+    ingresos_detalle = list(proc.get("ingresos_detalle") or [])
 
     sin_match_detalle: list[str] = []
     for it in proc.get("sin_match") or []:
@@ -186,29 +204,47 @@ def enviar_resumen_facturas_sri(
         elif str(it).strip():
             sin_match_detalle.append(str(it).strip())
     n_sin = len(sin_match_detalle)
-    n_parc = int(proc.get("parciales") or 0)
-
-    hay_alerta = bool(fatal_error)
-    cond = str(cfg("alert_sri_items_pendientes_condicion", "sin_match_o_parcial") or "")
-    hay_pendientes = n_sin > 0 or (n_parc > 0 and "parcial" in cond)
+    n_parc = parciales
 
     n_cola_desc = int(cola.get("descargado") or 0)
     n_cola_err = int(cola.get("error") or 0)
-    if n_cola_desc > 0 or n_cola_err > 0:
-        hay_alerta = True
-    if int(proc.get("errores") or 0) > 0:
-        hay_alerta = True
-    if int(desc.get("errores") or 0) > 0:
-        hay_alerta = True
+    err_desc = int(desc.get("errores") or 0)
+    err_proc = int(proc.get("errores") or 0)
+
+    hay_ingresos = completas > 0 or parciales > 0
+    hay_nuevos_xml = descargados > 0
+    hay_errores = bool(fatal_error) or err_desc > 0 or err_proc > 0 or n_cola_err > 0
+
+    if not status_corrida:
+        status_corrida = "FAILED" if fatal_error else ("PARTIAL" if hay_errores else "OK")
+
+    cond = str(cfg("alert_sri_items_pendientes_condicion", "sin_match_o_parcial") or "")
+    hay_pendientes = n_sin > 0 or (n_parc > 0 and "parcial" in cond)
 
     if not cfg("alert_sri_items_pendientes_activo", True) and hay_pendientes and not fatal_error:
         hay_pendientes = False
 
-    if not hay_alerta and not hay_pendientes:
-        print("  WA [OK] facturas SRI: sin alertas (corrida silenciosa)")
+    corrida_upper = corrida.upper()
+    es_corrida_programada = corrida_upper in ("AM", "PM")
+
+    debe_enviar = hay_ingresos or hay_nuevos_xml or hay_errores or hay_pendientes or n_cola_desc > 0
+    if es_corrida_programada:
+        debe_enviar = True
+    if status_corrida == "FAILED":
+        debe_enviar = True
+
+    if not debe_enviar:
+        print("  WA [OK] facturas SRI: sin ingresos ni alertas (corrida silenciosa)")
         return
 
-    lineas: list[str] = [f"📋 *Facturas SRI — corrida {corrida}*"]
+    if status_corrida == "FAILED":
+        estado_txt = "❌ *FALLO*"
+    elif status_corrida == "PARTIAL" or hay_errores or hay_pendientes:
+        estado_txt = "⚠️ *PARCIAL*"
+    else:
+        estado_txt = "✅ *OK*"
+
+    lineas: list[str] = [f"📋 *Facturas SRI — corrida {corrida}*", estado_txt]
     if ventana:
         lineas.append(f"Ventana: {ventana}")
     lineas.append("")
@@ -216,18 +252,31 @@ def enviar_resumen_facturas_sri(
     if desc.get("ejecutada"):
         lineas.append(
             f"Descarga: {int(desc.get('listados') or 0)} en portal | "
-            f"{int(desc.get('descargados') or 0)} nuevos | "
-            f"{int(desc.get('errores') or 0)} errores SOAP"
+            f"{descargados} nuevos | {err_desc} errores SOAP"
         )
     if proc.get("ejecutada"):
         lineas.append(
-            f"Ingreso: {int(proc.get('completas') or 0)} completas | "
-            f"{int(proc.get('parciales') or 0)} parciales | "
+            f"Ingreso: {completas} completas | {parciales} parciales | "
             f"{int(proc.get('omitidas') or 0)} omitidas"
         )
 
+    if ingresos_detalle:
+        lineas.append("Facturas ingresadas:")
+        for fila in ingresos_detalle[:15]:
+            lineas.append(f"- {fila}")
+        if len(ingresos_detalle) > 15:
+            lineas.append(f"… y {len(ingresos_detalle) - 15} más")
+
     if fatal_error:
         lineas.append(f"❌ *Fallo corrida:*\n{fatal_error.strip()[:350]}")
+        lineas.append(resumen_ultima_ok(checkpoint_prev))
+    elif status_corrida in ("FAILED", "PARTIAL") and hay_errores:
+        lineas.append(resumen_ultima_ok(checkpoint_prev))
+
+    horas_ok = horas_desde_ultima_ok(checkpoint_prev)
+    if horas_ok is not None and horas_ok > 26 and status_corrida == "FAILED":
+        lineas.append(f"⏱ Sin corrida SRI OK hace ~{horas_ok:.0f}h")
+
     if n_cola_desc > 0:
         lineas.append(f"⚠️ {n_cola_desc} XML sin procesar (DESCARGADO en Supabase)")
     if n_cola_err > 0:
@@ -256,20 +305,33 @@ def enviar_resumen_facturas_sri(
     elif n_parc > 0 and hay_pendientes:
         lineas.append(f"⚠️ {n_parc} factura(s) PARCIAL(es) — revisar catálogo / pendientes")
 
-    if int(proc.get("errores") or 0) > 0:
-        lineas.append(f"⚠️ {int(proc.get('errores') or 0)} error(es) al procesar XML")
+    if err_proc > 0:
+        lineas.append(f"⚠️ {err_proc} error(es) al procesar XML")
+
+    if es_corrida_programada and not (
+        hay_ingresos or hay_nuevos_xml or hay_errores or hay_pendientes or n_cola_desc > 0
+    ):
+        lineas.append("Sin facturas nuevas ni pendientes en esta corrida.")
 
     texto = "\n".join(lineas).strip()
     if len(texto) > _WA_MAX_BODY:
         texto = texto[: _WA_MAX_BODY - 20] + "\n…(truncado)"
 
     destinos: list[tuple[str, str]] = []
+    if hay_ingresos or hay_nuevos_xml:
+        destinos.extend(telefonos_alerta("alert_sri_items_pendientes_roles"))
+        if cfg("alert_sri_items_pendientes_copia_admin", True):
+            destinos.extend(telefonos_por_roles(["ADMIN"]))
     if hay_pendientes and cfg("alert_sri_items_pendientes_activo", True):
         destinos.extend(telefonos_alerta("alert_sri_items_pendientes_roles"))
         if cfg("alert_sri_items_pendientes_copia_admin", True):
             destinos.extend(telefonos_por_roles(["ADMIN"]))
-    elif fatal_error or hay_alerta:
+    if fatal_error or hay_errores or status_corrida in ("FAILED", "PARTIAL"):
         destinos.extend(telefonos_por_roles(["ADMIN"]))
+    if es_corrida_programada:
+        fe = (os.getenv("ALERTA_WA_FELIPE") or "").strip()
+        if fe:
+            destinos.append((fe, "Felipe"))
 
     seen: set[str] = set()
     for tel, lab in destinos:
