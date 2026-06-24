@@ -1361,7 +1361,7 @@ function restaurarListaCompletaTraslado_(mostrarAlerta) {
   }
   var last = cat.getLastRow();
   if (last < 2) return;
-  var data = cat.getRange(2, 2, last, 2).getValues();
+  var data = cat.getRange(2, 2, last - 1, 1).getValues();
   var vistos = {};
   var list = [];
   for (var i = 0; i < data.length; i++) {
@@ -1372,7 +1372,7 @@ function restaurarListaCompletaTraslado_(mostrarAlerta) {
     }
   }
   ing.getRange("H2:H2000").clearContent();
-  if (list.length) ing.getRange(2, 8, 1 + list.length, 8).setValues(list);
+  if (list.length) ing.getRange(2, 8, list.length, 1).setValues(list);
   if (mostrarAlerta) ui.alert("Lista completa: " + list.length + " productos.");
 }
 
@@ -1405,7 +1405,7 @@ function actualizarListaProductosTraslado_(mostrarAlerta) {
     if (mostrarAlerta) ui.alert("CAT_TRASLADO vacio. Ejecuta setup_ingreso_traslado_masivo.py");
     return;
   }
-  var data = cat.getRange(2, 1, last, 2).getValues();
+  var data = cat.getRange(2, 1, last - 1, 2).getValues();
   var list = [];
   for (var i = 0; i < data.length; i++) {
     if (String(data[i][0]).trim() === bod && data[i][1]) {
@@ -1417,7 +1417,7 @@ function actualizarListaProductosTraslado_(mostrarAlerta) {
     if (mostrarAlerta) ui.alert("Sin productos para " + bod + " en CAT_TRASLADO.");
     return;
   }
-  ing.getRange(2, 8, 1 + list.length, 8).setValues(list);
+  ing.getRange(2, 8, list.length, 1).setValues(list);
   if (mostrarAlerta) ui.alert("Lista actualizada: " + list.length + " productos para " + bod);
 }
 
@@ -1498,8 +1498,7 @@ function aceptarTraslado_(modoPrueba) {
   if (!bodegaDestino) { ui.alert("Falta bodega destino (B3)."); return; }
   if (bodegaOrigen === bodegaDestino) { ui.alert("Origen y destino no pueden ser iguales."); return; }
 
-  var finFila = FILA_LINEAS_TRASLADO + MAX_LINEAS_TRASLADO - 1;
-  var datos = hoja.getRange(FILA_LINEAS_TRASLADO, 1, finFila, 2).getValues();
+  var datos = hoja.getRange(FILA_LINEAS_TRASLADO, 1, MAX_LINEAS_TRASLADO, 2).getValues();
   var lineas = [];
   var problemas = [];
   for (var i = 0; i < datos.length; i++) {
@@ -1618,12 +1617,11 @@ function registrarHistorialTraslado_(ss, trx, usuario, origen, destino, lineas) 
   }
   if (filas.length) {
     var startRow = reg.getLastRow() + 1;
-    reg.getRange(startRow, 1, startRow + filas.length - 1, filas[0].length).setValues(filas);
+    reg.getRange(startRow, 1, filas.length, filas[0].length).setValues(filas);
   }
 }
 
 function limpiarTraslado_(hoja) {
   hoja.getRange("B2:B3").clearContent();
-  var finFila = FILA_LINEAS_TRASLADO + MAX_LINEAS_TRASLADO - 1;
-  hoja.getRange(FILA_LINEAS_TRASLADO, 1, finFila, 2).clearContent();
+  hoja.getRange(FILA_LINEAS_TRASLADO, 1, MAX_LINEAS_TRASLADO, 2).clearContent();
 }
