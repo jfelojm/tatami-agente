@@ -735,6 +735,9 @@ app.include_router(conteo_router, prefix="/api/conteo")
 from factura_manual_routes import router as factura_manual_router
 app.include_router(factura_manual_router, prefix="/api/factura_manual")
 
+from traslado_masivo_routes import router as traslado_masivo_router
+app.include_router(traslado_masivo_router, prefix="/api/traslado_masivo")
+
 from dashboard_routes import router as dashboard_router
 app.include_router(dashboard_router)
 
