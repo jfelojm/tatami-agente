@@ -9,9 +9,9 @@ from collections import defaultdict
 
 import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
+from google_credentials import google_credentials, pin_cloud_env, spreadsheet_id
 
-load_dotenv(override=True)
+load_dotenv(override=False)
 
 SHEET_DETALLE = "BD_RECETAS_DETALLE"
 SHEET_RESUMEN = "BD_RECETAS"
@@ -87,10 +87,9 @@ def clave_plato(cod_receta: str, variedad_smart_menu: str | None = None) -> str:
 
 
 def _abrir_maestro():
-    creds = Credentials.from_service_account_file(
-        os.environ["GOOGLE_CREDENTIALS_PATH"], scopes=SCOPES
-    )
-    return gspread.authorize(creds).open_by_key(os.environ["SPREADSHEET_ID"])
+    pin_cloud_env()
+    creds = google_credentials(SCOPES)
+    return gspread.authorize(creds).open_by_key(spreadsheet_id())
 
 
 def _fila_dict(headers: list[str], row: list) -> dict:

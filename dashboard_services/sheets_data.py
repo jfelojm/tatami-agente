@@ -13,9 +13,11 @@ _TTL = 120.0
 
 
 def _conectar():
-    sid = os.getenv("SPREADSHEET_ID", "")
+    from google_credentials import pin_cloud_env, spreadsheet_id
+
+    pin_cloud_env()
     creds = google_credentials(SCOPES)
-    return gspread.authorize(creds).open_by_key(sid)
+    return gspread.authorize(creds).open_by_key(spreadsheet_id())
 
 
 def leer_hoja(sheet_name: str, header_key: str, *, skip: int = 1) -> list[dict]:
