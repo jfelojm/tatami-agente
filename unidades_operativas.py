@@ -134,6 +134,48 @@ def parse_cantidad_explicita_base(texto: str) -> float | None:
     return val
 
 
+def _singular_presentacion(un: str) -> str:
+    u = (un or "").strip().lower()
+    mapping = {
+        "unidades": "unidad",
+        "uni": "unidad",
+        "unidad": "unidad",
+        "tortas": "torta",
+        "torta": "torta",
+        "lotes": "lote",
+        "lote": "lote",
+        "batches": "batch",
+        "batch": "batch",
+        "porciones": "porcion",
+        "porción": "porcion",
+        "porcion": "porcion",
+        "preparaciones": "preparacion",
+        "preparación": "preparacion",
+        "preparacion": "preparacion",
+        "recetas": "receta",
+        "receta": "receta",
+        "botellas": "botella",
+        "botella": "botella",
+        "cajas": "caja",
+        "caja": "caja",
+        "packs": "pack",
+        "pack": "pack",
+        "paquetes": "paquete",
+        "paquete": "paquete",
+        "latas": "lata",
+        "lata": "lata",
+        "bolsas": "bolsa",
+        "bolsa": "bolsa",
+        "bultos": "bulto",
+        "bulto": "bulto",
+        "garrafas": "garrafa",
+        "garrafa": "garrafa",
+        "frascos": "frasco",
+        "frasco": "frasco",
+    }
+    return mapping.get(u, u)
+
+
 def parse_cantidad_presentacion(texto: str) -> tuple[float, str] | None:
     """
     «una botella», «6 tortas» → (cantidad, unidad_normalizada).
@@ -146,9 +188,9 @@ def parse_cantidad_presentacion(texto: str) -> tuple[float, str] | None:
     cant = _parse_cantidad_token(m.group("cant"))
     if cant is None or cant <= 0:
         return None
-    un = m.group("unidad").lower().rstrip("s")
+    un = _singular_presentacion(m.group("unidad"))
     if un == "botella":
-        un = "botella"
+        pass
     elif un in ("caja", "pack", "paquete", "lata", "bolsa", "bulto", "garrafa", "frasco"):
         pass
     elif un in ("torta", "porcion", "preparacion", "receta"):
@@ -433,7 +475,16 @@ def resolver_cantidad_produccion_sub(
     pres = parse_cantidad_presentacion(texto) if texto else None
     if pres:
         n_pres, un_pres = pres
-        if un_pres in ("lote", "unidad", "torta", "batch") or un_pres in _UNIDADES_LOTE_SUB:
+        if un in ("uni", "unidad") and un_pres in ("unidad", "uni"):
+            return {
+                "cantidad_base": n_pres,
+                "interpretacion": f"{n_pres:g} uni ({nom})",
+                "rendimiento_estandar": rend,
+                "lotes": n_pres / rend if rend > 0 else None,
+            }
+        elif un_pres in ("lote", "torta", "batch") or (
+            un_pres in _UNIDADES_LOTE_SUB and un_pres not in ("unidad", "uni")
+        ):
             lotes = n_pres
 
     if lotes is not None and lotes > 0 and rend > 0:
@@ -447,6 +498,16 @@ def resolver_cantidad_produccion_sub(
 
     if cantidad is not None and cantidad > 0:
         cant = float(cantidad)
+        menciona_uni = bool(
+            re.search(r"\b(uni(?:dad(?:es)?)?)\b", _norm_txt(texto or ""))
+        )
+        if un in ("uni", "unidad") and (menciona_uni or (rend > 0 and cant > rend)):
+            return {
+                "cantidad_base": cant,
+                "interpretacion": f"{cant:g} uni ({nom})",
+                "rendimiento_estandar": rend,
+                "lotes": cant / rend if rend > 0 else None,
+            }
         if rend > 0 and cant == int(cant) and 0 < cant <= 30 and cant < rend:
             base = cant * rend
             return {

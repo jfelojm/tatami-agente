@@ -77,7 +77,29 @@ def _phones_from_env(key: str) -> set[str]:
     raw = (os.getenv(key) or "").strip()
     if not raw:
         return set()
-    return {_norm_tel(p) for p in re.split(r"[,;\s\n]+", raw) if p.strip()}
+    return _phones_from_raw(raw)
+
+
+def _phones_from_raw(raw: str) -> set[str]:
+    return {_norm_tel(p) for p in re.split(r"[,;\s\n]+", (raw or "").strip()) if p.strip()}
+
+
+def _phones_for_role(rol: str) -> set[str]:
+    """Teléfonos del rol: .env (ALLOWLIST_*) + BD_CONFIG telefonos_{ROL} / telefonos_extra_{ROL}."""
+    phones: set[str] = set()
+    env_key = ROLE_ALLOWLIST_ENV.get(rol)
+    if env_key:
+        phones |= _phones_from_env(env_key)
+    try:
+        from config_sheets import cfg
+
+        for ck in (f"telefonos_{rol}", f"telefonos_extra_{rol}"):
+            v = cfg(ck, None)
+            if v is not None and str(v).strip():
+                phones |= _phones_from_raw(str(v))
+    except Exception:
+        pass
+    return phones
 
 
 @lru_cache(maxsize=1)
@@ -90,8 +112,8 @@ def _phone_to_roles() -> dict[str, set[str]]:
             return
         mapping.setdefault(t, set()).add(rol)
 
-    for rol, env_key in ROLE_ALLOWLIST_ENV.items():
-        for t in _phones_from_env(env_key):
+    for rol in ROLE_ALLOWLIST_ENV:
+        for t in _phones_for_role(rol):
             add(t, rol)
 
     for rol, env_key in ROLE_WA_ENV.items():
@@ -357,6 +379,11 @@ def bodegas_permitidas_produccion_sub(telefono: str) -> set[str]:
     return allowed
 
 
+def requiere_bodega_explicita_produccion(telefono: str) -> bool:
+    """Staff operativo debe indicar bodega al producir (no asumir default)."""
+    return bool(phone_roles(telefono) & {"STAFF_COCINA", "STAFF_BARRA"})
+
+
 def validar_bodega_produccion_sub(telefono: str, bodega: str) -> str | None:
     """None si OK; mensaje de error si la bodega no está permitida para el rol."""
     bod = (bodega or "").strip().upper()
@@ -431,7 +458,7 @@ def telefonos_por_roles(role_codes: Iterable[str]) -> list[tuple[str, str]]:
                 push(t, rol)
         env_list = ROLE_ALLOWLIST_ENV.get(rol)
         if env_list:
-            for t in _phones_from_env(env_list):
+            for t in _phones_for_role(rol):
                 push(t, rol)
 
     return out

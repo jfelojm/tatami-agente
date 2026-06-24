@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250623-conteo-aprobar-routing-v31"
+TATAMI_WA_BUILD = "20250623-prod-cantidad-bodega-v32"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -187,6 +187,73 @@ def _bodega_por_area(area: str | None) -> str | None:
     if area == "cocina":
         return "BOD-001"
     return None
+
+
+def _parse_bodega_produccion_texto(texto: str) -> str | None:
+    """Resuelve BOD-00x o alias cocina/externa/barra en un mensaje de producción."""
+    from bodegas_config import resolver_cod_bodega
+
+    raw = (texto or "").strip()
+    if not raw:
+        return None
+    m = re.search(r"\b(bod[- ]?0?\d{3})\b", raw, re.I)
+    if m:
+        return resolver_cod_bodega(m.group(1))
+    t = raw.lower()
+    for alias in (
+        "bodega externa",
+        "consignacion",
+        "consignación",
+        "externa",
+        "cocina",
+        "barra",
+    ):
+        if re.search(rf"\b{re.escape(alias)}\b", t):
+            return resolver_cod_bodega(alias)
+    return None
+
+
+def _bodega_explicita_en_texto(texto: str) -> bool:
+    return _parse_bodega_produccion_texto(texto) is not None
+
+
+def _resolver_bodega_produccion(
+    wa_id: str | None,
+    texto: str,
+    *,
+    area: str | None = None,
+) -> tuple[str, bool]:
+    """(cod_bodega, explicita). Staff sin bodega en texto → ('', False)."""
+    from estrategia_config import (
+        bodega_default_produccion_sub,
+        requiere_bodega_explicita_produccion,
+    )
+
+    bod = _parse_bodega_produccion_texto(texto)
+    if bod:
+        return bod, True
+    if wa_id and requiere_bodega_explicita_produccion(wa_id):
+        return "", False
+    default = _bodega_por_area(area) or (
+        bodega_default_produccion_sub(wa_id) if wa_id else "BOD-002"
+    )
+    return default, False
+
+
+def _msg_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> str:
+    from estrategia_config import bodegas_permitidas_produccion_sub
+
+    cods = ", ".join(prod_sub.get("cods") or [])
+    cant = prod_sub.get("cantidad")
+    cant_txt = f" {cant:g}" if cant is not None else ""
+    permitidas = sorted(bodegas_permitidas_produccion_sub(wa_id))
+    opts = " · ".join(permitidas) if permitidas else "BOD-001 / BOD-005"
+    return (
+        f"Subreceta {cods}{cant_txt}: indica la *bodega* donde entra el stock.\n"
+        f"Opciones: {opts}\n"
+        f"Ej: BOD-001 · cocina · externa (BOD-005)\n"
+        f"Ej completo: PRODUCIR SUB {cods or '064'} 120 UNI BOD-001"
+    )
 
 
 def _prod_ctx_get(wa_id: str | None) -> dict:
@@ -4107,8 +4174,13 @@ def _aliases_subrecetas() -> list[tuple[str, str]]:
     return uniq
 
 
+def _texto_sin_ref_bodega(texto: str) -> str:
+    """Quita BOD-00x del texto para no confundir 001/005 con códigos SUB."""
+    return re.sub(r"\bbod[- ]?0?\d{3}\b", " BODEGA ", texto or "", flags=re.I)
+
+
 def _match_sub_codigos_en_texto(texto: str) -> list[str]:
-    t_clean = _texto_sin_cantidad_sub((texto or "").lower())
+    t_clean = _texto_sin_cantidad_sub(_texto_sin_ref_bodega((texto or "").lower()))
     hits: list[tuple[int, str]] = []
     for phrase, cod in _aliases_subrecetas():
         if phrase in t_clean:
@@ -4134,8 +4206,6 @@ def _match_sub_codigos_en_texto(texto: str) -> list[str]:
 
 def _parse_producir_sub_comando(texto: str, wa_id: str | None = None) -> dict | None:
     """PRODUCIR SUB 006 [500 GR] BOD-001 CONFIRMAR → plan o registro."""
-    from estrategia_config import bodega_default_produccion_sub
-
     raw = (texto or "").strip()
     upper = raw.upper()
     prefix = None
@@ -4149,17 +4219,18 @@ def _parse_producir_sub_comando(texto: str, wa_id: str | None = None) -> dict | 
     confirmar = "CONFIRMAR" in upper
     limpio = resto.upper().replace("CONFIRMAR", " ").strip()
     tokens = [t for t in limpio.split() if t]
-    bodega = bodega_default_produccion_sub(wa_id) if wa_id else "BOD-002"
     area = _resolver_area_produccion(wa_id, resto, cods=[])
-    if area:
-        bodega = _bodega_por_area(area) or bodega
+    bodega, bodega_explicita = _resolver_bodega_produccion(wa_id, resto, area=area)
     cods: list[str] = []
     cantidad: float | None = None
     _units = {"ML", "GR", "G", "L", "LT", "LITRO", "LITROS", "UNI", "UNIDAD", "UNIDADES", "UND"}
     for tok in tokens:
         tu = tok.upper()
         if tu.startswith("BOD-"):
-            bodega = tu
+            from bodegas_config import resolver_cod_bodega
+
+            bodega = resolver_cod_bodega(tok)
+            bodega_explicita = True
             continue
         if tu in _units:
             continue
@@ -4175,7 +4246,12 @@ def _parse_producir_sub_comando(texto: str, wa_id: str | None = None) -> dict | 
             cods.append(num.zfill(3))
         else:
             cantidad = val
-    out: dict = {"cods": cods, "bodega": bodega, "confirmar": confirmar}
+    out: dict = {
+        "cods": cods,
+        "bodega": bodega,
+        "bodega_explicita": bodega_explicita,
+        "confirmar": confirmar,
+    }
     if cantidad is not None:
         out["cantidad"] = cantidad
     return out
@@ -5036,10 +5112,71 @@ def _texto_bajo_par_wa(texto: str = "") -> str:
     return "\n".join(lines)
 
 
+def _parse_pedidos_barra_comando(texto: str) -> bool:
+    t = (texto or "").strip().lower()
+    if not t:
+        return False
+    if t in (
+        "pedidos barra",
+        "pedido barra",
+        "ordenes barra",
+        "orden barra",
+        "ordenes compra barra",
+        "compras barra",
+        "pedidos de barra",
+    ):
+        return True
+    if re.search(r"\b(pedidos?|ordenes?|compras?)\b", t) and re.search(r"\bbarra\b", t):
+        return True
+    return False
+
+
+async def _enviar_ordenes_compra_barra_wa(wa_id: str) -> None:
+    """Responde con órdenes barra (un WA por proveedor). Requiere ventana 24h abierta por el IN del usuario."""
+    from alertas_ordenes_compra_barra import mensajes_ordenes_barra_por_proveedor
+    from generar_ordenes_compra import generar_ordenes
+
+    hoy = date.today()
+    ordenes = generar_ordenes(tipo="barra", sin_ventana=True, hoy=hoy)
+    if not ordenes:
+        await enviar_mensaje_meta(
+            wa_id,
+            "No hay pedidos barra bajo PAR con catálogo de proveedor.",
+        )
+        return
+    msgs = mensajes_ordenes_barra_por_proveedor(ordenes, hoy)
+    intro = (
+        f"Ordenes compra BARRA ({len(ordenes)} proveedores) — {hoy.strftime('%d/%m/%Y')}.\n"
+        f"Van {len(msgs)} mensajes."
+    )
+    await enviar_mensaje_meta(wa_id, intro)
+    await asyncio.sleep(1)
+    for i, texto in enumerate(msgs, 1):
+        ok = await enviar_mensaje_meta(wa_id, texto)
+        if not ok:
+            print(f"[Meta] orden barra prov {i}/{len(msgs)} fallo wa_id={wa_id!r}")
+            break
+        await asyncio.sleep(1.5)
+
+
+def tool_ordenes_compra_barra(args=None):
+    from alertas_ordenes_compra_barra import mensajes_ordenes_barra_por_proveedor
+    from generar_ordenes_compra import generar_ordenes
+
+    hoy = date.today()
+    ordenes = generar_ordenes(tipo="barra", sin_ventana=True, hoy=hoy)
+    msgs = mensajes_ordenes_barra_por_proveedor(ordenes, hoy)
+    return {
+        "fecha": hoy.isoformat(),
+        "n_proveedores": len(ordenes),
+        "n_lineas": sum(o.get("n_items", 0) for o in ordenes),
+        "mensajes_whatsapp": msgs,
+        "texto_whatsapp": "\n\n---\n\n".join(msgs) if msgs else "Sin pedidos barra bajo PAR.",
+    }
+
+
 def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict | None:
     """Detecta pedidos de producción en lenguaje natural (barra o cocina)."""
-    from estrategia_config import bodega_default_produccion_sub
-
     raw = (texto or "").strip()
     if not raw:
         return None
@@ -5066,13 +5203,12 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
     if not parece_batch:
         return None
     area = _resolver_area_produccion(wa_id, raw, cods=cods)
-    bod = _bodega_por_area(area) or (
-        bodega_default_produccion_sub(wa_id) if wa_id else "BOD-002"
-    )
+    bodega, bodega_explicita = _resolver_bodega_produccion(wa_id, raw, area=area)
     if not cods:
         return {
             "cods": [],
-            "bodega": bod,
+            "bodega": bodega,
+            "bodega_explicita": bodega_explicita,
             "confirmar": False,
             "ambiguo": True,
             "area": area,
@@ -5082,15 +5218,16 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
         w in t
         for w in ("confirmar", "confirmo", "aplicar", "de verdad", "en serio")
     )
-    m = re.search(r"\b(bod-\d{3})\b", raw, re.I)
-    if m:
-        bod = m.group(1).upper()
     area = _resolver_area_produccion(wa_id, raw, cods=cods, area_hint=area)
-    if area:
-        bod = _bodega_por_area(area) or bod
+    bod2, expl2 = _resolver_bodega_produccion(wa_id, raw, area=area)
+    if expl2:
+        bodega, bodega_explicita = bod2, True
+    elif not bodega_explicita:
+        bodega = bod2
     return {
         "cods": cods,
-        "bodega": bod,
+        "bodega": bodega,
+        "bodega_explicita": bodega_explicita,
         "confirmar": confirmar,
         "cantidad": cantidad,
         "area": area,
@@ -5128,31 +5265,32 @@ def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
         prod_sub = _parse_batch_lenguaje_natural(texto, wa_id)
 
     if (prod_sub is None or not prod_sub.get("cods")) and _es_orden_produccion_afirmativa(texto):
-        from estrategia_config import bodega_default_produccion_sub
-
         cods = _match_sub_codigos_en_texto(texto) or list(ctx.get("last_cods") or [])
         if cods:
             area = _resolver_area_produccion(wa_id, texto, cods=cods)
             cantidad = _extraer_cantidad_sub(texto, cod_sub=cods[0])
+            bodega, bodega_explicita = _resolver_bodega_produccion(wa_id, texto, area=area)
             prod_sub = {
                 "cods": cods,
-                "bodega": _bodega_por_area(area)
-                or (bodega_default_produccion_sub(wa_id) if wa_id else "BOD-002"),
+                "bodega": bodega,
+                "bodega_explicita": bodega_explicita,
                 "cantidad": cantidad,
                 "confirmar": False,
                 "area": area,
             }
 
     if prod_sub is None and ctx.get("area"):
-        from estrategia_config import bodega_default_produccion_sub
-
         cods = _match_sub_codigos_en_texto(texto)
-        cantidad = _extraer_cantidad_sub(texto, cod_sub=cods[0])
+        cantidad = _extraer_cantidad_sub(texto, cod_sub=cods[0] if cods else None)
         if cods and (cantidad is not None or _es_intento_produccion(texto)):
             area = _resolver_area_produccion(wa_id, texto, cods=cods)
+            bodega, bodega_explicita = _resolver_bodega_produccion(
+                wa_id, texto, area=area or ctx.get("area")
+            )
             prod_sub = {
                 "cods": cods,
-                "bodega": _bodega_por_area(area) or _bodega_por_area(ctx["area"]),
+                "bodega": bodega,
+                "bodega_explicita": bodega_explicita,
                 "cantidad": cantidad,
                 "confirmar": False,
                 "area": area or ctx.get("area"),
@@ -5211,6 +5349,7 @@ TOOLS = [
     {"name": "mp_incompletas", "description": "MPs con datos incompletos en BD_MP_SISTEMA (sin_costo, sin_par, sin_bodega).", "input_schema": {"type": "object", "properties": {"tipo": {"type": "string", "enum": ["sin_costo","sin_par","sin_bodega"]}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
     {"name": "resumen_operativo_hoy", "description": "Resumen compacto: ventas hoy + bajo par + negativos + facturas parciales.", "input_schema": {"type": "object", "properties": {"top": {"type": "integer"}}, "required": []}},
     {"name": "pedidos_hoy", "description": "Pedidos que corresponde hacer hoy segun ventana de cada proveedor.", "input_schema": {"type": "object", "properties": {}, "required": []}},
+    {"name": "ordenes_compra_barra", "description": "Ordenes de compra sugeridas para barra (todos los proveedores bajo PAR, sin filtrar ventana). Devuelve mensajes_whatsapp listos para copiar. Usar cuando pidan pedidos/ordenes de compra de barra.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "plato_top_semana", "description": "Top 10 platos mas vendidos esta semana por cantidad.", "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "buscar_bodega", "description": "En que bodega esta un insumo. Busca por nombre_mp (como lo dice el usuario). Si hay varios parecidos devuelve requiere_eleccion: pregunta al usuario por NOMBRE, sin pedir codigos.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string"}}, "required": ["nombre_mp"]}},
     {"name": "trasladar_mp", "description": "Trasladar insumo entre bodegas. Usa nombre_mp (obligatorio salvo que ya resolviste el producto en el turno anterior). NUNCA inventes cod_mp_sistema. Si requiere_eleccion, pregunta al usuario cual producto por nombre. confirmado=false primero, luego true tras confirmacion. CANTIDADES: el inventario está en unidad_base (gr/ml/uni). Si el usuario dice botella/caja/pack/lata o un número pequeño de unidades de compra (ej. «una botella de Buchanan's Master»), pasa cantidad=1 (o N) y unidad_presentacion=botella; el sistema convierte con factor_conversion del catálogo (ej. 750 ml). Si dice ml/gr explícitos, pasa esa cantidad en unidad base.", "input_schema": {"type": "object", "properties": {"nombre_mp": {"type": "string", "description": "Nombre del producto como lo dice el usuario (ej. Buchanan 18, papa)"}, "cod_mp_sistema": {"type": "string", "description": "Solo si la tool anterior devolvio opciones y ya eligio el usuario; no inventar"}, "bodega_origen": {"type": "string"}, "bodega_destino": {"type": "string"}, "cantidad": {"type": "number", "description": "Cantidad pedida (unidad base o unidades de compra si va con unidad_presentacion)"}, "cantidad_presentacion": {"type": "number", "description": "Ej. 1 para «una botella», 6 para «6 cajas»"}, "unidad_presentacion": {"type": "string", "description": "botella, caja, pack, lata, etc."}, "unidad_pedida": {"type": "string", "description": "Alias de unidad_presentacion"}, "texto_original": {"type": "string", "description": "Frase del usuario para interpretar cantidades naturales"}, "confirmado": {"type": "boolean"}}, "required": ["nombre_mp","bodega_origen","bodega_destino","cantidad","confirmado"]}},
@@ -5245,6 +5384,7 @@ TOOL_FNS = {
     "mp_incompletas": tool_mp_incompletas,
     "resumen_operativo_hoy": tool_resumen_operativo_hoy,
     "pedidos_hoy":      lambda a: tool_pedidos_hoy(),
+    "ordenes_compra_barra": lambda a: tool_ordenes_compra_barra(a),
     "plato_top_semana": lambda a: tool_plato_top_semana(),
     "buscar_bodega":    tool_buscar_bodega,
     "trasladar_mp":     tool_trasladar_mp,
@@ -5784,6 +5924,22 @@ async def _manejar_produccion_sub(
         area = _resolver_area_produccion(wa_id, "", cods=prod_sub.get("cods"))
         _prod_ctx_touch(wa_id, area=area, last_cods=prod_sub.get("cods"))
         _limpiar_ctx_conteo(wa_id)
+        from estrategia_config import requiere_bodega_explicita_produccion
+
+        if not (prod_sub.get("bodega") or "").strip() or (
+            requiere_bodega_explicita_produccion(wa_id)
+            and not prod_sub.get("bodega_explicita")
+        ):
+            _pending_prod_sub[wa_id] = {
+                "cods": prod_sub["cods"],
+                "cantidad": prod_sub.get("cantidad"),
+                "awaiting_bodega": True,
+                "area": area,
+            }
+            await enviar_mensaje_meta(
+                wa_id, _msg_pedir_bodega_produccion(wa_id, prod_sub)
+            )
+            return
         bodega = (prod_sub.get("bodega") or bodega_default_produccion_sub(wa_id)).strip().upper()
         err = validar_bodega_produccion_sub(wa_id, bodega)
         if err:
@@ -5907,6 +6063,25 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             # Producción pendiente de confirmación — no caer al LLM con «ai» u otros typos
             if wa_id in _pending_prod_sub:
+                pending = _pending_prod_sub[wa_id]
+                if pending.get("awaiting_bodega"):
+                    bod = _parse_bodega_produccion_texto(texto)
+                    if bod:
+                        prod = {
+                            **pending,
+                            "bodega": bod,
+                            "bodega_explicita": True,
+                            "confirmar": False,
+                        }
+                        prod.pop("awaiting_bodega", None)
+                        _pending_prod_sub.pop(wa_id, None)
+                        print(f"[Meta] {wa_id}: route=produccion_bodega")
+                        await _manejar_produccion_sub(wa_id, prod, msg, texto=texto)
+                    else:
+                        await enviar_mensaje_meta(
+                            wa_id, _msg_pedir_bodega_produccion(wa_id, pending)
+                        )
+                    return
                 if _es_cancelacion_corta(texto):
                     _pending_prod_sub.pop(wa_id, None)
                     await enviar_mensaje_meta(wa_id, "Producción cancelada.")
@@ -6240,6 +6415,15 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     out = _asegurar_texto_whatsapp(resp)
                     await enviar_mensaje_meta(wa_id, out)
                     return
+
+            # Órdenes compra barra (respuesta en ventana 24h tras mensaje del usuario)
+            if _parse_pedidos_barra_comando(texto):
+                if not autorizado_comando(wa_id, texto):
+                    await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
+                    return
+                print(f"[Meta] {wa_id}: route=pedidos_barra")
+                await _enviar_ordenes_compra_barra_wa(wa_id)
+                return
 
             # Agente general — nunca LLM si el mensaje es traslado
             if _parece_intento_traslado(texto):
