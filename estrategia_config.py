@@ -281,7 +281,13 @@ def autorizado_tool(telefono: str, tool_name: str) -> bool:
                 )
             )
         if tool_name == "conteo_iniciar":
-            return bool(roles & roles_con_permiso("perm_conteo_iniciar_roles"))
+            return bool(
+                roles
+                & roles_con_permiso(
+                    "perm_conteo_iniciar_roles",
+                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,ADMIN_COMPRAS",
+                )
+            )
         if tool_name == "produccion_subreceta":
             return bool(
                 roles
@@ -292,7 +298,10 @@ def autorizado_tool(telefono: str, tool_name: str) -> bool:
         return bool(
             roles
             & (
-                roles_con_permiso("perm_conteo_iniciar_roles")
+                roles_con_permiso(
+                    "perm_conteo_iniciar_roles",
+                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,ADMIN_COMPRAS",
+                )
                 | roles_con_permiso("perm_conteo_aprobar_roles")
             )
         )
@@ -320,7 +329,10 @@ def autorizado_comando(telefono: str, comando: str) -> bool:
         return bool(
             roles
             & (
-                roles_con_permiso("perm_conteo_iniciar_roles")
+                roles_con_permiso(
+                    "perm_conteo_iniciar_roles",
+                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,ADMIN_COMPRAS",
+                )
                 | roles_con_permiso("perm_producir_sub_roles", _DEFAULT_PRODUCIR_SUB_ROLES)
                 | roles_con_permiso("perm_conteo_aprobar_roles")
                 | {"SOCIO"}
@@ -344,7 +356,7 @@ _BODEGA_DEFAULT_PROD_SUB: dict[str, str] = {
 }
 
 _BODEGAS_PROD_SUB_FALLBACK: dict[str, set[str]] = {
-    "STAFF_COCINA": {"BOD-001"},
+    "STAFF_COCINA": {"BOD-001", "BOD-005"},
     "JEFE_COCINA": {"BOD-001", "BOD-005"},
     "STAFF_BARRA": {"BOD-002"},
     "JEFE_BARRA": {"BOD-002"},
@@ -371,8 +383,8 @@ def bodegas_permitidas_produccion_sub(telefono: str) -> set[str]:
     for rol in roles:
         key = f"perm_producir_sub_bodegas_{rol}"
         bods = _cfg_tokens(key)
-        if not bods and rol in _BODEGAS_PROD_SUB_FALLBACK:
-            bods = set(_BODEGAS_PROD_SUB_FALLBACK[rol])
+        if rol in _BODEGAS_PROD_SUB_FALLBACK:
+            bods |= _BODEGAS_PROD_SUB_FALLBACK[rol]
         allowed |= bods
     if not allowed:
         allowed.add(bodega_default_produccion_sub(telefono))

@@ -56,6 +56,9 @@ def calcular_consumo_sub(ingrediente: dict, cantidad_vendida: float) -> float:
     return cantidad_vendida * gramaje * pct * (1 + merma)
 
 
+# Planeación PAR: ver subreceta_consumo_mp.explotar_subreceta_a_mp
+
+
 def _sheet_float(v: Any, default: float = 0.0) -> float:
     from sheet_numbers import parse_sheet_number
 

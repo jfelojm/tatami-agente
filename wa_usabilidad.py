@@ -152,7 +152,7 @@ def msg_submenu(opcion: int, telefono: str) -> str:
     if opcion == 4:
         return (
             "*Conteo físico*\n\n"
-            "Iniciar: *INICIAR CONTEO BOD-001* (cocina) o *BOD-002* (barra).\n"
+            "Iniciar: *INICIAR CONTEO BOD-001* (cocina), *BOD-005* (externa) o *BOD-002* (barra).\n"
             "Luego sigue las instrucciones de la hoja."
         )
     if opcion == 5:

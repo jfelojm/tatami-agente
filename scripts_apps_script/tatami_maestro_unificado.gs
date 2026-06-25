@@ -1,26 +1,19 @@
 /**
  * =============================================================================
- * TATAMI — Script unificado (maestro de datos + plantilla CONTEO)
+ * TATAMI — Script MAESTRO (libro BD datos maestro)
  * =============================================================================
  *
- * INSTALACIÓN (reemplazar todo el código del proyecto Apps Script):
- *   1. Abrir el libro en Google Sheets → Extensiones → Apps Script.
- *   2. Borrar los archivos .gs viejos (Code.gs, promover_…, conteo_…, etc.).
- *   3. Crear un solo archivo: tatami_maestro_unificado.gs → pegar TODO este archivo.
- *   4. Guardar (Ctrl+S) → cerrar → recargar el libro (F5).
- *   5. Deben aparecer dos menús: «Tatami» y «Conteo».
+ * LIBRO: SPREADSHEET_ID / maestro de datos (ej. 1rTVMfsOBssx2R-Sbuj1SRx9NZSd_hinEa9IK_ahGqZY)
  *
- * BOTONES (dibujos) — asignar secuencia de comandos:
- *   • Promover materiales  → promoverPendientesAItemsProv
- *   • Simular promoción    → promoverPendientesAItemsProvSimular
- *   • Enviar conteo        → enviarConteoATatami   (solo en hoja plantilla CONTEO)
+ * MODULOS:
+ *   • Tatami  — Promover BD_ITEMS_PENDIENTES → BD_ITEMS_PROV
+ *   • Conteo  — CONTEO / CONTEO_EXTERNA / CONTEO_BARRA → API conteo
  *
- * CONTEO — Propiedades del script (⚙️ Ajustes del proyecto → Propiedades del script):
- *   TATAMI_CONTEO_API_URL  = https://tatami-agente-production.up.railway.app/api/conteo/enviar
- *   TATAMI_CONTEO_SECRET   = mismo valor que CONTEO_SHEETS_INGEST_SECRET en .env / Railway
- *   (NO usar ngrok; el servidor está en Railway 24/7)
+ * PROPIEDADES DEL SCRIPT:
+ *   TATAMI_CONTEO_API_URL = https://tatami-agente-production.up.railway.app/api/conteo/enviar
+ *   TATAMI_CONTEO_SECRET  = CONTEO_SHEETS_INGEST_SECRET (Railway)
  *
- * Equivalente Python: promover_pendientes_a_items_prov.py
+ * Equivalente Python: promover_pendientes_a_items_prov.py, plantilla_conteo_sheets.py
  * =============================================================================
  */
 
@@ -636,7 +629,7 @@ function armarFilaProv_(headersProv, pend, mp) {
 }
 
 // =============================================================================
-// CONTEO FÍSICO (plantilla CONTEO / CONTEO_BARRA)
+// CONTEO FÍSICO (plantilla CONTEO / CONTEO_EXTERNA / CONTEO_BARRA)
 // =============================================================================
 
 /**
@@ -652,7 +645,7 @@ function buildConteoPayloadFromActiveSheet_() {
       ok: false,
       message:
         'Esta pestaña no parece la plantilla de conteo (A6 debería ser "line_no"). ' +
-        'Abra la hoja CONTEO generada por plantilla_conteo_sheets.py.',
+        'Abra la hoja CONTEO, CONTEO_EXTERNA o CONTEO_BARRA generada por plantilla_conteo_sheets.py.',
     };
   }
 

@@ -263,11 +263,11 @@ python auditar_costos_subrecetas.py --cod 007 012 020
 
 | Código | Nombre | Uso |
 |--------|--------|-----|
-| `BOD-001` | Cocina | Descargo ventas, conteo, traslados |
-| `BOD-002` | Barra | Descargo ventas, conteo, traslados |
+| `BOD-001` | Cocina | Descargo ventas, conteo (**CONTEO**), traslados |
+| `BOD-002` | Barra | Descargo ventas, conteo (**CONTEO_BARRA**), traslados |
 | `BOD-003` | Consignación (virtual) | Traslados ↔ barra; **no** descargo ventas |
 | `BOD-004` | Limpieza | **Inactiva** (ignorar por ahora) |
-| `BOD-005` | Bodega externa | Ingresos, traslados ↔ cocina/barra |
+| `BOD-005` | Bodega externa | Ingresos, traslados ↔ cocina/barra, conteo (**CONTEO_EXTERNA**) |
 
 **Maestro:** una fila en `BD_MP_SISTEMA` por par **(cod_mp, cod_bodega)**. **PAR** y `consumo_diario_calculado` son **globales por cod_mp** (mismo valor en todas las filas del MP).
 
@@ -329,7 +329,7 @@ Promover **cabecera antes que detalle** (el detalle exige que `cod_subreceta_pad
 
 **Sync stock semi (pseudo-MP):** `python sync_stock_subrecetas_maestro.py --produccion` — ver sección Descargo inventario y `PLAN_DESCARGO_SUBRECETAS.md`.
 
-**Apps Script (menú en el libro staging):** pegar `scripts_apps_script/tatami_staging.gs` en Extensiones → Apps Script del [Masters Sheets](https://docs.google.com/spreadsheets/d/1TJu70BNG4i3it4y51Eg3YlDNswLkh1QGRt6v-qAyexU). Menú **Tatami Admin** → promover subrecetas (cab / det / ambos) y recetas v2.
+**Apps Script (solo Masters Sheets / staging):** pegar `scripts_apps_script/tatami_staging.gs` (o `deploy/STAGING_APPS_SCRIPT_COMPLETO.gs`). Menú **🍱 Tatami Admin** → promover subrecetas y recetas.
 
 ---
 
@@ -417,31 +417,53 @@ schtasks /Create /TN "TatamiVentasMediodia" /TR "powershell.exe $accion" /SC DAI
 
 ---
 
-## Apps Script — libro maestro (unificado)
+## Apps Script — dos scripts (maestro vs Masters Sheets)
 
-**Archivo a pegar:** `scripts_apps_script/tatami_maestro_unificado.gs`  
-Incluye menús **Tatami** (promover pendientes) y **Conteo** (enviar inventario físico) en un solo `onOpen()`.
+Hay **dos archivos distintos**. Cada uno va en **su libro** de Google Sheets (no mezclar).
 
-### Instalación
+| Libro | ID (ejemplo) | Archivo a pegar | Menús |
+|-------|----------------|-----------------|--------|
+| **BD datos maestro** (`SPREADSHEET_ID`) | `1rTVMfsOBssx2R-Sbuj1SRx9NZSd_hinEa9IK_ahGqZY` | `scripts_apps_script/tatami_maestro_unificado.gs` | Tatami · Conteo |
+| **Masters Sheets / staging** (`STAGING_SPREADSHEET_ID`) | `1TJu70BNG4i3it4y51Eg3YlDNswLkh1QGRt6v-qAyexU` | `scripts_apps_script/tatami_staging.gs` o `deploy/STAGING_APPS_SCRIPT_COMPLETO.gs` | 🍱 Admin · 🧪 Tests · 🍣 Facturas · 📦 Traslados |
 
-1. Google Sheets (maestro) → **Extensiones → Apps Script**.
-2. Eliminar archivos `.gs` antiguos del proyecto (evitar `onOpen` duplicados).
-3. **+** → Archivo de secuencia de comandos → nombre `tatami_maestro_unificado.gs`.
-4. Copiar y pegar **todo** el contenido del archivo del repo.
-5. **Guardar** → cerrar editor → **recargar** el libro (F5).
-6. Verificar menús **Tatami** y **Conteo** en la barra.
+### Instalación común
 
-### Botones (dibujos opcionales)
+1. Abrir el libro correcto → **Extensiones → Apps Script**.
+2. Eliminar **todos** los archivos `.gs` antiguos del proyecto (evitar `onOpen` duplicados).
+3. Un solo archivo: pegar **todo** el script que corresponda a esa tabla.
+4. **Guardar** → recargar el libro (F5).
 
-| Acción | Función a asignar |
-|--------|-------------------|
+### Script maestro (`tatami_maestro_unificado.gs`)
+
+**Propiedades del script:**
+
+| Propiedad | Railway / .env |
+|-----------|----------------|
+| `TATAMI_CONTEO_API_URL` | `…/api/conteo/enviar` |
+| `TATAMI_CONTEO_SECRET` | `CONTEO_SHEETS_INGEST_SECRET` |
+
+**Botones opcionales (dibujos):**
+
+| Acción | Función |
+|--------|---------|
 | Promover materiales | `promoverPendientesAItemsProv` |
 | Simular antes de promover | `promoverPendientesAItemsProvSimular` |
-| Enviar conteo (solo hoja CONTEO) | `enviarConteoATatami` |
+| Enviar conteo | `enviarConteoATatami` |
 
-Clic en el dibujo → ⋮ → **Asignar secuencia de comandos**.
+### Script staging (`tatami_staging.gs`)
 
-### Promover pendientes (`BD_ITEMS_PENDIENTES`)
+**Propiedades del script:**
+
+| Propiedad | Railway / .env |
+|-----------|----------------|
+| `TATAMI_FACTURA_API_URL` | `…/api/factura_manual/enviar` |
+| `TATAMI_FACTURA_SECRET` | `FACTURA_SHEETS_INGEST_SECRET` |
+| `TATAMI_TRASLADO_API_URL` | `…/api/traslado_masivo/enviar` |
+| `TATAMI_TRASLADO_SECRET` | `TRASLADO_SHEETS_INGEST_SECRET` |
+
+Menú **🍣 Tatami Facturas** o **📦 Tatami Traslados** → **Autorizar conexión** (una vez).
+
+### Promover pendientes (`BD_ITEMS_PENDIENTES`) — solo maestro
 
 Requiere por fila: `estado=PENDIENTE`, `cod_mp_asignado`, `cod_proveedor`, `cod_item_xml`.
 
@@ -478,14 +500,16 @@ El agente tiene tools `conteo_iniciar`, `conteo_listar_ciclos` y `conteo_ciclos_
 
 Ejemplos al agente:
 
-- «Inicia conteo de cocina» → `conteo_iniciar` con `cod_bodega=BOD-001`
-- «Inicia conteo barra semana 21» → `cod_bodega=BOD-002`, `semana_iso=21`
+- «Inicia conteo de cocina» → `conteo_iniciar` con `cod_bodega=BOD-001` (hoja **CONTEO**)
+- «Inicia conteo externa / 005» → `cod_bodega=BOD-005` (hoja **CONTEO_EXTERNA**)
+- «Inicia conteo barra semana 21» → `cod_bodega=BOD-002`, `semana_iso=21` (hoja **CONTEO_BARRA**)
 - «Qué conteos están abiertos» → `conteo_ciclos_abiertos`
 
 Comando directo en el chat (sin pasar por el modelo):
 
 ```text
 INICIAR CONTEO BOD-001
+INICIAR CONTEO BOD-005
 INICIAR CONTEO BOD-002
 ```
 
@@ -572,6 +596,50 @@ Después de contabilizar (o si los movimientos se cargaron a mano), alinear stoc
 ```bash
 python recalcular_stock_sheets.py --produccion
 ```
+
+---
+
+## Go-live inventario cocina (checklist)
+
+**Listo en código (2026-06):**
+
+- [x] Staff cocina (`STAFF_COCINA`) puede **INICIAR CONTEO** (BOD-001, BOD-005)
+- [x] Hoja dedicada **CONTEO_EXTERNA** para BOD-005
+- [x] PAR / consumo incluye **cadena de subrecetas** (`subreceta_consumo_mp.explotar_subreceta_a_mp`)
+- [ ] Alertas WA cocina — siguen **OFF** hasta post-conteo (`alert_cocina_wa_activo`, `alert_pedidos_cocina_activo`)
+
+**Antes del conteo día 0:**
+
+```bash
+python auditar_mp_cocina_bodegas.py
+python sync_mp_cocina_bodegas.py --produccion
+python seed_bd_estrategia.py --force   # perm_conteo_iniciar_roles + STAFF_COCINA en maestro
+```
+
+**Día 0 — cocina (BOD-001):**
+
+1. WA: `INICIAR CONTEO BOD-001` (Jacky o staff cocina)
+2. Rellenar columna G en pestaña **CONTEO**
+3. Menú **Conteo → Enviar a Tatami** → aprobar → contabilizar
+4. `python recalcular_stock_sheets.py --produccion`
+5. `python calcular_par_levels.py --produccion`
+
+**Semana 1 — externa (BOD-005):**
+
+1. `INICIAR CONTEO BOD-005` → pestaña **CONTEO_EXTERNA** (ciclo aparte del 001)
+2. Mismo flujo enviar / aprobar / contabilizar / recalcular
+
+**Pedidos sugeridos (manual hasta alertas automáticas):**
+
+```bash
+python generar_ordenes_compra.py --tipo cocina --txt exports/ordenes_cocina.txt
+```
+
+**Encender alertas (solo tras stock confiable):**
+
+En `BD_CONFIG`: `area_cocina_inventario_gestionado=true`, `alert_cocina_wa_activo=true`.  
+Pedidos automáticos: `alert_pedidos_cocina_activo=true` + módulo WA (pendiente, espejo de barra).  
+Producción: `TATAMI_PERIODO_PRUEBAS_COCINA=0` en Railway.
 
 ---
 

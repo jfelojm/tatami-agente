@@ -39,6 +39,22 @@ class TestPermisosCocina(unittest.TestCase):
             self.assertFalse(ec.autorizado_tool(tel, "stock_critico"))
             self.assertTrue(ec.puede_trasladar(tel))
 
+    def test_staff_cocina_puede_producir_en_001_y_005(self) -> None:
+        with self._cfg_sin_bd(), patch.dict(
+            ec.ROLE_ALLOWLIST_ENV,
+            {"STAFF_COCINA": "ALLOWLIST_STAFF_COCINA"},
+            clear=False,
+        ), patch.dict(
+            "os.environ",
+            {"ALLOWLIST_STAFF_COCINA": STAFF_COCINA},
+            clear=False,
+        ), patch("config_sheets.cfg", return_value="BOD-001"):
+            ec._phone_to_roles.cache_clear()
+            permitidas = ec.bodegas_permitidas_produccion_sub(STAFF_COCINA)
+            self.assertIn("BOD-001", permitidas)
+            self.assertIn("BOD-005", permitidas)
+            self.assertIsNone(ec.validar_bodega_produccion_sub(STAFF_COCINA, "BOD-005"))
+
     def test_staff_cocina_sin_ventas_con_traslado(self) -> None:
         with self._cfg_sin_bd(), patch.dict(
             ec.ROLE_ALLOWLIST_ENV,
@@ -56,6 +72,22 @@ class TestPermisosCocina(unittest.TestCase):
             self.assertTrue(ec.puede_trasladar(tel))
             self.assertTrue(ec.autorizado_tool(tel, "produccion_subreceta"))
             self.assertTrue(ec.autorizado_tool(tel, "listar_subrecetas"))
+
+    def test_staff_cocina_puede_iniciar_conteo(self) -> None:
+        with self._cfg_sin_bd(), patch.dict(
+            ec.ROLE_ALLOWLIST_ENV,
+            {"STAFF_COCINA": "ALLOWLIST_STAFF_COCINA"},
+            clear=False,
+        ), patch.dict(
+            "os.environ",
+            {"ALLOWLIST_STAFF_COCINA": STAFF_COCINA},
+            clear=False,
+        ), patch(
+            "config_sheets.cfg",
+            return_value="ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,ADMIN_COMPRAS",
+        ):
+            ec._phone_to_roles.cache_clear()
+            self.assertTrue(ec.autorizado_tool(STAFF_COCINA, "conteo_iniciar"))
 
     def test_jefe_barra_mantiene_ventas_y_stock(self) -> None:
         with self._cfg_sin_bd(), patch.dict(

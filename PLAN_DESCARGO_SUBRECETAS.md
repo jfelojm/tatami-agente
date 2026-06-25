@@ -148,13 +148,11 @@ CLI / WA: `registrar_produccion_subreceta.py` (pendiente implementar).
 
 ---
 
-## 7. PAR y consumo teórico (fase opcional)
+## 7. PAR y consumo teórico
 
-`calcular_par_levels.py` hoy suma solo MPs en `BD_RECETAS_DETALLE`.
+`calcular_par_levels.py` suma MPs directas en carta **y** explota líneas SUB → MPs vía `subreceta_consumo_mp.explotar_subreceta_a_mp` (cadena anidada en `BD_SUBRECETAS_DETALLE`). También acumula consumo del pseudo-MP `SUB-*` para stock de semis.
 
-**Mejora:** función `explotar_subreceta_a_mp(cod_sub, cantidad, factor=1)` recursiva con ciclo detectado → sumar MPs para planeación sin movimientos.
-
-Prioridad **después** del descargo SUB en ventas.
+Prioridad después del descargo SUB en ventas: tool `consumo_ingrediente_recetas` con flag `incluir_subrecetas`.
 
 ---
 
@@ -202,7 +200,7 @@ Auditoría: script `auditar_platos_sin_descargo_sub.py` — platos con líneas S
 
 ### Sprint 4 — Planeación
 
-- [ ] PAR recursivo SUB→MP
+- [x] PAR recursivo SUB→MP (`subreceta_consumo_mp.py`)
 - [ ] Actualizar `consumo_ingrediente_recetas`
 
 ---

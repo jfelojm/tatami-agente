@@ -22,6 +22,8 @@ def sheet_name_por_bodega(cod_bodega: str) -> str:
     cod = (cod_bodega or "").strip().upper()
     if cod == "BOD-002":
         return "CONTEO_BARRA"
+    if cod == "BOD-005":
+        return "CONTEO_EXTERNA"
     return "CONTEO"
 
 

@@ -1,33 +1,29 @@
 /**
- * tatami_staging.gs — SCRIPT COMPLETO DEL LIBRO STAGING
+ * tatami_staging.gs — SCRIPT MASTERS SHEETS (staging)
  * =============================================================================
  * Incluye: promoción al maestro, tests, facturas manuales y traslados masivos.
  *
- * LIBRO STAGING (pegar aquí, NO en el maestro):
+ * LIBRO STAGING (pegar aquí, NO en el maestro de datos):
  *   https://docs.google.com/spreadsheets/d/1TJu70BNG4i3it4y51Eg3YlDNswLkh1QGRt6v-qAyexU/edit
  *
- * INSTALACIÓN (una vez):
- *   1. Abre el libro STAGING → Extensiones → Apps Script
+ * INSTALACIÓN:
+ *   1. Abre Masters Sheets / STAGING → Extensiones → Apps Script
  *   2. Borra todos los archivos .gs viejos
- *   3. Crea UN solo archivo y pega TODO este script (Ctrl+A aquí, Ctrl+V allá)
- *   4. Proyecto → Configuración → activar appsscript.json
- *      → pegar scripts_apps_script/appsscript.json del repo
- *   5. Propiedades del script (⚙️):
- *        TATAMI_FACTURA_API_URL  = https://tatami-agente-production.up.railway.app/api/factura_manual/enviar
- *        TATAMI_FACTURA_SECRET   = (FACTURA_SHEETS_INGEST_SECRET en Railway)
- *        TATAMI_TRASLADO_API_URL = https://tatami-agente-production.up.railway.app/api/traslado_masivo/enviar
- *        TATAMI_TRASLADO_SECRET  = (TRASLADO_SHEETS_INGEST_SECRET en Railway)
- *   6. Ejecutar ▶ solicitarPermisosExternos → aceptar permisos
- *   7. Guardar (Ctrl+S) → recargar el Sheets (F5)
+ *   3. Un solo archivo: pega TODO este script
+ *   4. Propiedades del script:
+ *        TATAMI_FACTURA_API_URL  = .../api/factura_manual/enviar
+ *        TATAMI_FACTURA_SECRET   = FACTURA_SHEETS_INGEST_SECRET
+ *        TATAMI_TRASLADO_API_URL = .../api/traslado_masivo/enviar
+ *        TATAMI_TRASLADO_SECRET  = TRASLADO_SHEETS_INGEST_SECRET
+ *   5. Ejecutar solicitarPermisosExternos → Guardar → F5
  *
- * HOJAS (crear con Python en tu PC):
+ * HOJAS (Python):
  *   python setup_ingreso_factura_manual.py
  *   python setup_ingreso_traslado_masivo.py
  *
- * MENÚS que deben aparecer:
- *   🍱 Tatami Admin | 🧪 Tatami Tests | 🍣 Tatami Facturas | 📦 Tatami Traslados
+ * MENÚS: Tatami Admin | Tatami Tests | Tatami Facturas | Tatami Traslados
  *
- * Master ID: 1rTVMfsOBssx2R-Sbuj1SRx9NZSd_hinEa9IK_ahGqZY
+ * Master ID destino: 1rTVMfsOBssx2R-Sbuj1SRx9NZSd_hinEa9IK_ahGqZY
  * =============================================================================
  */
 
@@ -64,7 +60,6 @@ function onOpen() {
     .addItem("▶ TEST COMPLETO", "testCompleto")
     .addToUi();
 
-  // Ingreso manual de facturas
   ui.createMenu("🍣 Tatami Facturas")
     .addItem("🔐 Autorizar conexión con agente", "solicitarPermisosExternosMenu")
     .addItem("🔍 Verificar URL y proveedores", "verificarConexionFactura")

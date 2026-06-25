@@ -14,16 +14,9 @@ from dias_cobertura_par import (
     invalidar_cache_dias_cobertura,
     resolver_dias_cobertura_mp,
 )
-from descargo_subreceta import calcular_consumo_sub, norm_cod_sub, pseudo_mp_cod
+from descargo_subreceta import calcular_consumo_sub, pseudo_mp_cod
 from recetas_detalle import es_linea_mp, es_linea_subreceta, norm_cod_receta
-from subrecetas_detalle import (
-    agrupar_detalle_por_padre,
-    cargar_bd_subrecetas,
-    cargar_bd_subrecetas_detalle,
-    es_linea_mp_detalle,
-    es_linea_subreceta_hijo,
-    orden_produccion,
-)
+from subreceta_consumo_mp import cargar_mp_por_unidad_subreceta, explotar_subreceta_a_mp
 from ventas_smartmenu import estado_documento_excluye_neto_operativo
 from google_credentials import google_credentials
 
@@ -101,61 +94,6 @@ def _cargar_recetas_detalle() -> list[dict]:
     return out
 
 
-def _cargar_mp_por_unidad_subreceta() -> dict[str, dict[str, float]]:
-    """
-    cod_sub (normalizado) -> cod_mp -> cantidad MP por 1 unidad de salida de la subreceta.
-    Expande MPs directas y subrecetas hijas (anidadas), en orden topológico.
-    """
-    cab = cargar_bd_subrecetas()
-    por_padre = agrupar_detalle_por_padre(cargar_bd_subrecetas_detalle())
-    cab_all = {c: cab[c] for c in por_padre if c in cab}
-
-    rend_por_sub: dict[str, float] = {}
-    for cod, info in cab.items():
-        nk = norm_cod_sub(cod)
-        if nk:
-            rend_por_sub[nk] = _safe_float(info.get("rendimiento_estandar"))
-
-    try:
-        orden = orden_produccion(cab_all, por_padre)
-    except ValueError as e:
-        print(f"  WARN orden subrecetas: {e}")
-        orden = []
-    restantes = sorted(set(por_padre) - set(orden))
-    orden = orden + restantes
-
-    out: dict[str, dict[str, float]] = {}
-    for cod_sub in orden:
-        nk = norm_cod_sub(cod_sub)
-        if not nk:
-            continue
-        rend = rend_por_sub.get(nk, 0.0)
-        if rend <= 0:
-            continue
-        mp_map: dict[str, float] = defaultdict(float)
-        for ln in por_padre.get(cod_sub, []):
-            cant = _safe_float(ln.get("cantidad"))
-            if cant <= 0:
-                continue
-            if es_linea_mp_detalle(ln):
-                mp = norm_mp(ln.get("cod_mp_sistema") or "")
-                if not mp:
-                    continue
-                merma = _safe_float(ln.get("merma_pct"))
-                mp_map[mp] += (cant / rend) * (1.0 + merma)
-            elif es_linea_subreceta_hijo(ln):
-                hijo = norm_cod_sub(ln.get("cod_subreceta_hijo") or "")
-                hijo_map = out.get(hijo, {})
-                if not hijo_map:
-                    continue
-                factor = cant / rend
-                for mp, per_unit in hijo_map.items():
-                    mp_map[mp] += factor * per_unit
-        if mp_map:
-            out[nk] = dict(mp_map)
-    return out
-
-
 def consumo_diario_por_cod_mp(
     recetas: list[dict] | None = None, *, verbose: bool = False
 ) -> dict[str, float]:
@@ -196,7 +134,7 @@ def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dic
     if verbose:
         print(f"  {len(todas_ventas)} ventas cargadas")
 
-    mp_sub_unit = _cargar_mp_por_unidad_subreceta()
+    mp_sub_unit = cargar_mp_por_unidad_subreceta()
     if verbose:
         print(f"  {len(mp_sub_unit)} subrecetas con MPs expandidas")
 
@@ -242,17 +180,16 @@ def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dic
                     cantidad * gramaje * pct_aplicacion * (1 + merma_pct)
                 )
             elif es_linea_subreceta(ing):
-                sub = norm_cod_sub(ing.get("cod_subreceta") or "")
+                sub = (ing.get("cod_subreceta") or "").strip()
                 units_sub = calcular_consumo_sub(ing, cantidad)
                 if units_sub > 0:
                     pseudo = pseudo_mp_cod(sub)
                     if pseudo:
                         consumo_total[pseudo] += units_sub
-                mp_map = mp_sub_unit.get(sub, {})
-                if not mp_map or units_sub <= 0:
-                    continue
-                for mp, per_unit in mp_map.items():
-                    consumo_total[mp] += units_sub * per_unit
+                    for mp, qty in explotar_subreceta_a_mp(
+                        sub, units_sub, mp_por_unidad=mp_sub_unit
+                    ).items():
+                        consumo_total[mp] += qty
 
     dias_activos = len(fechas_activas)
     if verbose:
@@ -303,6 +240,9 @@ def calcular_par_levels(dry_run: bool = False):
       - consumo_diario_calculado
       - par_level = consumo_diario_calculado × días cobertura
         (BD_MP_SISTEMA.dias_cobertura_par → frecuencia proveedor → BD_CONFIG; SUB-* config)
+
+    Consumo: MPs directas en carta + pseudo-MP SUB-* + MPs de la cadena de subrecetas
+    (explotar_subreceta_a_mp / BD_SUBRECETAS_DETALLE anidado).
 
     Requiere columnas en BD_MP_SISTEMA:
       - cod_mp_sistema
