@@ -109,11 +109,12 @@ MSG_ERROR_PROCESO = (
 )
 MSG_AYUDA_SUBRECETA = (
     "Subrecetas — ¿qué necesitas?\n"
+    "1) Responde *BARRA* o *COCINA* (o «producir cocina» / «producir barra»)\n"
+    "2) Luego dime el nombre o código de la subreceta\n\n"
+    "También puedes:\n"
     "• *Catálogo:* lista subrecetas\n"
-    "• *Producir cocina:* PRODUCIR SUB 006 BOD-001 (pan bao)\n"
-    "• *Producir barra:* PRODUCIR SUB 051 BOD-002\n"
     "• *Costo:* costo de salsa ponzu\n"
-    "Responde *BARRA* o *COCINA* para elegir área de producción."
+    "• *Comando directo:* PRODUCIR SUB 006 BOD-001 (pan bao)"
 )
 MSG_TIPO_NO_SOPORTADO = (
     "Solo procesamos mensajes de texto (y fotos/PDF de facturas).\n"
@@ -128,9 +129,9 @@ def _msg_menu_produccion_area(area: str) -> str:
         return (
             "Producción *cocina* (BOD-001). Dime el nombre o código:\n"
             "• pan bao (006) | salsa ponzu (016) | kimchi (036)\n"
-            "• mayonesa ponzu (017) | salsa gochuyan (009) | char siu (055)\n"
-            "Ejemplo: PRODUCIR SUB 006 BOD-001\n"
-            "o: preparar pan bao"
+            "• brigadeiro (049) | torta chocolate (061) | char siu (055)\n"
+            "Escribe cualquier nombre de subreceta o código (ej. brigadeiro, 049)\n"
+            "Ejemplo: PRODUCIR SUB 006 BOD-001 · preparar pan bao"
         )
     return (
         "Producción *barra* (BOD-002). Dime el nombre o código:\n"
@@ -315,7 +316,7 @@ def _msg_pedir_nombre_sub(area: str) -> str:
     bod = _bodega_por_area(area) or "BOD-001"
     return (
         f"Producción *{area}* ({bod}). Dime nombre o código y cantidad.\n"
-        f"Ejemplo: preparar aceite jengibre 200gr\n"
+        f"Ejemplo: brigadeiro · preparar aceite jengibre 200gr\n"
         f"o: PRODUCIR SUB 044 {bod}"
     )
 
@@ -478,14 +479,111 @@ def _texto_sin_cantidad_sub(texto: str) -> str:
 
 def _coincide_nombre_sub(nombre: str, texto: str) -> bool:
     nt = _tokens_sub_nombre(nombre)
-    tt = set(_tokens_sub_nombre(_texto_sin_cantidad_sub(texto)))
+    tt = _tokens_sub_nombre(_texto_sin_cantidad_sub(texto))
     if not nt or not tt:
         return False
-    if all(tok in tt for tok in nt):
+    tt_set = set(tt)
+    nt_set = set(nt)
+    if all(tok in tt_set for tok in nt):
+        return True
+    # Nombre parcial del usuario (ej. «brigadeiro» → «brigadeiro de pistacho»)
+    if all(tok in nt_set for tok in tt):
         return True
     nf = "".join(nt)
-    tf = "".join(_tokens_sub_nombre(_texto_sin_cantidad_sub(texto)))
+    tf = "".join(tt)
     return len(nf) >= 4 and nf in tf
+
+
+_CONSULTA_NO_PROD_RE = re.compile(
+    r"\b(costo|precio|stock|ventas?|vendidos?|consumo|ingredientes?|receta|gramajes?|"
+    r"valoriz|inventar|kardex|compras?|factura|cuanto|c[uú]anto)\b",
+    re.I,
+)
+
+
+def _es_consulta_no_produccion(texto: str) -> bool:
+    """Consultas informativas — no interpretar como nombre de subreceta en flujo producción."""
+    return bool(_CONSULTA_NO_PROD_RE.search(texto or ""))
+
+
+def _filtrar_subs_por_area(
+    matches: list[tuple[str, dict, list]],
+    area: str | None,
+) -> list[tuple[str, dict, list]]:
+    if not area:
+        return matches
+    from codigos_subreceta import cod_sub_canonico
+    from subrecetas_bodegas_stock import SUBRECETAS_BARRA
+
+    out: list[tuple[str, dict, list]] = []
+    for cod_key, info, lineas in matches:
+        canon = cod_sub_canonico(cod_key)
+        if area == "barra" and canon in SUBRECETAS_BARRA:
+            out.append((cod_key, info, lineas))
+        elif area == "cocina" and canon not in SUBRECETAS_BARRA:
+            out.append((cod_key, info, lineas))
+    return out
+
+
+def _buscar_cods_subreceta_por_nombre(texto: str, area: str | None = None) -> list[str]:
+    """Resuelve códigos SUB desde nombre parcial (BD_SUBRECETAS)."""
+    from codigos_subreceta import cod_sub_sin_prefijo
+
+    q = re.sub(r"\s+", " ", (texto or "").strip().lower())
+    if not q or len(q) < 2 or _es_consulta_no_produccion(q):
+        return []
+
+    matches = _filtrar_subs_por_area(_buscar_subrecetas(nombre_subreceta=q), area)
+    if len(matches) == 1:
+        return [cod_sub_sin_prefijo(matches[0][0]).zfill(3)]
+
+    if len(matches) > 1:
+        words = _tokens_sub_nombre(q)
+        best = [
+            row
+            for row in matches
+            if all(w in (row[1].get("nombre_subreceta") or "").lower() for w in words)
+        ]
+        pick = best if len(best) == 1 else matches
+        if pick:
+            return [cod_sub_sin_prefijo(pick[0][0]).zfill(3)]
+
+    words = _tokens_sub_nombre(q)
+    if not words:
+        return []
+    hits: dict[str, tuple[str, dict, list]] = {}
+    for w in words:
+        if len(w) < 3:
+            continue
+        for row in _filtrar_subs_por_area(_buscar_subrecetas(nombre_subreceta=w), area):
+            hits[row[0]] = row
+    if not hits:
+        return []
+    if len(hits) == 1:
+        return [cod_sub_sin_prefijo(next(iter(hits))).zfill(3)]
+    best = [
+        row
+        for row in hits.values()
+        if all(w in (row[1].get("nombre_subreceta") or "").lower() for w in words)
+    ]
+    if len(best) == 1:
+        return [cod_sub_sin_prefijo(best[0][0]).zfill(3)]
+    return []
+
+
+def _msg_no_encontre_sub_produccion(area: str, texto: str) -> str:
+    bod = _bodega_por_area(area) or "BOD-001"
+    nom = (texto or "").strip()
+    return (
+        f"No encontré subreceta «{nom}» en *{area}* ({bod}).\n"
+        "Prueba el código (ej. 049) o escribe *lista subrecetas*.\n"
+        f"Ejemplo: PRODUCIR SUB 049 {bod} · preparar pan bao"
+    )
+
+
+def _prod_ctx_esperando_sub(wa_id: str | None) -> bool:
+    ctx = _prod_ctx_get(wa_id)
+    return bool(ctx.get("awaiting_sub_name") and ctx.get("area"))
 
 
 def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | None:
@@ -4126,6 +4224,7 @@ _COCINA_ALIASES: list[tuple[tuple[str, ...], str]] = [
     (("salsa drunken",), "060"),
     (("aceite jengibre", "aceite de jengibre"), "044"),
     (("torta de chocolate", "tortas de chocolate", "torta chocolate", "tortas de choclate", "torta choclate"), "061"),
+    (("brigadeiro", "brigadeiro pistacho", "brigadeiro de pistacho"), "049"),
 ]
 
 
@@ -5193,14 +5292,28 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
         return None
     if _es_mensaje_traslado(raw):
         return None
+    if _es_consulta_no_produccion(raw):
+        return None
     t = raw.lower()
+    ctx_prod = _prod_ctx_get(wa_id or "")
     cods = _match_sub_codigos_en_texto(raw)
+    if not cods and ctx_prod.get("awaiting_sub_name"):
+        cods = _buscar_cods_subreceta_por_nombre(raw, area=ctx_prod.get("area"))
     parece_batch = (
         _texto_parece_batch(t)
         or bool(cods)
         or (
             _es_intento_produccion(raw, wa_id)
-            and bool(_prod_ctx_get(wa_id or "").get("area"))
+            and bool(ctx_prod.get("area"))
+        )
+        or (
+            ctx_prod.get("awaiting_sub_name")
+            and bool(cods)
+        )
+        or (
+            ctx_prod.get("awaiting_sub_name")
+            and not _es_consulta_no_produccion(raw)
+            and len(raw.split()) <= 6
         )
     )
     if not parece_batch:
@@ -5282,10 +5395,19 @@ def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
                 "area": area,
             }
 
-    if prod_sub is None and ctx.get("area"):
+    if prod_sub is None and ctx.get("area") and not _es_consulta_no_produccion(texto):
+        area = ctx.get("area")
         cods = _match_sub_codigos_en_texto(texto)
+        if not cods and (
+            ctx.get("awaiting_sub_name") or not _es_consulta_no_produccion(texto)
+        ):
+            cods = _buscar_cods_subreceta_por_nombre(texto, area=area)
         cantidad = _extraer_cantidad_sub(texto, cod_sub=cods[0] if cods else None)
-        if cods and (cantidad is not None or _es_intento_produccion(texto)):
+        if cods and (
+            cantidad is not None
+            or _es_intento_produccion(texto)
+            or ctx.get("awaiting_sub_name")
+        ):
             area = _resolver_area_produccion(wa_id, texto, cods=cods)
             bodega, bodega_explicita = _resolver_bodega_produccion(
                 wa_id, texto, area=area or ctx.get("area")
@@ -5301,6 +5423,8 @@ def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
 
     if prod_sub is not None:
         _prod_ctx_update_from_parse(wa_id, texto, prod_sub)
+        if prod_sub.get("cods"):
+            _prod_ctx_touch(wa_id, awaiting_sub_name=False)
     return prod_sub
 
 
@@ -5913,7 +6037,7 @@ async def _manejar_produccion_sub(
             )
             ctx = _prod_ctx_get(wa_id)
             if area in ("barra", "cocina"):
-                _prod_ctx_touch(wa_id, area=area)
+                _prod_ctx_touch(wa_id, area=area, awaiting_sub_name=True)
                 if ctx.get("catalog_seen"):
                     await enviar_mensaje_meta(wa_id, _msg_pedir_nombre_sub(area))
                 else:
@@ -5978,6 +6102,7 @@ async def _manejar_produccion_sub(
             if prod_sub["confirmar"]:
                 _pending_prod_sub.pop(wa_id, None)
                 _pending_prod_area.pop(wa_id, None)
+                _prod_ctx_touch(wa_id, awaiting_sub_name=False)
             else:
                 _pending_prod_sub[wa_id] = {
                     "cods": prod_sub["cods"],
@@ -6154,7 +6279,7 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     return
                 area = _parse_area_produccion(texto)
                 if area:
-                    _prod_ctx_touch(wa_id, area=area)
+                    _prod_ctx_touch(wa_id, area=area, awaiting_sub_name=True)
                     ctx = _prod_ctx_get(wa_id)
                     if ctx.get("catalog_seen"):
                         await enviar_mensaje_meta(wa_id, _msg_pedir_nombre_sub(area))
@@ -6434,6 +6559,16 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 print(f"[Meta] {wa_id}: route=traslado (fallback pre-LLM)")
                 await _manejar_traslado_mp_wa(wa_id, texto, msg)
                 return
+
+            if _prod_ctx_esperando_sub(wa_id) and not parece_nueva_operacion(texto):
+                if not _es_consulta_no_produccion(texto):
+                    ctx_espera = _prod_ctx_get(wa_id)
+                    area_espera = ctx_espera.get("area") or "cocina"
+                    print(f"[Meta] {wa_id}: route=produccion_sub_no_match")
+                    await enviar_mensaje_meta(
+                        wa_id, _msg_no_encontre_sub_produccion(area_espera, texto)
+                    )
+                    return
 
             print(f"[Meta] {wa_id}: route=llm")
             await _feedback_procesando(wa_id, msg)
