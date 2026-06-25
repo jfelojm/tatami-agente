@@ -349,6 +349,15 @@ def listar_facturas_inventario_dashboard(
     return out
 
 
+def _fecha_mov(row: dict) -> str:
+    return (str(row.get("fecha") or ""))[:10]
+
+
+def _filtrar_mov_por_rango(rows: list[dict], desde: date, hasta: date) -> list[dict]:
+    ds, hs = desde.isoformat(), hasta.isoformat()
+    return [r for r in rows if ds <= _fecha_mov(r) <= hs]
+
+
 def total_compras_dashboard(
     rows: list[dict],
     facturas: list[dict],
@@ -379,45 +388,32 @@ def build_resumen_compras(
     mp_area = _mapa_mp_area(rows_mp)
     prov_inv = _mapa_proveedores_inventario(rows_prov)
 
-    rows = query_mov_fn(desde.isoformat(), hasta.isoformat())
+    ini_a, fin_a = periodo_anterior(desde, hasta)
+    ini_y, fin_y = mismo_periodo_anio_anterior(desde, hasta)
+    ini_ytd, fin_ytd = acumulado_anio(hasta)
+    wide_desde = min(desde, ini_a, ini_y, ini_ytd)
+    wide_hasta = max(hasta, fin_a, fin_y, fin_ytd)
+    all_rows = query_mov_fn(wide_desde.isoformat(), wide_hasta.isoformat())
     facturas = query_facturas_fn(desde.isoformat(), hasta.isoformat())
     fill_labels = _etiquetas_periodo(desde, hasta, agrup)
+
+    def slice_rows(ini: date, fin: date) -> list[dict]:
+        return _filtrar_mov_por_rango(all_rows, ini, fin)
+
+    kw = dict(
+        facturas=facturas,
+        prov_inv=prov_inv,
+        mps_validos=mps_validos,
+        mp_area=mp_area,
+        agrup=agrup,
+        area_filtro=area,
+    )
     actual = _metricas_compras(
-        rows, facturas, prov_inv, mps_validos, mp_area, agrup=agrup, area_filtro=area, fill_labels=fill_labels
+        slice_rows(desde, hasta), fill_labels=fill_labels, **kw
     )
-
-    ini_a, fin_a = periodo_anterior(desde, hasta)
-    ant = _metricas_compras(
-        query_mov_fn(ini_a.isoformat(), fin_a.isoformat()),
-        facturas,
-        prov_inv,
-        mps_validos,
-        mp_area,
-        agrup=agrup,
-        area_filtro=area,
-    )
-
-    ini_y, fin_y = mismo_periodo_anio_anterior(desde, hasta)
-    ya = _metricas_compras(
-        query_mov_fn(ini_y.isoformat(), fin_y.isoformat()),
-        facturas,
-        prov_inv,
-        mps_validos,
-        mp_area,
-        agrup=agrup,
-        area_filtro=area,
-    )
-
-    ini_ytd, fin_ytd = acumulado_anio(hasta)
-    ytd = _metricas_compras(
-        query_mov_fn(ini_ytd.isoformat(), fin_ytd.isoformat()),
-        facturas,
-        prov_inv,
-        mps_validos,
-        mp_area,
-        agrup=agrup,
-        area_filtro=area,
-    )
+    ant = _metricas_compras(slice_rows(ini_a, fin_a), **kw)
+    ya = _metricas_compras(slice_rows(ini_y, fin_y), **kw)
+    ytd = _metricas_compras(slice_rows(ini_ytd, fin_ytd), **kw)
 
     parciales = sum(1 for f in facturas if (f.get("estado") or "").upper() == "PARCIAL")
 

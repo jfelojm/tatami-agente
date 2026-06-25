@@ -17,6 +17,7 @@ from supabase import create_client
 
 from dashboard_services.compras import build_resumen_compras
 from dashboard_services.confianza import build_confianza_inventario
+from dashboard_services.dashboard_cache import get as cache_get, make_key, set as cache_set
 from dashboard_services.inventario_vivo import build_inventario_vivo
 from dashboard_services.meta import meta_dashboard
 from dashboard_services.rentabilidad import build_rentabilidad_from_catalog
@@ -945,12 +946,17 @@ def dashboard_compras(
     hasta = _sanitize_fecha(hasta)
     if not desde or not hasta:
         raise HTTPException(status_code=400, detail="desde y hasta son obligatorios")
+    area_norm = (area or "").upper() or None
+    cache_key = make_key("compras", desde=desde, hasta=hasta, agrup=agrup, area=area_norm or "")
+    cached = cache_get(cache_key)
+    if cached is not None:
+        return _json_no_store(cached)
     try:
         rows_mp = leer_bd_mp_sistema()
         rows_prov = leer_bd_prov()
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"No se pudo leer Sheets: {e}") from e
-    return build_resumen_compras(
+    result = build_resumen_compras(
         query_mov_fn=lambda d, h: _query_mov_inventario(sb, desde=d, hasta=h),
         query_facturas_fn=lambda d, h: _query_facturas_procesadas(sb, desde=d, hasta=h),
         rows_mp=rows_mp,
@@ -958,8 +964,10 @@ def dashboard_compras(
         desde=date.fromisoformat(desde),
         hasta=date.fromisoformat(hasta),
         agrup=agrup,
-        area=(area or "").upper() or None,
+        area=area_norm,
     )
+    cache_set(cache_key, result)
+    return _json_no_store(result)
 
 
 @router.get("/api/dashboard/inventario/vivo")
@@ -1003,6 +1011,18 @@ def dashboard_rentabilidad(
         pv_filtros = _parse_punto_venta_query(punto_venta)
         cat_filtros = [_norm_key(c) for c in _parse_list_query(categoria)]
         platos_filtro = _parse_list_query(plato)
+        cache_key = make_key(
+            "rentabilidad",
+            desde=desde,
+            hasta=hasta,
+            agrup=agrup,
+            pv=",".join(sorted(pv_filtros or [])),
+            cat=",".join(sorted(cat_filtros)),
+            plato=",".join(sorted(platos_filtro)),
+        )
+        cached = cache_get(cache_key)
+        if cached is not None:
+            return _json_no_store(cached)
         ventas = _filtrar_ventas_catalogo(
             _query_hist_ventas(sb, desde=desde, hasta=hasta),
             catalogo,
@@ -1023,7 +1043,7 @@ def dashboard_rentabilidad(
             raise HTTPException(status_code=503, detail=f"No se pudo leer Sheets: {e}") from e
         facturas = _query_facturas_procesadas(sb, desde=desde, hasta=hasta)
         compras_total = total_compras_dashboard(entradas, facturas, rows_mp, rows_prov)
-        return build_rentabilidad_from_catalog(
+        result = build_rentabilidad_from_catalog(
             rows_ventas=ventas,
             rows_entrada=entradas,
             catalogo=catalogo,
@@ -1034,6 +1054,8 @@ def dashboard_rentabilidad(
             agrup=agrup,
             costo_compras_dashboard=compras_total,
         )
+        cache_set(cache_key, result)
+        return _json_no_store(result)
     except HTTPException:
         raise
     except Exception as e:
