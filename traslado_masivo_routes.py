@@ -178,7 +178,7 @@ def _procesar_traslado_masivo(payload: dict):
     err_count = 0
     cods_ok: set[str] = set()
 
-    for ln in lineas:
+    for idx, ln in enumerate(lineas, start=1):
         producto = str(ln.get("producto") or ln.get("descripcion") or "").strip()
         cod_raw = str(ln.get("cod_mp_sistema") or ln.get("cod_mp") or "").strip()
         cod_buscar = cod_raw or _extraer_cod_producto(producto)
@@ -270,6 +270,7 @@ def _procesar_traslado_masivo(payload: dict):
                 costo_unitario_ref=costo_ref,
                 registrado_por=f"SHEETS:{usuario}",
                 recalcular_sheets=False,
+                secuencia=idx,
             )
             res["estado"] = "OK"
             res["cod_mov"] = mov.get("cod_mov")

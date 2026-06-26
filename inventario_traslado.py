@@ -99,6 +99,7 @@ def registrar_traslado_mp(
     registrado_por: str = "AGENTE_WHATSAPP",
     recalcular_sheets: bool = True,
     tz: datetime | None = None,
+    secuencia: int = 0,
 ) -> dict[str, Any]:
     """
     Persiste traslado en Supabase y opcionalmente recalcula stock/costo en Sheets.
@@ -115,6 +116,10 @@ def registrar_traslado_mp(
 
     now = tz or datetime.now(timezone.utc)
     cod_base = f"TRA-{now.strftime('%Y%m%d%H%M%S')}"
+    if secuencia > 0:
+        cod_base += f"-{secuencia:03d}"
+    else:
+        cod_base += f"-{now.microsecond:06d}"
     salida, entrada = construir_par_movimientos_traslado(
         cod_mp=cod_mp.strip(),
         nombre_mp=nombre_mp,

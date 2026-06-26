@@ -1202,10 +1202,12 @@ def _resolver_mp_por_nombre(
 
     nom = (nombre_mp or "").strip()
     cod_raw = _limpiar_cod_mp_usuario(cod_mp) if cod_mp else ""
+    cod_upper = cod_raw.upper()
 
-    sub_hit = _resolver_sub_mp_inventario(cod_raw or cod_mp, nom)
-    if sub_hit:
-        return sub_hit
+    if cod_upper.startswith("SUB-"):
+        sub_hit = _resolver_sub_mp_inventario(cod_raw, nom)
+        if sub_hit:
+            return sub_hit
 
     cod_confiable = (
         norm_mp(cod_raw) if cod_raw and _filas_mp_maestro(rows, cod_raw) else ""
@@ -1222,6 +1224,10 @@ def _resolver_mp_por_nombre(
             "cod_mp": cod_confiable,
             "nombre_mp": nombre or cod_confiable,
         }
+
+    sub_hit = _resolver_sub_mp_inventario(cod_raw or cod_mp, nom)
+    if sub_hit:
+        return sub_hit
 
     texto = nom or cod_raw
     if not texto or len(texto) < 2:
@@ -4292,7 +4298,7 @@ def _match_sub_codigos_en_texto(texto: str) -> list[str]:
             if _coincide_nombre_sub(phrase, t_clean):
                 hits.append((len(_tokens_sub_nombre(phrase)) * 10 + len(phrase), cod))
     if not hits and not _es_contexto_bodegas_no_sub(texto):
-        for m in re.finditer(r"(?:sub[- ]?)?(0\d{2})\b", t_clean, re.I):
+        for m in re.finditer(r"(?<!\d)(?:sub[- ]?)?(0\d{2})(?!\d)", t_clean, re.I):
             hits.append((3, m.group(1).zfill(3)))
     if not hits:
         return []
