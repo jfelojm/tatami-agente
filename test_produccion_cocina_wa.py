@@ -10,6 +10,7 @@ from whatsapp_webhook import (
     _msg_pedir_bodega_produccion,
     _necesita_pedir_bodega_produccion,
     _parse_bodega_produccion_texto,
+    _produccion_pendiente_obsoleta,
 )
 
 JEFE_COCINA = "593992911956"
@@ -149,6 +150,46 @@ class TestCantidadSueltaProduccion(unittest.TestCase):
         from whatsapp_webhook import _extraer_cantidad_sub
 
         self.assertIsNone(_extraer_cantidad_sub("producir sub 006", cod_sub="006"))
+
+
+class TestResolverProduccionNombre(unittest.TestCase):
+    def test_pendiente_obsoleta_si_nombre_distinto(self) -> None:
+        pending = {"cods": ["004"], "awaiting_bodega": True, "area": "cocina"}
+        with patch(
+            "whatsapp_webhook._resolver_cods_produccion_desde_texto",
+            return_value=(["068"], None),
+        ):
+            self.assertTrue(
+                _produccion_pendiente_obsoleta(
+                    pending,
+                    "Producir camaron caramelizado",
+                    "593987122959",
+                )
+            )
+
+    def test_pendiente_vigente_solo_bodega(self) -> None:
+        pending = {"cods": ["004"], "awaiting_bodega": True, "area": "cocina"}
+        with patch(
+            "whatsapp_webhook._resolver_cods_produccion_desde_texto",
+            return_value=([], None),
+        ):
+            self.assertFalse(
+                _produccion_pendiente_obsoleta(pending, "005", "593987122959")
+            )
+
+    @patch(
+        "whatsapp_webhook._resolver_cods_produccion_desde_texto",
+        return_value=(["004"], None),
+    )
+    def test_batch_hamburguesa_resuelve_004(self, _mock) -> None:
+        from whatsapp_webhook import _parse_batch_lenguaje_natural
+
+        r = _parse_batch_lenguaje_natural(
+            "Producir 3000 de hamburguesa en 005", "593987122959"
+        )
+        self.assertIsNotNone(r)
+        self.assertEqual(r.get("cods"), ["004"])
+        self.assertEqual(r.get("cantidad"), 3000.0)
 
 
 if __name__ == "__main__":

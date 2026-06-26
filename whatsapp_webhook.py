@@ -708,6 +708,84 @@ async def _manejar_mensaje_conteo(wa_id: str, texto: str) -> None:
     await enviar_mensaje_meta(wa_id, _texto_resumen_conteo_wa(ciclos, bod=bod))
 
 
+_PRODUCCION_VERBOS_RE = re.compile(
+    r"\b(producir|produccion|producción|preparar|preparacion|preparación|"
+    r"registrar|hacer|batch|subreceta|sub)\w*",
+    re.I,
+)
+
+
+def _cod_sub_normalizado_3(cod: str | None) -> str:
+    c = (cod or "").replace("SUB-", "").replace("sub-", "").strip()
+    if c.isdigit():
+        return c.zfill(3)
+    return c
+
+
+def _fragmento_nombre_sub_en_texto(texto: str) -> str:
+    t = _texto_sin_cantidad_sub(_texto_sin_ref_bodega(texto or ""))
+    t = _PRODUCCION_VERBOS_RE.sub(" ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _texto_menciona_nombre_sub(texto: str) -> bool:
+    tokens = [
+        w
+        for w in _tokens_sub_nombre(_fragmento_nombre_sub_en_texto(texto))
+        if not re.fullmatch(r"\d+", w)
+    ]
+    return bool(tokens)
+
+
+def _resolver_cods_produccion_desde_texto(
+    texto: str,
+    wa_id: str | None = None,
+    *,
+    area: str | None = None,
+) -> tuple[list[str], list[tuple[str, str]] | None]:
+    """Resuelve códigos SUB desde texto; opciones si hay varias coincidencias."""
+    cods = _match_sub_codigos_en_texto(texto, wa_id)
+    if cods:
+        return cods, None
+    area_res = area or _resolver_area_produccion(wa_id, texto, cods=[])
+    cods = _buscar_cods_subreceta_por_nombre(texto, area=area_res)
+    if not cods:
+        frag = _fragmento_nombre_sub_en_texto(texto)
+        if frag and frag.lower() != (texto or "").strip().lower():
+            cods = _buscar_cods_subreceta_por_nombre(frag, area=area_res)
+    if len(cods) == 1:
+        return cods, None
+    if len(cods) > 1:
+        return cods, None
+    opciones = _buscar_opciones_subreceta(texto, area_res)
+    if len(opciones) == 1:
+        return [opciones[0][0]], None
+    if len(opciones) > 1:
+        return [], opciones
+    return [], None
+
+
+def _produccion_pendiente_obsoleta(pending: dict, texto: str, wa_id: str) -> bool:
+    """True si el usuario pide otra sub distinta a la pending (evita bucle en bodega)."""
+    if not pending:
+        return False
+    if not parece_nueva_operacion(texto):
+        return False
+    pend_cod = _cod_sub_normalizado_3((pending.get("cods") or [None])[0])
+    if not pend_cod:
+        return _texto_menciona_nombre_sub(texto)
+    nuevos, op = _resolver_cods_produccion_desde_texto(
+        texto, wa_id, area=pending.get("area")
+    )
+    if op:
+        return True
+    if nuevos and _cod_sub_normalizado_3(nuevos[0]) != pend_cod:
+        return True
+    if _texto_menciona_nombre_sub(texto) and not nuevos:
+        return True
+    return False
+
+
 def _tokens_sub_nombre(s: str) -> list[str]:
     t = _normaliza_busqueda_mp(s)
     t = re.sub(r"[^\w\s]", " ", t)
@@ -4588,6 +4666,7 @@ _COCINA_ALIASES: list[tuple[tuple[str, ...], str]] = [
     (("aceite jengibre", "aceite de jengibre"), "044"),
     (("torta de chocolate", "tortas de chocolate", "torta chocolate", "tortas de choclate", "torta choclate"), "061"),
     (("brigadeiro", "brigadeiro pistacho", "brigadeiro de pistacho"), "049"),
+    (("carne de hamburguesa", "carne hamburguesa", "hamburguesa"), "004"),
 ]
 
 
@@ -5680,15 +5759,27 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
         return None
     t = raw.lower()
     ctx_prod = _prod_ctx_get(wa_id or "")
-    cods = _match_sub_codigos_en_texto(raw, wa_id)
-    if not cods and ctx_prod.get("awaiting_sub_name"):
-        cods = _buscar_cods_subreceta_por_nombre(raw, area=ctx_prod.get("area"))
+    cods, opciones = _resolver_cods_produccion_desde_texto(
+        raw, wa_id, area=ctx_prod.get("area")
+    )
+    if opciones and len(opciones) > 1:
+        area0 = _resolver_area_produccion(wa_id, raw, cods=[])
+        return {
+            "ambiguo_sub": True,
+            "opciones": opciones,
+            "area": area0,
+            "confirmar": False,
+        }
     parece_batch = (
         _texto_parece_batch(t)
         or bool(cods)
         or (
             _es_intento_produccion(raw, wa_id)
             and bool(ctx_prod.get("area"))
+        )
+        or (
+            _es_intento_produccion(raw, wa_id)
+            and _texto_menciona_nombre_sub(raw)
         )
         or (
             ctx_prod.get("awaiting_sub_name")
@@ -5704,6 +5795,15 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
         return None
     area = _resolver_area_produccion(wa_id, raw, cods=cods)
     bodega, bodega_explicita = _resolver_bodega_produccion(wa_id, raw, area=area)
+    if not cods:
+        cods, opciones = _resolver_cods_produccion_desde_texto(raw, wa_id, area=area)
+        if opciones and len(opciones) > 1:
+            return {
+                "ambiguo_sub": True,
+                "opciones": opciones,
+                "area": area,
+                "confirmar": False,
+            }
     if not cods:
         return {
             "cods": [],
@@ -5765,7 +5865,18 @@ def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
         prod_sub = _parse_batch_lenguaje_natural(texto, wa_id)
 
     if (prod_sub is None or not prod_sub.get("cods")) and _es_orden_produccion_afirmativa(texto):
-        cods = _match_sub_codigos_en_texto(texto, wa_id) or list(ctx.get("last_cods") or [])
+        cods, opciones = _resolver_cods_produccion_desde_texto(
+            texto, wa_id, area=ctx.get("area")
+        )
+        if opciones and len(opciones) > 1:
+            return {
+                "ambiguo_sub": True,
+                "opciones": opciones,
+                "area": ctx.get("area") or "cocina",
+                "confirmar": False,
+            }
+        if not cods and not _texto_menciona_nombre_sub(texto):
+            cods = list(ctx.get("last_cods") or [])
         if cods:
             area = _resolver_area_produccion(wa_id, texto, cods=cods)
             cantidad = _extraer_cantidad_sub(texto, cod_sub=cods[0])
@@ -5781,11 +5892,14 @@ def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
 
     if prod_sub is None and ctx.get("area") and not _es_consulta_no_produccion(texto):
         area = ctx.get("area")
-        cods = _match_sub_codigos_en_texto(texto, wa_id)
-        if not cods and (
-            ctx.get("awaiting_sub_name") or not _es_consulta_no_produccion(texto)
-        ):
-            cods = _buscar_cods_subreceta_por_nombre(texto, area=area)
+        cods, opciones = _resolver_cods_produccion_desde_texto(texto, wa_id, area=area)
+        if opciones and len(opciones) > 1:
+            return {
+                "ambiguo_sub": True,
+                "opciones": opciones,
+                "area": area,
+                "confirmar": False,
+            }
         if not cods and ctx.get("awaiting_sub_name"):
             opciones = _buscar_opciones_subreceta(texto, area)
             if len(opciones) > 1:
@@ -6553,7 +6667,8 @@ async def _manejar_produccion_sub(
                     ),
                     avisos=stock_avisos,
                 )
-            if prod_sub["confirmar"]:
+            if prod_sub["confirmar"] and r.get("producidas"):
+                out = "✅ *Producción registrada*\n\n" + out
                 _pending_prod_sub.pop(wa_id, None)
                 _pending_prod_area.pop(wa_id, None)
                 _prod_ctx_touch(wa_id, awaiting_sub_name=False)
@@ -6736,61 +6851,65 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             # Producción pendiente de confirmación — no caer al LLM con «ai» u otros typos
             if wa_id in _pending_prod_sub:
                 pending = _pending_prod_sub[wa_id]
-                if pending.get("awaiting_bodega"):
-                    from estrategia_config import bodegas_permitidas_produccion_sub
-
-                    permitidas = bodegas_permitidas_produccion_sub(wa_id)
-                    cod_sub = (pending.get("cods") or [None])[0]
-                    bod = _parse_bodega_produccion_texto(
-                        texto,
-                        cod_sub_ignorar=str(cod_sub) if cod_sub else None,
-                        permitidas=permitidas,
-                    )
-                    cant = _extraer_cantidad_sub(
-                        texto, cod_sub=str(cod_sub) if cod_sub else None
-                    )
-                    if bod:
-                        prod = {
-                            **pending,
-                            "bodega": bod,
-                            "bodega_explicita": True,
-                            "confirmar": False,
-                        }
-                        prod.pop("awaiting_bodega", None)
-                        if cant is not None:
-                            prod["cantidad"] = cant
-                        _pending_prod_sub.pop(wa_id, None)
-                        print(f"[Meta] {wa_id}: route=produccion_bodega")
-                        await _manejar_produccion_sub(wa_id, prod, msg, texto=texto)
-                    else:
-                        await enviar_mensaje_meta(
-                            wa_id, _msg_pedir_bodega_produccion(wa_id, pending)
-                        )
-                    return
-                if _es_cancelacion_corta(texto):
+                if _produccion_pendiente_obsoleta(pending, texto, wa_id):
                     _pending_prod_sub.pop(wa_id, None)
-                    await enviar_mensaje_meta(wa_id, "Producción cancelada.")
-                    return
-                if _es_confirmacion_corta(texto):
-                    print(f"[Meta] {wa_id}: route=produccion_confirm")
-                    pend = _pending_prod_sub[wa_id]
-                    await _manejar_produccion_sub(
-                        wa_id,
-                        {
-                            **pend,
-                            "confirmar": True,
-                            "bodega_explicita": pend.get("bodega_explicita", True),
-                        },
-                        msg,
-                        texto=texto,
-                    )
-                    return
-                if not parece_nueva_operacion(texto):
-                    print(f"[Meta] {wa_id}: route=produccion_confirm_recordatorio")
-                    await enviar_mensaje_meta(
-                        wa_id, msg_recordatorio_confirmacion_produccion()
-                    )
-                    return
+                else:
+                    if pending.get("awaiting_bodega"):
+                        from estrategia_config import bodegas_permitidas_produccion_sub
+
+                        permitidas = bodegas_permitidas_produccion_sub(wa_id)
+                        cod_sub = (pending.get("cods") or [None])[0]
+                        bod = _parse_bodega_produccion_texto(
+                            texto,
+                            cod_sub_ignorar=str(cod_sub) if cod_sub else None,
+                            permitidas=permitidas,
+                        )
+                        cant = _extraer_cantidad_sub(
+                            texto, cod_sub=str(cod_sub) if cod_sub else None
+                        )
+                        if bod:
+                            prod = {
+                                **pending,
+                                "bodega": bod,
+                                "bodega_explicita": True,
+                                "confirmar": False,
+                            }
+                            prod.pop("awaiting_bodega", None)
+                            if cant is not None:
+                                prod["cantidad"] = cant
+                            _pending_prod_sub.pop(wa_id, None)
+                            print(f"[Meta] {wa_id}: route=produccion_bodega")
+                            await _manejar_produccion_sub(wa_id, prod, msg, texto=texto)
+                        else:
+                            await enviar_mensaje_meta(
+                                wa_id, _msg_pedir_bodega_produccion(wa_id, pending)
+                            )
+                        return
+                    if _es_cancelacion_corta(texto):
+                        _pending_prod_sub.pop(wa_id, None)
+                        _prod_ctx_touch(wa_id, last_cods=[])
+                        await enviar_mensaje_meta(wa_id, "Producción cancelada.")
+                        return
+                    if _es_confirmacion_corta(texto):
+                        print(f"[Meta] {wa_id}: route=produccion_confirm")
+                        pend = _pending_prod_sub[wa_id]
+                        await _manejar_produccion_sub(
+                            wa_id,
+                            {
+                                **pend,
+                                "confirmar": True,
+                                "bodega_explicita": pend.get("bodega_explicita", True),
+                            },
+                            msg,
+                            texto=texto,
+                        )
+                        return
+                    if not parece_nueva_operacion(texto):
+                        print(f"[Meta] {wa_id}: route=produccion_confirm_recordatorio")
+                        await enviar_mensaje_meta(
+                            wa_id, msg_recordatorio_confirmacion_produccion()
+                        )
+                        return
 
             # Menú principal (hola / ayuda / 1-5)
             if es_comando_menu(texto) or (

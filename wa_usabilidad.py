@@ -292,6 +292,8 @@ def es_confirmacion_corta(texto: str) -> bool:
 
 def es_cancelacion_corta(texto: str) -> bool:
     t = _normalizar_respuesta_corta(texto)
+    if t in ("no cancelar", "no canceles", "sin cancelar", "no cancela"):
+        return False
     return t in (
         "no",
         "cancelar",
