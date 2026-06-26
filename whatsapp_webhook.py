@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250626-prod-cocina-bodega-v36"
+TATAMI_WA_BUILD = "20250626-prod-confirm-bodega-v37"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -269,19 +269,70 @@ def _resolver_bodega_produccion(
     return default, False
 
 
-def _msg_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> str:
+def _bodegas_opciones_produccion(wa_id: str, area: str | None = None) -> list[str]:
     from estrategia_config import bodegas_permitidas_produccion_sub
 
-    cods = ", ".join(prod_sub.get("cods") or [])
-    cant = prod_sub.get("cantidad")
-    cant_txt = f" {cant:g}" if cant is not None else ""
-    permitidas = sorted(bodegas_permitidas_produccion_sub(wa_id))
+    permitidas = set(bodegas_permitidas_produccion_sub(wa_id))
+    if area == "cocina":
+        permitidas &= {"BOD-001", "BOD-005"}
+    elif area == "barra":
+        permitidas &= {"BOD-002"}
+    return sorted(permitidas)
+
+
+def _rendimiento_sub_display(cod: str) -> tuple[str, str]:
+    """(cantidad texto, unidad) del lote estándar para mensajes WA."""
+    from codigos_subreceta import cod_sub_canonico
+    from unidades_operativas import cargar_rendimiento_subrecetas
+
+    cod3 = (cod or "").replace("SUB-", "").strip().zfill(3)
+    cat = cargar_rendimiento_subrecetas()
+    info = cat.get(cod_sub_canonico(cod3)) or cat.get(f"SUB-{cod3}") or {}
+    rend = info.get("rendimiento_estandar")
+    unidad = (info.get("unidad") or "gr").strip()
+    if rend:
+        try:
+            r = float(rend)
+            txt = f"{r:g}" if r == int(r) else f"{r:.2f}".rstrip("0").rstrip(".")
+            return txt, unidad
+        except (TypeError, ValueError):
+            pass
+    return "1 lote", unidad
+
+
+def _necesita_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> bool:
+    """True si falta bodega o solo hay default implícito sin elección del usuario."""
+    from estrategia_config import requiere_bodega_explicita_produccion
+
+    bod = (prod_sub.get("bodega") or "").strip()
+    if not bod:
+        return True
+    if prod_sub.get("bodega_explicita"):
+        return False
+    return bool(requiere_bodega_explicita_produccion(wa_id))
+
+
+def _msg_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> str:
+    cods_list = prod_sub.get("cods") or []
+    cods = ", ".join(cods_list)
+    cod0 = (cods_list[0] if cods_list else "").replace("SUB-", "").zfill(3)
+    area = prod_sub.get("area") or _inferir_area_desde_cods(cods_list) or "cocina"
+    permitidas = _bodegas_opciones_produccion(wa_id, area)
     opts = " · ".join(permitidas) if permitidas else "BOD-001 / BOD-005"
+    rend_txt, unidad = _rendimiento_sub_display(cod0)
+    cant = prod_sub.get("cantidad")
+    if cant is not None:
+        lote_txt = f"{cant:g} {unidad}"
+    elif rend_txt == "1 lote":
+        lote_txt = "1 lote estándar"
+    else:
+        lote_txt = f"{rend_txt} {unidad} (lote estándar)"
     return (
-        f"Subreceta {cods}{cant_txt}: indica la *bodega* donde entra el stock.\n"
+        f"Subreceta *{cod0}*: indica la *bodega* donde entra el stock.\n"
+        f"Lote sugerido: *{lote_txt}*\n"
         f"Opciones: {opts}\n"
         f"Ej: *005* · *001* · externa · cocina\n"
-        f"Ej completo: PRODUCIR SUB {cods or '049'} 3800 GR BOD-005"
+        f"Ej completo: PRODUCIR SUB {cod0 or '049'} {rend_txt} {unidad} BOD-005"
     )
 
 
@@ -6359,12 +6410,8 @@ async def _manejar_produccion_sub(
         area = _resolver_area_produccion(wa_id, "", cods=prod_sub.get("cods"))
         _prod_ctx_touch(wa_id, area=area, last_cods=prod_sub.get("cods"))
         _limpiar_ctx_conteo(wa_id)
-        from estrategia_config import requiere_bodega_explicita_produccion
 
-        if not (prod_sub.get("bodega") or "").strip() or (
-            requiere_bodega_explicita_produccion(wa_id)
-            and not prod_sub.get("bodega_explicita")
-        ):
+        if _necesita_pedir_bodega_produccion(wa_id, prod_sub):
             _pending_prod_sub[wa_id] = {
                 "cods": prod_sub["cods"],
                 "cantidad": prod_sub.get("cantidad"),
@@ -6372,7 +6419,7 @@ async def _manejar_produccion_sub(
                 "area": area,
             }
             await enviar_mensaje_meta(
-                wa_id, _msg_pedir_bodega_produccion(wa_id, prod_sub)
+                wa_id, _msg_pedir_bodega_produccion(wa_id, {**prod_sub, "area": area})
             )
             return
         bodega = (prod_sub.get("bodega") or bodega_default_produccion_sub(wa_id)).strip().upper()
@@ -6416,6 +6463,8 @@ async def _manejar_produccion_sub(
                     "cods": prod_sub["cods"],
                     "bodega": prod_sub["bodega"],
                     "cantidad": prod_sub.get("cantidad"),
+                    "bodega_explicita": True,
+                    "area": area,
                 }
                 if "confirmo" not in out.lower() and "sí" not in out.lower():
                     out += msg_produccion_pie_confirmacion()
@@ -6625,9 +6674,14 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     return
                 if _es_confirmacion_corta(texto):
                     print(f"[Meta] {wa_id}: route=produccion_confirm")
+                    pend = _pending_prod_sub[wa_id]
                     await _manejar_produccion_sub(
                         wa_id,
-                        {**_pending_prod_sub[wa_id], "confirmar": True},
+                        {
+                            **pend,
+                            "confirmar": True,
+                            "bodega_explicita": pend.get("bodega_explicita", True),
+                        },
                         msg,
                         texto=texto,
                     )
