@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250626-conteo-005-externa-v34"
+TATAMI_WA_BUILD = "20250626-conteo-hilo-v35"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -344,6 +344,29 @@ def _limpiar_ctx_conteo(wa_id: str) -> None:
     _pending_conteo_ctx.pop(wa_id, None)
 
 
+def _disambig_ctx_get(wa_id: str | None) -> dict:
+    if not wa_id:
+        return {}
+    ctx = _pending_disambig_ctx.get(wa_id)
+    if not ctx:
+        return {}
+    if time.monotonic() - ctx.get("at", 0) > _DISAMBIG_CTX_TTL_SEC:
+        _pending_disambig_ctx.pop(wa_id, None)
+        return {}
+    return ctx
+
+
+def _disambig_ctx_touch(wa_id: str, **updates) -> None:
+    ctx = _disambig_ctx_get(wa_id) or {}
+    ctx.update(updates)
+    ctx["at"] = time.monotonic()
+    _pending_disambig_ctx[wa_id] = ctx
+
+
+def _limpiar_disambig_ctx(wa_id: str) -> None:
+    _pending_disambig_ctx.pop(wa_id, None)
+
+
 def _limpiar_pick_produccion(wa_id: str) -> None:
     if _pending_prod_area.get(wa_id) == "pick":
         _pending_prod_area.pop(wa_id, None)
@@ -354,8 +377,8 @@ def _ultima_linea_usuario(texto: str) -> str:
     return lines[-1] if lines else (texto or "").strip()
 
 
-def _parse_bodega_conteo(texto: str) -> str | None:
-    """BOD-00x, 005, externa, cocina, barra… (misma resolución que traslados/producción)."""
+def _parse_bodega_conteo(texto: str, *, seguimiento: bool = False) -> str | None:
+    """BOD-00x, 005, externa, iniciar 002… (misma resolución que traslados/producción)."""
     from bodegas_config import BODEGAS, resolver_cod_bodega
 
     raw = (texto or "").strip()
@@ -373,6 +396,19 @@ def _parse_bodega_conteo(texto: str) -> str | None:
     if m2:
         cod = resolver_cod_bodega(m2.group(1))
         return cod if cod in BODEGAS else None
+    m3 = re.search(
+        r"\b(?:iniciar|nuevo|empezar|crear)\s+(?:bod[- ]?)?(0?\d{3})\b",
+        raw,
+        re.I,
+    )
+    if m3:
+        cod = resolver_cod_bodega(m3.group(1))
+        return cod if cod in BODEGAS else None
+    if seguimiento:
+        m4 = re.match(r"^(?:bod[- ]?)?(0?\d{3})$", raw.strip(), re.I)
+        if m4:
+            cod = resolver_cod_bodega(m4.group(1))
+            return cod if cod in BODEGAS else None
     t = raw.lower()
     for alias in (
         "bodega externa",
@@ -391,13 +427,91 @@ def _parse_bodega_conteo(texto: str) -> str | None:
     return _bodega_por_area(area)
 
 
-def _quiere_iniciar_conteo(texto: str, bod: str | None) -> bool:
+def _extraer_codigo_ambiguo_bod_sub(texto: str) -> str | None:
+    """001/002/005 en «iniciar 002» sin palabra conteo ni producir."""
+    raw = (texto or "").strip()
+    if not raw:
+        return None
+    if re.search(r"\bconteo\b", raw, re.I):
+        return None
+    if re.search(r"\b(?:produc|prepar|subreceta|batch)\w*", raw, re.I):
+        return None
+    if raw.upper().startswith("INICIAR CONTEO"):
+        return None
+    m = re.search(
+        r"\b(?:iniciar|nuevo|empezar|crear)\s+(?:sub[- ]?|bod[- ]?)?(0?\d{3})\b",
+        raw,
+        re.I,
+    )
+    if not m:
+        m = re.match(r"^(?:sub[- ]?|bod[- ]?)?(0?\d{3})$", raw.strip(), re.I)
+    if not m:
+        return None
+    cod = m.group(1).zfill(3)
+    return cod if cod in _CODIGOS_AMBIGUOS_BOD_SUB else None
+
+
+def _subreceta_cod_activo(cod: str) -> bool:
+    cod = cod.zfill(3)
+    try:
+        from codigos_subreceta import cod_sub_canonico
+        from subrecetas_detalle import cargar_bd_subrecetas
+
+        cab = cargar_bd_subrecetas(conectar_sheets())
+        for cod_raw, info in cab.items():
+            if (info.get("activa") or "SI").strip().upper() == "NO":
+                continue
+            if cod_sub_canonico(cod_raw).replace("SUB-", "").zfill(3) == cod:
+                return True
+    except Exception:
+        pass
+    return any(c == cod for _, c in _aliases_subrecetas())
+
+
+def _nombre_sub_display(cod: str) -> str:
+    cod = cod.zfill(3)
+    try:
+        from codigos_subreceta import cod_sub_canonico
+        from subrecetas_detalle import cargar_bd_subrecetas
+
+        cab = cargar_bd_subrecetas(conectar_sheets())
+        for cod_raw, info in cab.items():
+            if cod_sub_canonico(cod_raw).replace("SUB-", "").zfill(3) == cod:
+                nom = (info.get("nombre_subreceta") or "").strip()
+                if nom:
+                    return nom
+    except Exception:
+        pass
+    for phrase, c in _aliases_subrecetas():
+        if c == cod:
+            return phrase.title()
+    return f"SUB-{cod}"
+
+
+def _msg_disambig_bod_sub(cod: str) -> str:
+    from bodegas_config import nombre_bodega, resolver_cod_bodega
+
+    bod = resolver_cod_bodega(cod)
+    nom_sub = _nombre_sub_display(cod)
+    return (
+        f"Con *{cod}* puedo:\n"
+        f"1. *Iniciar conteo* {bod} ({nombre_bodega(bod)})\n"
+        f"2. *Producir* SUB-{cod.zfill(3)} ({nom_sub})\n\n"
+        "Responde *conteo* o *producir* (o *1* / *2*)."
+    )
+
+
+def _quiere_iniciar_conteo(
+    texto: str, bod: str | None, *, ctx_activo: bool = False
+) -> bool:
     t = (texto or "").lower()
+    if re.search(r"\b(abiert[oa]s?|revisar|estado|ciclos?|borrador)\b", t):
+        return False
     if re.search(r"\b(iniciar|nuevo|empezar|crear)\b", t):
         return True
+    if ctx_activo and bod:
+        return True
     if bod and re.search(r"\bconteo\b", t):
-        if re.search(r"\b(abiert[oa]s?|revisar|estado|ciclos?|borrador)\b", t):
-            return False
         return True
     return False
 
@@ -427,8 +541,14 @@ def _es_mensaje_conteo(texto: str, wa_id: str | None = None) -> bool:
     if ctx.get("active"):
         if _pending_prod_area.get(wa_id or "") == "pick" and _parse_area_produccion(texto):
             return False
+        if re.search(
+            r"\b(?:iniciar|nuevo|empezar|crear)\s+(?:bod[- ]?)?0\d{3}\b", t
+        ):
+            return True
         for fragment in (ultima, t):
-            if len(fragment) <= 48 and _parse_bodega_conteo(fragment):
+            if len(fragment) <= 48 and _parse_bodega_conteo(
+                fragment, seguimiento=True
+            ):
                 return True
     if re.search(r"\b(revisar|iniciar|nuevo|enviar)\s+conteo\b", ultima):
         return True
@@ -458,6 +578,7 @@ def _texto_resumen_conteo_wa(ciclos: list[dict], *, bod: str | None = None) -> s
     lines.append(
         "Qué puedes hacer:\n"
         "• INICIAR CONTEO BOD-001 (cocina), BOD-005 (externa) o BOD-002 (barra)\n"
+        "• O en corto: *iniciar 001*, *005*, *002*, *externa*, *barra*\n"
         "• Captura en Sheets → menú Conteo → Enviar a Tatami\n"
         "• Tras envío: APROBAR TODO"
     )
@@ -471,12 +592,19 @@ async def _manejar_mensaje_conteo(wa_id: str, texto: str) -> None:
     ):
         await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
         return
+    _limpiar_ctx_produccion(wa_id)
+    _limpiar_disambig_ctx(wa_id)
     _limpiar_pick_produccion(wa_id)
+    ctx_prev = _conteo_ctx_get(wa_id)
     _conteo_ctx_touch(wa_id, active=True)
-    t = texto.lower()
     ultima = _ultima_linea_usuario(texto)
-    bod = _parse_bodega_conteo(texto) or _parse_bodega_conteo(ultima)
-    quiere_iniciar = _quiere_iniciar_conteo(texto, bod)
+    bod = (
+        _parse_bodega_conteo(texto, seguimiento=True)
+        or _parse_bodega_conteo(ultima, seguimiento=True)
+    )
+    quiere_iniciar = _quiere_iniciar_conteo(
+        texto, bod, ctx_activo=bool(ctx_prev.get("active"))
+    )
     if quiere_iniciar and bod:
         if not autorizado_tool(wa_id, "conteo_iniciar"):
             await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
@@ -846,6 +974,11 @@ _SUB_STOPWORDS = frozenset({"de", "del", "la", "el", "los", "las", "un", "una", 
 # Contexto de conteo físico (no confundir barra/cocina con producción)
 _pending_conteo_ctx: dict[str, dict] = {}
 _CONTEO_CTX_TTL_SEC = 900
+# Desambiguación 001/002/005 → conteo bodega vs producir SUB
+_pending_disambig_ctx: dict[str, dict] = {}
+_DISAMBIG_CTX_TTL_SEC = 300
+_CODIGOS_AMBIGUOS_BOD_SUB = frozenset({"001", "002", "005"})
+_BODEGAS_CONTEO_ACTIVAS = frozenset({"BOD-001", "BOD-002", "BOD-005"})
 # Contexto de traslado pendiente (insumo/bodegas incompletos o aclaración sub)
 _pending_traslado: dict[str, dict] = {}
 _TRASLADO_CTX_TTL_SEC = 900
@@ -4327,7 +4460,10 @@ def _texto_sin_ref_bodega(texto: str) -> str:
     return re.sub(r"\bbod[- ]?0?\d{3}\b", " BODEGA ", texto or "", flags=re.I)
 
 
-def _match_sub_codigos_en_texto(texto: str) -> list[str]:
+def _match_sub_codigos_en_texto(texto: str, wa_id: str | None = None) -> list[str]:
+    if wa_id and _conteo_ctx_get(wa_id).get("active"):
+        if _parse_bodega_conteo(texto, seguimiento=True):
+            return []
     t_clean = _texto_sin_cantidad_sub(_texto_sin_ref_bodega((texto or "").lower()))
     hits: list[tuple[int, str]] = []
     for phrase, cod in _aliases_subrecetas():
@@ -5342,7 +5478,7 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
         return None
     t = raw.lower()
     ctx_prod = _prod_ctx_get(wa_id or "")
-    cods = _match_sub_codigos_en_texto(raw)
+    cods = _match_sub_codigos_en_texto(raw, wa_id)
     if not cods and ctx_prod.get("awaiting_sub_name"):
         cods = _buscar_cods_subreceta_por_nombre(raw, area=ctx_prod.get("area"))
     parece_batch = (
@@ -5427,7 +5563,7 @@ def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
         prod_sub = _parse_batch_lenguaje_natural(texto, wa_id)
 
     if (prod_sub is None or not prod_sub.get("cods")) and _es_orden_produccion_afirmativa(texto):
-        cods = _match_sub_codigos_en_texto(texto) or list(ctx.get("last_cods") or [])
+        cods = _match_sub_codigos_en_texto(texto, wa_id) or list(ctx.get("last_cods") or [])
         if cods:
             area = _resolver_area_produccion(wa_id, texto, cods=cods)
             cantidad = _extraer_cantidad_sub(texto, cod_sub=cods[0])
@@ -5443,7 +5579,7 @@ def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
 
     if prod_sub is None and ctx.get("area") and not _es_consulta_no_produccion(texto):
         area = ctx.get("area")
-        cods = _match_sub_codigos_en_texto(texto)
+        cods = _match_sub_codigos_en_texto(texto, wa_id)
         if not cods and (
             ctx.get("awaiting_sub_name") or not _es_consulta_no_produccion(texto)
         ):
@@ -6080,6 +6216,8 @@ async def _manejar_produccion_sub(
         if not _autorizado_produccion_sub(wa_id):
             await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
             return
+        _limpiar_ctx_conteo(wa_id)
+        _limpiar_disambig_ctx(wa_id)
         if prod_sub.get("ambiguo") or not prod_sub.get("cods"):
             area = _resolver_area_produccion(
                 wa_id,
@@ -6188,6 +6326,57 @@ async def _manejar_produccion_sub(
             wa_id,
             f"No pude procesar la producción. Intenta de nuevo.\nDetalle: {e!s}",
         )
+
+
+async def _manejar_disambiguacion_wa(wa_id: str, texto: str, msg: dict) -> bool:
+    """Resuelve elección conteo vs producción tras 001/002/005 ambiguo."""
+    ctx = _disambig_ctx_get(wa_id)
+    if not ctx:
+        return False
+    cod = str(ctx.get("cod") or "").zfill(3)
+    if not cod:
+        _limpiar_disambig_ctx(wa_id)
+        return False
+    t = (texto or "").strip().lower()
+    elige_conteo = t in ("1", "conteo", "contar", "inventario")
+    elige_prod = t in ("2", "producir", "produccion", "producción", "preparar", "sub", "batch")
+    if not elige_conteo and re.search(r"\bconteo\b", t):
+        elige_conteo = True
+    if not elige_prod and re.search(r"\b(produc|prepar|sub|batch)\w*", t):
+        elige_prod = True
+    if elige_conteo and elige_prod:
+        await enviar_mensaje_meta(wa_id, _msg_disambig_bod_sub(cod))
+        return True
+    if elige_conteo:
+        _limpiar_disambig_ctx(wa_id)
+        await _manejar_mensaje_conteo(wa_id, f"iniciar {cod}")
+        return True
+    if elige_prod:
+        _limpiar_disambig_ctx(wa_id)
+        _limpiar_ctx_conteo(wa_id)
+        area = _inferir_area_desde_cods([cod])
+        bodega, bodega_explicita = _resolver_bodega_produccion(wa_id, "", area=area)
+        await _manejar_produccion_sub(
+            wa_id,
+            {
+                "cods": [cod],
+                "bodega": bodega,
+                "bodega_explicita": bodega_explicita,
+                "confirmar": False,
+                "area": area,
+            },
+            msg,
+            texto=texto,
+        )
+        return True
+    if parece_nueva_operacion(texto):
+        _limpiar_disambig_ctx(wa_id)
+        return False
+    await enviar_mensaje_meta(
+        wa_id,
+        _msg_disambig_bod_sub(cod) + "\n\n(Responde *conteo* o *producir*.)",
+    )
+    return True
 
 
 async def procesar_mensaje(wa_id: str, msg: dict) -> None:
@@ -6337,6 +6526,26 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                         await enviar_mensaje_meta(wa_id, _msg_pedir_nombre_sub(area))
                     else:
                         await enviar_mensaje_meta(wa_id, _msg_menu_produccion_area(area))
+                    return
+
+            # Desambiguación 001/002/005 (respuesta pendiente)
+            if _disambig_ctx_get(wa_id):
+                if await _manejar_disambiguacion_wa(wa_id, texto, msg):
+                    return
+
+            # Desambiguación nueva: «iniciar 002» sin contexto conteo previo
+            cod_amb = _extraer_codigo_ambiguo_bod_sub(texto)
+            if cod_amb and not _conteo_ctx_get(wa_id).get("active"):
+                from bodegas_config import resolver_cod_bodega
+
+                bod_amb = resolver_cod_bodega(cod_amb)
+                if bod_amb in _BODEGAS_CONTEO_ACTIVAS:
+                    if _subreceta_cod_activo(cod_amb):
+                        _disambig_ctx_touch(wa_id, cod=cod_amb)
+                        await enviar_mensaje_meta(wa_id, _msg_disambig_bod_sub(cod_amb))
+                        return
+                    print(f"[Meta] {wa_id}: route=conteo_auto bod={bod_amb}")
+                    await _manejar_mensaje_conteo(wa_id, f"iniciar {cod_amb}")
                     return
 
             # Conteo físico — después de pick producción (barra/cocina no son batches)
