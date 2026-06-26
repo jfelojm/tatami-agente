@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250625-prod-subctx-brigadeiro-v33"
+TATAMI_WA_BUILD = "20250626-conteo-005-externa-v34"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -355,11 +355,51 @@ def _ultima_linea_usuario(texto: str) -> str:
 
 
 def _parse_bodega_conteo(texto: str) -> str | None:
-    m = re.search(r"\b(bod-\d{3})\b", (texto or ""), re.I)
+    """BOD-00x, 005, externa, cocina, barra… (misma resolución que traslados/producción)."""
+    from bodegas_config import BODEGAS, resolver_cod_bodega
+
+    raw = (texto or "").strip()
+    if not raw:
+        return None
+    m = re.search(r"\b(bod[- ]?0?\d{3})\b", raw, re.I)
     if m:
-        return m.group(1).upper()
+        cod = resolver_cod_bodega(m.group(1))
+        return cod if cod in BODEGAS else None
+    m2 = re.search(
+        r"(?:iniciar\s+conteo|conteo)\s+(?:bod[- ]?)?(0?\d{3})\b",
+        raw,
+        re.I,
+    )
+    if m2:
+        cod = resolver_cod_bodega(m2.group(1))
+        return cod if cod in BODEGAS else None
+    t = raw.lower()
+    for alias in (
+        "bodega externa",
+        "consignacion",
+        "consignación",
+        "externa",
+        "bodegaisrael",
+        "israel",
+        "cocina",
+        "barra",
+    ):
+        if re.search(rf"\b{re.escape(alias)}\b", t, re.I):
+            cod = resolver_cod_bodega(alias)
+            return cod if cod in BODEGAS else None
     area = _parse_area_produccion(texto)
     return _bodega_por_area(area)
+
+
+def _quiere_iniciar_conteo(texto: str, bod: str | None) -> bool:
+    t = (texto or "").lower()
+    if re.search(r"\b(iniciar|nuevo|empezar|crear)\b", t):
+        return True
+    if bod and re.search(r"\bconteo\b", t):
+        if re.search(r"\b(abiert[oa]s?|revisar|estado|ciclos?|borrador)\b", t):
+            return False
+        return True
+    return False
 
 
 def _es_mensaje_conteo(texto: str, wa_id: str | None = None) -> bool:
@@ -436,7 +476,7 @@ async def _manejar_mensaje_conteo(wa_id: str, texto: str) -> None:
     t = texto.lower()
     ultima = _ultima_linea_usuario(texto)
     bod = _parse_bodega_conteo(texto) or _parse_bodega_conteo(ultima)
-    quiere_iniciar = bool(re.search(r"\b(iniciar|nuevo|empezar|crear)\b", t))
+    quiere_iniciar = _quiere_iniciar_conteo(texto, bod)
     if quiere_iniciar and bod:
         if not autorizado_tool(wa_id, "conteo_iniciar"):
             await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
@@ -5457,14 +5497,20 @@ def _es_cancelacion_corta(texto: str) -> bool:
 
 
 def _parse_iniciar_conteo_comando(texto: str) -> str | None:
-    """INICIAR CONTEO BOD-001 → cod_bodega o None si no aplica."""
+    """INICIAR CONTEO BOD-001 / 005 / externa → cod_bodega o None si no aplica."""
+    from bodegas_config import BODEGAS, resolver_cod_bodega
+
     t = (texto or "").strip().upper()
     if not t.startswith("INICIAR CONTEO"):
         return None
     resto = texto.strip()[len("INICIAR CONTEO") :].strip()
     if not resto:
         return ""
-    return resto.split()[0].strip()
+    cod = resolver_cod_bodega(resto.split()[0].strip())
+    if cod in BODEGAS:
+        return cod
+    cod = resolver_cod_bodega(resto)
+    return cod if cod in BODEGAS else resto.split()[0].strip()
 
 
 # ── Definición tools Claude API ──────────────────────────────

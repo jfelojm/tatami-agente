@@ -48,9 +48,16 @@ def iniciar_conteo_wa(
     Inicia un ciclo de conteo listo para captura en Sheets.
     Equivale a: crear-ciclo + snapshot + plantilla_conteo_sheets --desde-ciclo-id.
     """
-    cod_bodega = (cod_bodega or "").strip()
+    from bodegas_config import BODEGAS, bodega_activa, resolver_cod_bodega
+
+    cod_bodega = resolver_cod_bodega((cod_bodega or "").strip())
     if not cod_bodega:
         raise ConteoOperacionError("VALIDATION", "cod_bodega es obligatorio (ej. BOD-001, BOD-002)")
+    if cod_bodega not in BODEGAS or not bodega_activa(cod_bodega):
+        raise ConteoOperacionError(
+            "VALIDATION",
+            f"Bodega no válida para conteo: {cod_bodega!r} (use BOD-001, BOD-005 o BOD-002)",
+        )
 
     if not anio or not semana_iso:
         ay, aw = semana_iso_actual()
