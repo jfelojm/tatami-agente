@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import estrategia_config as ec
 from whatsapp_webhook import (
+    _match_sub_codigos_en_texto,
     _msg_pedir_bodega_produccion,
     _necesita_pedir_bodega_produccion,
     _parse_bodega_produccion_texto,
@@ -153,11 +154,11 @@ class TestCantidadSueltaProduccion(unittest.TestCase):
 
 
 class TestResolverProduccionNombre(unittest.TestCase):
-    def test_pendiente_obsoleta_si_nombre_distinto(self) -> None:
+    def test_pendiente_obsoleta_si_alias_distinto(self) -> None:
         pending = {"cods": ["004"], "awaiting_bodega": True, "area": "cocina"}
         with patch(
-            "whatsapp_webhook._resolver_cods_produccion_desde_texto",
-            return_value=(["068"], None),
+            "whatsapp_webhook._match_sub_codigos_en_texto",
+            return_value=["026"],
         ):
             self.assertTrue(
                 _produccion_pendiente_obsoleta(
@@ -169,13 +170,13 @@ class TestResolverProduccionNombre(unittest.TestCase):
 
     def test_pendiente_vigente_solo_bodega(self) -> None:
         pending = {"cods": ["004"], "awaiting_bodega": True, "area": "cocina"}
-        with patch(
-            "whatsapp_webhook._resolver_cods_produccion_desde_texto",
-            return_value=([], None),
-        ):
-            self.assertFalse(
-                _produccion_pendiente_obsoleta(pending, "005", "593987122959")
-            )
+        self.assertFalse(
+            _produccion_pendiente_obsoleta(pending, "005", "593987122959")
+        )
+
+    def test_match_camaron_caramelizado_alias(self) -> None:
+        cods = _match_sub_codigos_en_texto("Producir camaron caramelizado en 005")
+        self.assertIn("026", cods)
 
     @patch(
         "whatsapp_webhook._resolver_cods_produccion_desde_texto",

@@ -758,6 +758,7 @@ def _resolver_cods_produccion_desde_texto(
     if len(cods) > 1:
         return cods, None
     opciones = _buscar_opciones_subreceta(texto, area_res)
+    opciones = _preferir_opciones_sub_por_tokens(texto, opciones)
     if len(opciones) == 1:
         return [opciones[0][0]], None
     if len(opciones) > 1:
@@ -772,18 +773,30 @@ def _produccion_pendiente_obsoleta(pending: dict, texto: str, wa_id: str) -> boo
     if not parece_nueva_operacion(texto):
         return False
     pend_cod = _cod_sub_normalizado_3((pending.get("cods") or [None])[0])
-    if not pend_cod:
-        return _texto_menciona_nombre_sub(texto)
-    nuevos, op = _resolver_cods_produccion_desde_texto(
-        texto, wa_id, area=pending.get("area")
-    )
-    if op:
+    cods_txt = _match_sub_codigos_en_texto(texto, wa_id)
+    if cods_txt and pend_cod and _cod_sub_normalizado_3(cods_txt[0]) != pend_cod:
         return True
-    if nuevos and _cod_sub_normalizado_3(nuevos[0]) != pend_cod:
-        return True
-    if _texto_menciona_nombre_sub(texto) and not nuevos:
-        return True
+    if pending.get("awaiting_bodega") and _texto_menciona_nombre_sub(texto):
+        if not cods_txt or (pend_cod and _cod_sub_normalizado_3(cods_txt[0]) != pend_cod):
+            return True
     return False
+
+
+def _preferir_opciones_sub_por_tokens(
+    texto: str, opciones: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Si hay camaron+caramelizado, prioriza subs de camaron sobre kimchi caramelizado."""
+    if len(opciones) <= 1:
+        return opciones
+    words = set(_tokens_sub_nombre(_fragmento_nombre_sub_en_texto(texto)))
+    if not words & {"camaron", "camarones"}:
+        return opciones
+    prefer = [
+        o
+        for o in opciones
+        if "camaron" in (o[1] or "").lower() or "camarón" in (o[1] or "").lower()
+    ]
+    return prefer if len(prefer) == 1 else opciones
 
 
 def _tokens_sub_nombre(s: str) -> list[str]:
@@ -4667,6 +4680,15 @@ _COCINA_ALIASES: list[tuple[tuple[str, ...], str]] = [
     (("torta de chocolate", "tortas de chocolate", "torta chocolate", "tortas de choclate", "torta choclate"), "061"),
     (("brigadeiro", "brigadeiro pistacho", "brigadeiro de pistacho"), "049"),
     (("carne de hamburguesa", "carne hamburguesa", "hamburguesa"), "004"),
+    (
+        (
+            "camarones caramelizados",
+            "camarones caramelizado",
+            "camaron caramelizado",
+            "camarón caramelizado",
+        ),
+        "026",
+    ),
 ]
 
 
@@ -5759,31 +5781,15 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
         return None
     t = raw.lower()
     ctx_prod = _prod_ctx_get(wa_id or "")
-    cods, opciones = _resolver_cods_produccion_desde_texto(
-        raw, wa_id, area=ctx_prod.get("area")
-    )
-    if opciones and len(opciones) > 1:
-        area0 = _resolver_area_produccion(wa_id, raw, cods=[])
-        return {
-            "ambiguo_sub": True,
-            "opciones": opciones,
-            "area": area0,
-            "confirmar": False,
-        }
     parece_batch = (
         _texto_parece_batch(t)
-        or bool(cods)
-        or (
-            _es_intento_produccion(raw, wa_id)
-            and bool(ctx_prod.get("area"))
-        )
         or (
             _es_intento_produccion(raw, wa_id)
             and _texto_menciona_nombre_sub(raw)
         )
         or (
-            ctx_prod.get("awaiting_sub_name")
-            and bool(cods)
+            _es_intento_produccion(raw, wa_id)
+            and bool(ctx_prod.get("area"))
         )
         or (
             ctx_prod.get("awaiting_sub_name")
@@ -5793,17 +5799,18 @@ def _parse_batch_lenguaje_natural(texto: str, wa_id: str | None = None) -> dict 
     )
     if not parece_batch:
         return None
-    area = _resolver_area_produccion(wa_id, raw, cods=cods)
+    area = _resolver_area_produccion(wa_id, raw, cods=[])
+    cods, opciones = _resolver_cods_produccion_desde_texto(
+        raw, wa_id, area=area or ctx_prod.get("area")
+    )
+    if opciones and len(opciones) > 1:
+        return {
+            "ambiguo_sub": True,
+            "opciones": opciones,
+            "area": area or ctx_prod.get("area") or "cocina",
+            "confirmar": False,
+        }
     bodega, bodega_explicita = _resolver_bodega_produccion(wa_id, raw, area=area)
-    if not cods:
-        cods, opciones = _resolver_cods_produccion_desde_texto(raw, wa_id, area=area)
-        if opciones and len(opciones) > 1:
-            return {
-                "ambiguo_sub": True,
-                "opciones": opciones,
-                "area": area,
-                "confirmar": False,
-            }
     if not cods:
         return {
             "cods": [],
@@ -6813,6 +6820,13 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
 
             # Elección de subreceta (varias coincidencias)
             ctx_prod = _prod_ctx_get(wa_id)
+            if (
+                ctx_prod.get("awaiting_sub_choice")
+                and parece_nueva_operacion(texto)
+                and _es_intento_produccion(texto, wa_id)
+            ):
+                _prod_ctx_touch(wa_id, awaiting_sub_choice=False)
+                ctx_prod = _prod_ctx_get(wa_id)
             if ctx_prod.get("awaiting_sub_choice"):
                 opciones = ctx_prod.get("opciones_sub") or []
                 cod = _resolver_eleccion_subreceta(texto, opciones)
@@ -7039,9 +7053,19 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 return
 
             # Batch / producción
-            prod_sub = _resolver_prod_sub(texto, wa_id)
+            if _es_intento_produccion(texto, wa_id):
+                await _feedback_procesando(wa_id, msg)
+            prod_sub = await asyncio.to_thread(_resolver_prod_sub, texto, wa_id)
             if prod_sub is not None:
                 await _manejar_produccion_sub(wa_id, prod_sub, msg, texto=texto)
+                return
+            if _es_intento_produccion(texto, wa_id) and _texto_menciona_nombre_sub(texto):
+                await enviar_mensaje_meta(
+                    wa_id,
+                    "No encontré esa subreceta en BD_SUBRECETAS.\n"
+                    "Prueba el nombre exacto (ej. *camarones caramelizados*) "
+                    "o el código: PRODUCIR SUB 026 BOD-005",
+                )
                 return
 
             # Recordar subreceta mencionada aunque el mensaje vaya al LLM
