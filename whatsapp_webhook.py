@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250626-conteo-hilo-v35"
+TATAMI_WA_BUILD = "20250626-prod-cocina-bodega-v36"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -190,16 +190,32 @@ def _bodega_por_area(area: str | None) -> str | None:
     return None
 
 
-def _parse_bodega_produccion_texto(texto: str) -> str | None:
-    """Resuelve BOD-00x o alias cocina/externa/barra en un mensaje de producción."""
-    from bodegas_config import resolver_cod_bodega
+def _parse_bodega_produccion_texto(
+    texto: str,
+    *,
+    cod_sub_ignorar: str | None = None,
+    permitidas: set[str] | None = None,
+) -> str | None:
+    """Resuelve BOD-00x, 005, externa, cocina… en mensajes de producción."""
+    from bodegas_config import BODEGAS, bodega_activa, resolver_cod_bodega
 
     raw = (texto or "").strip()
     if not raw:
         return None
+    ignorar = (cod_sub_ignorar or "").replace("SUB-", "").strip().zfill(3)
+
+    def _ok(cod: str) -> bool:
+        return (
+            cod in BODEGAS
+            and bodega_activa(cod)
+            and (permitidas is None or cod in permitidas)
+        )
+
     m = re.search(r"\b(bod[- ]?0?\d{3})\b", raw, re.I)
     if m:
-        return resolver_cod_bodega(m.group(1))
+        cod = resolver_cod_bodega(m.group(1))
+        if _ok(cod):
+            return cod
     t = raw.lower()
     for alias in (
         "bodega externa",
@@ -210,7 +226,19 @@ def _parse_bodega_produccion_texto(texto: str) -> str | None:
         "barra",
     ):
         if re.search(rf"\b{re.escape(alias)}\b", t):
-            return resolver_cod_bodega(alias)
+            cod = resolver_cod_bodega(alias)
+            if _ok(cod):
+                return cod
+    encontradas: list[str] = []
+    for m_suf in re.finditer(r"\b(?:bod[- ]?)?(00[1-5])\b", raw, re.I):
+        suf = m_suf.group(1)
+        if suf == ignorar:
+            continue
+        cod = resolver_cod_bodega(suf)
+        if _ok(cod):
+            encontradas.append(cod)
+    if encontradas:
+        return encontradas[-1]
     return None
 
 
@@ -252,8 +280,8 @@ def _msg_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> str:
     return (
         f"Subreceta {cods}{cant_txt}: indica la *bodega* donde entra el stock.\n"
         f"Opciones: {opts}\n"
-        f"Ej: BOD-001 · cocina · externa (BOD-005)\n"
-        f"Ej completo: PRODUCIR SUB {cods or '064'} 120 UNI BOD-001"
+        f"Ej: *005* · *001* · externa · cocina\n"
+        f"Ej completo: PRODUCIR SUB {cods or '049'} 3800 GR BOD-005"
     )
 
 
@@ -739,14 +767,80 @@ def _buscar_cods_subreceta_por_nombre(texto: str, area: str | None = None) -> li
     return []
 
 
+def _buscar_opciones_subreceta(
+    texto: str, area: str | None = None, *, limit: int = 8
+) -> list[tuple[str, str]]:
+    """Lista (cod, nombre) de subs parecidas para desambiguación."""
+    from codigos_subreceta import cod_sub_sin_prefijo
+
+    q = re.sub(r"\s+", " ", (texto or "").strip())
+    if not q or len(q) < 2:
+        return []
+    hits: dict[str, tuple[str, dict, list]] = {}
+    for row in _filtrar_subs_por_area(_buscar_subrecetas(nombre_subreceta=q), area):
+        hits[row[0]] = row
+    if len(hits) < 2:
+        for w in _tokens_sub_nombre(q):
+            if len(w) < 3:
+                continue
+            for row in _filtrar_subs_por_area(_buscar_subrecetas(nombre_subreceta=w), area):
+                hits[row[0]] = row
+    out: list[tuple[str, str]] = []
+    for cod_key, info, _ in list(hits.values())[:limit]:
+        cod = cod_sub_sin_prefijo(cod_key).zfill(3)
+        nom = (info.get("nombre_subreceta") or f"SUB-{cod}").strip()
+        out.append((cod, nom))
+    return out
+
+
+def _msg_elegir_subreceta(opciones: list[tuple[str, str]], area: str) -> str:
+    lines = [f"Encontré varias subrecetas en *{area}*. Elige una:\n"]
+    for i, (cod, nom) in enumerate(opciones[:8], 1):
+        lines.append(f"{i}. {nom} ({cod})")
+    lines.append("\nResponde con el *código* o el *nombre*.")
+    return "\n".join(lines)
+
+
+def _resolver_eleccion_subreceta(
+    texto: str, opciones: list[tuple[str, str]]
+) -> str | None:
+    t = (texto or "").strip().lower()
+    if not t or not opciones:
+        return None
+    if t.isdigit():
+        n = int(t)
+        if 1 <= n <= len(opciones):
+            return opciones[n - 1][0]
+    for cod, nom in opciones:
+        cn = cod.lstrip("0") or cod
+        if t == cod or t == cn or t in nom.lower() or nom.lower() in t:
+            return cod
+    cods = _match_sub_codigos_en_texto(texto)
+    if len(cods) == 1:
+        return cods[0]
+    area = _inferir_area_desde_cods([c for c, _ in opciones]) or "cocina"
+    cods_nom = _buscar_cods_subreceta_por_nombre(texto, area=area)
+    if len(cods_nom) == 1:
+        return cods_nom[0]
+    return None
+
+
 def _msg_no_encontre_sub_produccion(area: str, texto: str) -> str:
     bod = _bodega_por_area(area) or "BOD-001"
     nom = (texto or "").strip()
-    return (
-        f"No encontré subreceta «{nom}» en *{area}* ({bod}).\n"
-        "Prueba el código (ej. 049) o escribe *lista subrecetas*.\n"
-        f"Ejemplo: PRODUCIR SUB 049 {bod} · preparar pan bao"
-    )
+    sugerencias = _buscar_opciones_subreceta(nom, area, limit=5)
+    lines = [
+        f"No identifiqué la subreceta «{nom}» en *{area}* ({bod}).",
+    ]
+    if sugerencias:
+        lines.append("\n¿Quisiste decir?")
+        for cod, nombre in sugerencias:
+            lines.append(f"• {nombre} ({cod})")
+        lines.append("\nResponde con el *código* o *nombre* exacto.")
+    else:
+        lines.append("Prueba el código (ej. 049) o escribe *lista subrecetas*.")
+    lines.append(f"\nEjemplo: *producir brigadeiro* · PRODUCIR SUB 049 BOD-001")
+    return "\n".join(lines)
 
 
 def _prod_ctx_esperando_sub(wa_id: str | None) -> bool:
@@ -4457,7 +4551,8 @@ def _aliases_subrecetas() -> list[tuple[str, str]]:
 
 def _texto_sin_ref_bodega(texto: str) -> str:
     """Quita BOD-00x del texto para no confundir 001/005 con códigos SUB."""
-    return re.sub(r"\bbod[- ]?0?\d{3}\b", " BODEGA ", texto or "", flags=re.I)
+    t = re.sub(r"\bbod[- ]?0?\d{3}\b", " BODEGA ", texto or "", flags=re.I)
+    return re.sub(r"\b(?:bod[- ]?)?00[1-5]\s*$", " BODEGA ", t, flags=re.I)
 
 
 def _match_sub_codigos_en_texto(texto: str, wa_id: str | None = None) -> list[str]:
@@ -5584,6 +5679,15 @@ def _resolver_prod_sub(texto: str, wa_id: str) -> dict | None:
             ctx.get("awaiting_sub_name") or not _es_consulta_no_produccion(texto)
         ):
             cods = _buscar_cods_subreceta_por_nombre(texto, area=area)
+        if not cods and ctx.get("awaiting_sub_name"):
+            opciones = _buscar_opciones_subreceta(texto, area)
+            if len(opciones) > 1:
+                return {
+                    "ambiguo_sub": True,
+                    "opciones": opciones,
+                    "area": area,
+                    "confirmar": False,
+                }
         cantidad = _extraer_cantidad_sub(texto, cod_sub=cods[0] if cods else None)
         if cods and (
             cantidad is not None
@@ -6218,6 +6322,20 @@ async def _manejar_produccion_sub(
             return
         _limpiar_ctx_conteo(wa_id)
         _limpiar_disambig_ctx(wa_id)
+        if prod_sub.get("ambiguo_sub"):
+            opciones = prod_sub.get("opciones") or []
+            area_amb = prod_sub.get("area") or "cocina"
+            _prod_ctx_touch(
+                wa_id,
+                awaiting_sub_choice=True,
+                opciones_sub=opciones,
+                area=area_amb,
+                awaiting_sub_name=False,
+            )
+            await enviar_mensaje_meta(
+                wa_id, _msg_elegir_subreceta(opciones, area_amb)
+            )
+            return
         if prod_sub.get("ambiguo") or not prod_sub.get("cods"):
             area = _resolver_area_produccion(
                 wa_id,
@@ -6430,11 +6548,59 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     await enviar_mensaje_meta(wa_id, msg_recordatorio_confirmacion_traslado())
                     return
 
+            # Elección de subreceta (varias coincidencias)
+            ctx_prod = _prod_ctx_get(wa_id)
+            if ctx_prod.get("awaiting_sub_choice"):
+                opciones = ctx_prod.get("opciones_sub") or []
+                cod = _resolver_eleccion_subreceta(texto, opciones)
+                if cod:
+                    area_p = ctx_prod.get("area") or _inferir_area_desde_cods([cod]) or "cocina"
+                    _prod_ctx_touch(
+                        wa_id,
+                        awaiting_sub_choice=False,
+                        awaiting_sub_name=False,
+                        last_cods=[cod],
+                        area=area_p,
+                    )
+                    print(f"[Meta] {wa_id}: route=produccion_sub_eleccion")
+                    await _manejar_produccion_sub(
+                        wa_id,
+                        {
+                            "cods": [cod],
+                            "area": area_p,
+                            "confirmar": False,
+                            "bodega": "",
+                            "bodega_explicita": False,
+                            "cantidad": _extraer_cantidad_sub(texto, cod_sub=cod),
+                        },
+                        msg,
+                        texto=texto,
+                    )
+                else:
+                    await enviar_mensaje_meta(
+                        wa_id,
+                        _msg_elegir_subreceta(
+                            opciones, ctx_prod.get("area") or "cocina"
+                        ),
+                    )
+                return
+
             # Producción pendiente de confirmación — no caer al LLM con «ai» u otros typos
             if wa_id in _pending_prod_sub:
                 pending = _pending_prod_sub[wa_id]
                 if pending.get("awaiting_bodega"):
-                    bod = _parse_bodega_produccion_texto(texto)
+                    from estrategia_config import bodegas_permitidas_produccion_sub
+
+                    permitidas = bodegas_permitidas_produccion_sub(wa_id)
+                    cod_sub = (pending.get("cods") or [None])[0]
+                    bod = _parse_bodega_produccion_texto(
+                        texto,
+                        cod_sub_ignorar=str(cod_sub) if cod_sub else None,
+                        permitidas=permitidas,
+                    )
+                    cant = _extraer_cantidad_sub(
+                        texto, cod_sub=str(cod_sub) if cod_sub else None
+                    )
                     if bod:
                         prod = {
                             **pending,
@@ -6443,6 +6609,8 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                             "confirmar": False,
                         }
                         prod.pop("awaiting_bodega", None)
+                        if cant is not None:
+                            prod["cantidad"] = cant
                         _pending_prod_sub.pop(wa_id, None)
                         print(f"[Meta] {wa_id}: route=produccion_bodega")
                         await _manejar_produccion_sub(wa_id, prod, msg, texto=texto)

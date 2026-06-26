@@ -392,7 +392,9 @@ def bodegas_permitidas_produccion_sub(telefono: str) -> set[str]:
 
 
 def requiere_bodega_explicita_produccion(telefono: str) -> bool:
-    """Staff operativo debe indicar bodega al producir (no asumir default)."""
+    """Varias bodegas permitidas o staff operativo: debe indicar dónde entra el stock."""
+    if len(bodegas_permitidas_produccion_sub(telefono)) > 1:
+        return True
     return bool(phone_roles(telefono) & {"STAFF_COCINA", "STAFF_BARRA"})
 
 
