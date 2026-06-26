@@ -18,6 +18,7 @@ Uso:
 from __future__ import annotations
 
 import logging
+import os
 from collections import defaultdict
 
 from dotenv import load_dotenv
@@ -417,7 +418,89 @@ def configurar_ingreso(sheets, sid: str, n_cat: int, filas_cat: list[list[str]])
         }
     )
     batch_format(sheets, sid, reqs)
+    aplicar_proteccion_ingreso(sheets, sid, sheet_id)
     log.info("%s configurada (líneas %d-%d)", SHEET_INGRESO, FILA_LINEAS_INICIO, fin)
+
+
+def _admin_email_traslado() -> str:
+    return (
+        os.getenv("TRASLADO_SHEETS_ADMIN_EMAIL")
+        or os.getenv("TRASLADO_SHEETS_EMAILS", "").split(",")[0].strip()
+        or "jfelojm@gmail.com"
+    ).lower()
+
+
+def aplicar_proteccion_ingreso(sheets, sid: str, sheet_id: int) -> None:
+    """Bloquea la hoja salvo B2, B3 y A6:B55; admin puede editar fórmulas."""
+    admin = _admin_email_traslado()
+    fin_fila = FILA_LINEAS_INICIO + MAX_LINEAS - 1  # fila 55 inclusive
+
+    meta = sheets.spreadsheets().get(
+        spreadsheetId=sid,
+        fields="sheets(properties(sheetId,gridProperties),protectedRanges(protectedRangeId,range))",
+    ).execute()
+
+    reqs: list[dict] = []
+    for sh in meta.get("sheets", []):
+        props = sh.get("properties", {})
+        if props.get("sheetId") != sheet_id:
+            continue
+        for pr in sh.get("protectedRanges", []):
+            rng = pr.get("range") or {}
+            if rng.get("sheetId") == sheet_id:
+                reqs.append(
+                    {"deleteProtectedRange": {"protectedRangeId": pr["protectedRangeId"]}}
+                )
+
+    # Índices 0-based; end exclusivo
+    unprotected = [
+        {
+            "sheetId": sheet_id,
+            "startRowIndex": 1,
+            "endRowIndex": 2,
+            "startColumnIndex": 1,
+            "endColumnIndex": 2,
+        },  # B2
+        {
+            "sheetId": sheet_id,
+            "startRowIndex": 2,
+            "endRowIndex": 3,
+            "startColumnIndex": 1,
+            "endColumnIndex": 2,
+        },  # B3
+        {
+            "sheetId": sheet_id,
+            "startRowIndex": FILA_LINEAS_INICIO - 1,
+            "endRowIndex": fin_fila,
+            "startColumnIndex": 0,
+            "endColumnIndex": 2,
+        },  # A6:B55
+    ]
+    reqs.append(
+        {
+            "addProtectedRange": {
+                "protectedRange": {
+                    "range": {"sheetId": sheet_id},
+                    "unprotectedRanges": unprotected,
+                    "warningOnly": False,
+                    "description": (
+                        f"INGRESO_TRASLADO — editables: B2,B3,A{FILA_LINEAS_INICIO}:B{fin_fila}"
+                    ),
+                }
+            }
+        }
+    )
+    if reqs:
+        sheets.spreadsheets().batchUpdate(
+            spreadsheetId=sid, body={"requests": reqs}
+        ).execute()
+    log.info(
+        "Protección %s: editables B2,B3,A%d:B%d (fórmulas: propietario %s)",
+        SHEET_INGRESO,
+        FILA_LINEAS_INICIO,
+        fin_fila,
+        admin,
+    )
 
 
 def configurar_registro(sheets, sid: str) -> None:

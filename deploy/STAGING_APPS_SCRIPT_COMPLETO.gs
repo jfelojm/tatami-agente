@@ -73,6 +73,7 @@ function onOpen() {
     .addItem("🔍 Verificar URL y correos", "verificarConexionTraslado")
     .addItem("🔽 Filtrar lista por bodega origen (opcional)", "actualizarListaProductosTraslado")
     .addItem("📋 Restaurar lista completa de productos", "restaurarListaCompletaTraslado")
+    .addItem("🔒 Proteger hoja INGRESO_TRASLADO", "protegerIngresoTraslado")
     .addSeparator()
     .addItem("✅ Aceptar y trasladar", "aceptarTraslado")
     .addItem("🧪 Probar (sin mover stock)", "probarTraslado")
@@ -1329,6 +1330,65 @@ var HOJA_REG_TRASLADO = "REGISTRO_TRASLADOS";
 var HOJA_CAT_TRASLADO = "CAT_TRASLADO";
 var FILA_LINEAS_TRASLADO = 6;
 var MAX_LINEAS_TRASLADO = 50;
+/** Correo con acceso a celdas bloqueadas (fórmulas). Override: TATAMI_TRASLADO_ADMIN_EMAIL */
+var TATAMI_TRASLADO_ADMIN_DEFAULT = "jfelojm@gmail.com";
+
+function emailAdminTraslado_() {
+  var p = PropertiesService.getScriptProperties().getProperty("TATAMI_TRASLADO_ADMIN_EMAIL");
+  if (p && String(p).indexOf("@") > 0) return String(p).trim().toLowerCase();
+  return TATAMI_TRASLADO_ADMIN_DEFAULT;
+}
+
+/**
+ * Bloquea INGRESO_TRASLADO salvo celdas de ingreso:
+ *   B2, B3 (bodegas) y A6:B55 (producto + cantidad).
+ * El admin (TATAMI_TRASLADO_ADMIN_EMAIL) puede editar también fórmulas y encabezados.
+ */
+function protegerIngresoTraslado() {
+  protegerIngresoTraslado_(true);
+}
+
+function protegerIngresoTraslado_(mostrarAlerta) {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var hoja = ss.getSheetByName(HOJA_TRASLADO);
+  if (!hoja) {
+    if (mostrarAlerta) ui.alert("No existe " + HOJA_TRASLADO + ". Ejecuta setup_ingreso_traslado_masivo.py");
+    return;
+  }
+  var fin = FILA_LINEAS_TRASLADO + MAX_LINEAS_TRASLADO - 1;
+  var admin = emailAdminTraslado_();
+
+  var existing = hoja.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+  for (var i = 0; i < existing.length; i++) {
+    existing[i].remove();
+  }
+
+  var protection = hoja.protect().setDescription(
+    "INGRESO_TRASLADO — editables: B2, B3, A" + FILA_LINEAS_TRASLADO + ":B" + fin
+  );
+  protection.setUnprotectedRanges([
+    hoja.getRange("B2"),
+    hoja.getRange("B3"),
+    hoja.getRange("A" + FILA_LINEAS_TRASLADO + ":B" + fin),
+  ]);
+
+  var editors = protection.getEditors();
+  protection.removeEditors(editors);
+  if (admin) {
+    try {
+      protection.addEditor(admin);
+    } catch (e) { /* propietario del libro ya tiene acceso total */ }
+  }
+
+  if (mostrarAlerta) {
+    ui.alert(
+      "Hoja protegida.\n\n" +
+        "Todos pueden editar: B2, B3, A" + FILA_LINEAS_TRASLADO + ":B" + fin + "\n" +
+        "Editor (fórmulas y resto): " + admin
+    );
+  }
+}
 
 /** Ya no filtra al cambiar B2: puede llenar bodegas y productos en cualquier orden. */
 function onEdit(e) {
@@ -1617,6 +1677,8 @@ function registrarHistorialTraslado_(ss, trx, usuario, origen, destino, lineas) 
 }
 
 function limpiarTraslado_(hoja) {
+  var fin = FILA_LINEAS_TRASLADO + MAX_LINEAS_TRASLADO - 1;
+  // Solo celdas de ingreso; C–E mantienen fórmulas (UNIDAD, LOTE REF, STOCK ORIGEN)
   hoja.getRange("B2:B3").clearContent();
-  hoja.getRange(FILA_LINEAS_TRASLADO, 1, MAX_LINEAS_TRASLADO, 2).clearContent();
+  hoja.getRange("A" + FILA_LINEAS_TRASLADO + ":B" + fin).clearContent();
 }
