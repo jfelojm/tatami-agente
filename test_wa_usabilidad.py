@@ -39,11 +39,11 @@ class TestMensajesPorRol(unittest.TestCase):
                 stock_origen=0,
                 unidad_base="gr",
                 stock_insuficiente=True,
-                periodo_pruebas=True,
+                permitir_stock_negativo=True,
                 sin_fila_maestro=True,
             )
         self.assertIn("SÍ", msg)
-        self.assertIn("modo prueba", msg)
+        self.assertIn("administración", msg)
         self.assertNotIn("BD_MP", msg)
         self.assertNotIn("sync", msg.lower())
 
@@ -58,7 +58,7 @@ class TestMensajesPorRol(unittest.TestCase):
                 stock_origen=0,
                 unidad_base="gr",
                 stock_insuficiente=True,
-                periodo_pruebas=True,
+                permitir_stock_negativo=True,
                 sin_fila_maestro=True,
             )
         self.assertIn("Sincroniza maestro", msg)

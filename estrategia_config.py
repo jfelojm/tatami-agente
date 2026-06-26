@@ -413,8 +413,8 @@ def validar_bodega_produccion_sub(telefono: str, bodega: str) -> str | None:
 
 
 def periodo_pruebas_cocina_activo() -> bool:
-    """Pruebas operativas: cocina puede operar aunque el stock en Sheets sea insuficiente."""
-    raw = (os.getenv("TATAMI_PERIODO_PRUEBAS_COCINA") or "1").strip().lower()
+    """Legacy: modo pruebas (desactivado por defecto; usar permitir_stock_negativo_operaciones)."""
+    raw = (os.getenv("TATAMI_PERIODO_PRUEBAS_COCINA") or "0").strip().lower()
     return raw in ("1", "true", "yes", "si", "sí")
 
 
@@ -434,12 +434,45 @@ def puede_trasladar(telefono: str) -> bool:
     return autorizado_tool(telefono, "trasladar_mp")
 
 
-def periodo_pruebas_ignorar_stock(telefono: str) -> bool:
-    """Cocina + admin/socio en periodo pruebas: no bloquear por stock/filas faltantes en simulación."""
-    if not periodo_pruebas_cocina_activo():
-        return False
+def permitir_stock_negativo_operaciones(telefono: str) -> bool:
+    """Producción/traslado: registrar aunque stock en Sheets sea insuficiente (con aviso WA)."""
     roles = phone_roles(telefono)
-    return bool(roles & {"JEFE_COCINA", "STAFF_COCINA", "ADMIN", "SOCIO"})
+    return bool(
+        roles
+        & {
+            "JEFE_COCINA",
+            "STAFF_COCINA",
+            "JEFE_BARRA",
+            "STAFF_BARRA",
+            "ADMIN",
+            "SOCIO",
+        }
+    )
+
+
+def periodo_pruebas_ignorar_stock(telefono: str) -> bool:
+    """Compat: mismo comportamiento que permitir_stock_negativo_operaciones."""
+    return permitir_stock_negativo_operaciones(telefono)
+
+
+def telefono_admin_alertas() -> str:
+    """Felipe / admin principal para avisos operativos."""
+    return _norm_tel(os.getenv("ALERTA_WA_FELIPE") or "")
+
+
+def filtrar_avisos_stock_produccion(avisos: list[str]) -> list[str]:
+    """Avisos de MP con stock menor al consumo del lote."""
+    out: list[str] = []
+    for a in avisos or []:
+        al = (a or "").lower()
+        if "stock " in al and "< consumo" in al:
+            out.append(a)
+    return out
+
+
+def aviso_produccion_bloquea_registro(aviso: str) -> bool:
+    """Avisos que sí deben impedir confirmar (ej. falta subreceta hijo)."""
+    return "requiere hijo" in (aviso or "").lower()
 
 
 def telefonos_por_roles(role_codes: Iterable[str]) -> list[tuple[str, str]]:

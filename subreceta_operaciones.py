@@ -170,8 +170,11 @@ def producir_subreceta_wa(
             )
 
             if plan["avisos"] and not forzar and not simular:
-                omitidos.append(cod)
-                continue
+                from estrategia_config import aviso_produccion_bloquea_registro
+
+                if any(aviso_produccion_bloquea_registro(a) for a in plan["avisos"]):
+                    omitidos.append(cod)
+                    continue
 
             if not simular:
                 res = registrar(

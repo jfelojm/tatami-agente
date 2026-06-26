@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import estrategia_config as ec
 from bodegas_config import resolver_cod_bodega, traslado_permitido
 
 
@@ -339,18 +340,26 @@ class TestTrasladoVsProduccion(unittest.TestCase):
         self.assertNotIn("udon", (sub.get("nombre") or "").lower())
 
 
-class TestPeriodoPruebasCocina(unittest.TestCase):
-    def test_jacky_en_periodo_pruebas(self):
-        from estrategia_config import periodo_pruebas_ignorar_stock
+class TestStockNegativoOperaciones(unittest.TestCase):
+    def test_jacky_permite_stock_negativo_sin_modo_pruebas(self):
+        from estrategia_config import permitir_stock_negativo_operaciones
 
-        with patch.dict("os.environ", {"TATAMI_PERIODO_PRUEBAS_COCINA": "1"}):
+        with patch.dict(
+            "os.environ",
+            {"TATAMI_PERIODO_PRUEBAS_COCINA": "0", "ALLOWLIST_JEFE_COCINA": "593992911956"},
+        ), patch.dict(
+            ec.ROLE_ALLOWLIST_ENV,
+            {"JEFE_COCINA": "ALLOWLIST_JEFE_COCINA"},
+            clear=False,
+        ), patch("config_sheets.cfg", return_value=None):
             from importlib import reload
 
             import estrategia_config
 
+            estrategia_config._phone_to_roles.cache_clear()
             reload(estrategia_config)
             self.assertTrue(
-                estrategia_config.periodo_pruebas_ignorar_stock("593992911956")
+                estrategia_config.permitir_stock_negativo_operaciones("593992911956")
             )
 
     def test_traslado_stock_insuficiente_permitido(self):
@@ -392,10 +401,11 @@ class TestPeriodoPruebasCocina(unittest.TestCase):
                             "bodega_destino": "BOD-002",
                             "cantidad": 750,
                             "ignorar_stock": True,
+                            "_wa_id": "593992911956",
                         }
                     )
         self.assertTrue(r.get("requiere_confirmacion"))
-        self.assertIn("periodo de pruebas", r.get("mensaje", "").lower())
+        self.assertIn("administración", r.get("mensaje", "").lower())
 
     def test_combinar_traslado_generico_con_detalle(self):
         from whatsapp_webhook import _texto_traslado_combinado, _traslado_ctx_touch

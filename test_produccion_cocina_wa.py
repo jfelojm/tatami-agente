@@ -94,5 +94,62 @@ class TestMsgPedirBodegaLote(unittest.TestCase):
         self.assertNotIn("3800", msg)
 
 
+class TestStockNegativoOperaciones(unittest.TestCase):
+    def test_cocina_permite_sin_modo_pruebas(self) -> None:
+        with patch.dict(
+            ec.ROLE_ALLOWLIST_ENV,
+            {"JEFE_COCINA": "ALLOWLIST_JEFE_COCINA"},
+            clear=False,
+        ), patch.dict(
+            "os.environ",
+            {"ALLOWLIST_JEFE_COCINA": JEFE_COCINA, "TATAMI_PERIODO_PRUEBAS_COCINA": "0"},
+            clear=False,
+        ), patch("config_sheets.cfg", return_value=None):
+            ec._phone_to_roles.cache_clear()
+            self.assertTrue(ec.permitir_stock_negativo_operaciones(JEFE_COCINA))
+
+    def test_filtrar_avisos_stock(self) -> None:
+        avisos = [
+            "HARINA (001)@BOD-005: stock -1500.0 < consumo 1500.0",
+            "MP 001@BOD-005 sin costo (nota)",
+        ]
+        stock = ec.filtrar_avisos_stock_produccion(avisos)
+        self.assertEqual(len(stock), 1)
+        self.assertIn("HARINA", stock[0])
+
+
+class TestCantidadSueltaProduccion(unittest.TestCase):
+    @patch(
+        "unidades_operativas.cargar_rendimiento_subrecetas",
+        return_value={
+            "SUB-006": {
+                "rendimiento_estandar": 60.0,
+                "unidad": "uni",
+                "nombre_subreceta": "pan bao",
+            }
+        },
+    )
+    def test_bodega_005_61(self, _mock) -> None:
+        from whatsapp_webhook import _extraer_cantidad_sub
+
+        cant = _extraer_cantidad_sub("Producir pan bao bodega 005 61", cod_sub="006")
+        self.assertEqual(cant, 61.0)
+
+    @patch(
+        "unidades_operativas.cargar_rendimiento_subrecetas",
+        return_value={
+            "SUB-006": {
+                "rendimiento_estandar": 60.0,
+                "unidad": "uni",
+                "nombre_subreceta": "pan bao",
+            }
+        },
+    )
+    def test_sub_006_sin_cantidad(self, _mock) -> None:
+        from whatsapp_webhook import _extraer_cantidad_sub
+
+        self.assertIsNone(_extraer_cantidad_sub("producir sub 006", cod_sub="006"))
+
+
 if __name__ == "__main__":
     unittest.main()

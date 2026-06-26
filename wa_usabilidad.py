@@ -175,7 +175,7 @@ def msg_confirmacion_traslado(
     stock_origen: float,
     unidad_base: str,
     stock_insuficiente: bool,
-    periodo_pruebas: bool,
+    permitir_stock_negativo: bool,
     sin_fila_maestro: bool,
 ) -> str:
     lines = [
@@ -188,13 +188,11 @@ def msg_confirmacion_traslado(
         "_Puedes ajustar antes (ej. *2* o *3 tortas*)._",
     ]
     avisos: list[str] = []
-    if periodo_pruebas and stock_insuficiente:
-        if es_personal_operativo(telefono):
-            avisos.append("⚠ En origen hay 0 — se registrará igual (modo prueba).")
-        else:
-            avisos.append(
-                f"⚠ Stock insuficiente ({stock_origen:g} {unidad_base}) — periodo pruebas."
-            )
+    if permitir_stock_negativo and stock_insuficiente:
+        avisos.append(
+            f"⚠ Stock insuficiente en origen ({stock_origen:g} {unidad_base}). "
+            "Si confirmas, se registra igual y se envía aviso a administración."
+        )
     if sin_fila_maestro:
         if es_admin_o_socio(telefono):
             avisos.append(

@@ -900,7 +900,7 @@ def _prod_ctx_esperando_sub(wa_id: str | None) -> bool:
 
 
 def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | None:
-    """Cantidad en unidad base (gr/ml) o None → lote estándar en producción."""
+    """Cantidad en unidad base (gr/ml/uni) o None → lote estándar en producción."""
     from unidades_operativas import (
         parse_cantidad_explicita_base,
         resolver_cantidad_produccion_sub,
@@ -910,6 +910,9 @@ def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | Non
     if expl is not None:
         return expl
     if cod_sub:
+        suelta = _cantidad_suelta_en_texto(texto, cod_sub)
+        if suelta is not None:
+            return suelta
         cod_digits = cod_sub.replace("SUB-", "").replace("sub-", "").strip()[-3:]
         m_qty_cod = re.match(
             rf"^\s*(\d+)\s+(?:sub[- ]?)?0?{re.escape(cod_digits.lstrip('0') or cod_digits)}\b",
@@ -931,6 +934,39 @@ def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | Non
     if mc2:
         return float(mc2.group(1).replace(",", "."))
     return None
+
+
+def _cantidad_suelta_en_texto(texto: str, cod_sub: str) -> float | None:
+    """Número suelto al final o tras bodega: «bodega 005 61», «pan bao 61»."""
+    from unidades_operativas import resolver_cantidad_produccion_sub
+
+    raw = (texto or "").strip()
+    if not raw:
+        return None
+    cod_digits = (
+        cod_sub.replace("SUB-", "").replace("sub-", "").strip().lstrip("0")
+        or cod_sub.replace("SUB-", "").strip()
+    )
+    m = re.search(
+        r"\b(?:bodega\s+)?(?:bod[- ]?)?00[1-5]\s+(\d{1,4})\s*$",
+        raw,
+        re.I,
+    )
+    if m:
+        val = float(m.group(1))
+    else:
+        m2 = re.search(r"(\d{1,4})\s*$", raw)
+        if not m2:
+            return None
+        val = float(m2.group(1))
+        if re.search(rf"\b(?:sub[- ]?)?0*{re.escape(cod_digits)}\s*$", raw, re.I):
+            return None
+        if re.search(r"\b(?:bodega\s+)?(?:bod[- ]?)?00[1-5]\s*$", raw, re.I):
+            return None
+    r = resolver_cantidad_produccion_sub(cod_sub, val, texto=texto)
+    if r.get("cantidad_base") is not None:
+        return float(r["cantidad_base"])
+    return val
 
 
 def _es_consulta_receta_plato(texto: str) -> bool:
@@ -3400,7 +3436,7 @@ def tool_trasladar_mp(args):
             etiqueta = nombre_mp_resuelto or nombre_mp or cod_mp
             hint = (
                 "\nEs una *subreceta* (semi). Si falta en inventario, sincroniza con "
-                "sync_stock_subrecetas_maestro.py o confirma en periodo pruebas."
+                "sync_stock_subrecetas_maestro.py o contacta administración."
                 if es_subreceta
                 else ""
             )
@@ -3461,6 +3497,8 @@ def tool_trasladar_mp(args):
             for r in rows
         )
         wa_ctx = args.get("_wa_id") or args.get("wa_id") or ""
+        from estrategia_config import permitir_stock_negativo_operaciones
+
         mensaje_confirm = msg_confirmacion_traslado(
             wa_ctx,
             cant_txt=cant_txt,
@@ -3470,7 +3508,7 @@ def tool_trasladar_mp(args):
             stock_origen=round(stock_origen, 4),
             unidad_base=unidad_base,
             stock_insuficiente=stock_insuficiente,
-            periodo_pruebas=bool(ignorar_stock),
+            permitir_stock_negativo=permitir_stock_negativo_operaciones(wa_ctx),
             sin_fila_maestro=sin_fila_maestro,
         )
         return {
@@ -3478,6 +3516,7 @@ def tool_trasladar_mp(args):
             "cod_mp_sistema": cod_mp,
             "nombre_mp": etiqueta,
             "stock_origen": round(stock_origen, 4),
+            "stock_insuficiente": stock_insuficiente,
             "cantidad_interpretada": round(cantidad, 4),
             "interpretacion_cantidad": interpretacion_cant,
             "mensaje": mensaje_confirm,
@@ -4492,9 +4531,9 @@ def tool_produccion_subreceta(args):
     simular = bool(args.get("simular", True))
     forzar = bool(args.get("forzar"))
     if not forzar and not simular and wa:
-        from estrategia_config import periodo_pruebas_ignorar_stock
+        from estrategia_config import permitir_stock_negativo_operaciones
 
-        if periodo_pruebas_ignorar_stock(wa):
+        if permitir_stock_negativo_operaciones(wa):
             forzar = True
     try:
         out = producir_subreceta_wa(
@@ -5273,9 +5312,9 @@ async def _manejar_traslado_mp_wa(
         "texto_original": texto,
         "_wa_id": wa_id,
     }
-    from estrategia_config import periodo_pruebas_ignorar_stock
+    from estrategia_config import permitir_stock_negativo_operaciones
 
-    if periodo_pruebas_ignorar_stock(wa_id):
+    if permitir_stock_negativo_operaciones(wa_id):
         args["ignorar_stock"] = True
     if cod_mp:
         args["cod_mp_sistema"] = cod_mp
@@ -5311,7 +5350,14 @@ async def _manejar_traslado_mp_wa(
         _limpiar_ctx_traslado_confirm(wa_id)
     elif r.get("requiere_confirmacion"):
         out = r.get("mensaje") or "Confirma el traslado."
-        _traslado_confirm_touch(wa_id, args)
+        meta = dict(args)
+        if r.get("stock_insuficiente"):
+            meta["_stock_insuficiente"] = True
+            meta["_stock_aviso"] = (
+                f"Stock origen {r.get('stock_origen')} < "
+                f"solicitado {r.get('cantidad_interpretada')}"
+            )
+        _traslado_confirm_touch(wa_id, meta)
     elif r.get("error"):
         out = str(r.get("error"))
         _limpiar_ctx_traslado_confirm(wa_id)
@@ -5339,9 +5385,9 @@ async def _manejar_confirmacion_traslado_wa(wa_id: str, msg: dict | None) -> Non
     args = dict(pending.get("args") or {})
     args["confirmado"] = True
     args["_wa_id"] = wa_id
-    from estrategia_config import periodo_pruebas_ignorar_stock
+    from estrategia_config import permitir_stock_negativo_operaciones
 
-    if periodo_pruebas_ignorar_stock(wa_id):
+    if permitir_stock_negativo_operaciones(wa_id):
         args["ignorar_stock"] = True
 
     try:
@@ -5363,6 +5409,16 @@ async def _manejar_confirmacion_traslado_wa(wa_id: str, msg: dict | None) -> Non
             f"Traslado registrado: {nom} "
             f"({args.get('bodega_origen')} → {args.get('bodega_destino')})."
         )
+        if args.get("_stock_insuficiente"):
+            await _notificar_stock_negativo_operacion(
+                wa_id,
+                operacion="traslado",
+                resumen=(
+                    f"{nom}: {args.get('bodega_origen')} → {args.get('bodega_destino')} "
+                    f"({args.get('cantidad')})"
+                ),
+                avisos=[str(args.get("_stock_aviso") or "Stock insuficiente en origen")],
+            )
     else:
         out = "Traslado registrado."
     await enviar_mensaje_meta(wa_id, out)
@@ -5427,9 +5483,9 @@ async def _manejar_ajuste_traslado_wa(
         args.pop("cantidad_lotes", None)
     args["confirmado"] = False
     args["_wa_id"] = wa_id
-    from estrategia_config import periodo_pruebas_ignorar_stock
+    from estrategia_config import permitir_stock_negativo_operaciones
 
-    if periodo_pruebas_ignorar_stock(wa_id):
+    if permitir_stock_negativo_operaciones(wa_id):
         args["ignorar_stock"] = True
 
     try:
@@ -6110,9 +6166,9 @@ def _llamar_agente_inner(mensaje, telefono):
                         inp["_wa_id"] = telefono
                         inp.setdefault("registrado_por", telefono)
                     if tc.name == "trasladar_mp":
-                        from estrategia_config import periodo_pruebas_ignorar_stock
+                        from estrategia_config import permitir_stock_negativo_operaciones
 
-                        if periodo_pruebas_ignorar_stock(telefono):
+                        if permitir_stock_negativo_operaciones(telefono):
                             inp["ignorar_stock"] = True
                     if tc.name in ("trasladar_mp", "produccion_subreceta") and ultimo_user:
                         inp.setdefault("texto_original", ultimo_user)
@@ -6227,6 +6283,37 @@ async def _feedback_procesando(wa_id: str, msg: dict | None = None) -> None:
     if message_id and await enviar_typing_meta(wa_id, message_id):
         return
     await enviar_mensaje_meta(wa_id, MSG_PROCESANDO)
+
+
+async def _notificar_stock_negativo_operacion(
+    wa_id: str,
+    *,
+    operacion: str,
+    resumen: str,
+    avisos: list[str],
+) -> None:
+    """Aviso al operador y a Felipe cuando se registra con stock insuficiente."""
+    from estrategia_config import filtrar_avisos_stock_produccion, telefono_admin_alertas
+
+    stock_avisos = filtrar_avisos_stock_produccion(avisos) if avisos else []
+    if not stock_avisos and not avisos:
+        return
+    lineas = stock_avisos or avisos
+    detalle = "\n".join(f"• {a}" for a in lineas[:10])
+    await enviar_mensaje_meta(
+        wa_id,
+        "⚠ *Registrado con stock insuficiente*\n"
+        f"{resumen}\n\n{detalle}\n\n"
+        "Se notificó a administración para seguimiento.",
+    )
+    admin = telefono_admin_alertas()
+    if admin and _norm_tel(admin) != _norm_tel(wa_id):
+        await enviar_mensaje_meta(
+            admin,
+            f"⚠ Stock negativo — {operacion}\n"
+            f"Operador: {wa_id}\n"
+            f"{resumen}\n\n{detalle}",
+        )
 
 
 async def enviar_mensaje_meta(telefono: str, texto: str) -> bool:
@@ -6358,7 +6445,8 @@ async def _manejar_produccion_sub(
 ) -> None:
     from estrategia_config import (
         bodega_default_produccion_sub,
-        periodo_pruebas_ignorar_stock,
+        filtrar_avisos_stock_produccion,
+        permitir_stock_negativo_operaciones,
         validar_bodega_produccion_sub,
     )
 
@@ -6432,7 +6520,7 @@ async def _manejar_produccion_sub(
         from google_credentials import pin_cloud_env
 
         pin_cloud_env()
-        forzar = periodo_pruebas_ignorar_stock(wa_id) and prod_sub["confirmar"]
+        forzar = prod_sub["confirmar"] and permitir_stock_negativo_operaciones(wa_id)
         try:
             r = await asyncio.to_thread(
                 producir_subreceta_wa,
@@ -6445,15 +6533,26 @@ async def _manejar_produccion_sub(
                 recalcular=prod_sub["confirmar"],
             )
             out = r.get("texto_whatsapp") or str(r)
-            if periodo_pruebas_ignorar_stock(wa_id) and r.get("planes"):
-                avisos = []
-                for p in r.get("planes") or []:
-                    avisos.extend(p.get("avisos") or [])
-                if avisos:
-                    out += (
-                        "\n\n⚠ Periodo pruebas cocina: hay avisos de stock/costo "
-                        "pero puedes confirmar igual."
-                    )
+            avisos_plan: list[str] = []
+            for p in r.get("planes") or []:
+                avisos_plan.extend(p.get("avisos") or [])
+            stock_avisos = filtrar_avisos_stock_produccion(avisos_plan)
+            if not prod_sub["confirmar"] and stock_avisos and permitir_stock_negativo_operaciones(wa_id):
+                out += (
+                    "\n\n⚠ Hay stock insuficiente. Si confirmas, se registra igual "
+                    "y se envía aviso a administración."
+                )
+            if prod_sub["confirmar"] and stock_avisos and r.get("producidas"):
+                cods_txt = ", ".join(prod_sub["cods"])
+                await _notificar_stock_negativo_operacion(
+                    wa_id,
+                    operacion="producción subreceta",
+                    resumen=(
+                        f"{cods_txt} @ {prod_sub['bodega']} "
+                        f"({prod_sub.get('cantidad') or 'lote estándar'})"
+                    ),
+                    avisos=stock_avisos,
+                )
             if prod_sub["confirmar"]:
                 _pending_prod_sub.pop(wa_id, None)
                 _pending_prod_area.pop(wa_id, None)
