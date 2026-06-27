@@ -990,6 +990,56 @@ def _prod_ctx_esperando_sub(wa_id: str | None) -> bool:
     return bool(ctx.get("awaiting_sub_name") and ctx.get("area"))
 
 
+def _cantidad_natural_en_texto(texto: str) -> float | None:
+    """
+    Cantidad en lenguaje natural de producción:
+    «producir 186 pan bao», «pan bao 186 en bodega 005».
+    No captura códigos SUB/BOD ni bodegas 001-005.
+    """
+    raw = (texto or "").strip()
+    if not raw:
+        return None
+
+    def _parse_qty(tok: str) -> float | None:
+        try:
+            val = float(tok.replace(",", "."))
+        except ValueError:
+            return None
+        return val if val > 0 else None
+
+    def _es_codigo_no_cantidad(tok: str) -> bool:
+        t = tok.strip().lstrip("0") or tok.strip()
+        if re.fullmatch(r"00[1-5]", tok.strip(), re.I):
+            return True
+        if re.fullmatch(r"\d{3}", tok.strip()) and int(tok.strip()) <= 99:
+            return True
+        return False
+
+    m = re.search(
+        r"\b(?:producir|producci[oó]n|preparar|registrar|hacer|batch)\w*\s+"
+        r"(\d[\d.,]*)\s+"
+        r"(?!sub\b|bod[- ]?|bodega\b|00[1-5]\b)",
+        raw,
+        re.I,
+    )
+    if m and not _es_codigo_no_cantidad(m.group(1)):
+        val = _parse_qty(m.group(1))
+        if val is not None:
+            return val
+
+    m2 = re.search(
+        r"\b(\d[\d.,]*)\s+en\s+(?:la\s+)?(?:bodega|bod[- ]?)",
+        raw,
+        re.I,
+    )
+    if m2 and not _es_codigo_no_cantidad(m2.group(1)):
+        val = _parse_qty(m2.group(1))
+        if val is not None:
+            return val
+
+    return None
+
+
 def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | None:
     """Cantidad en unidad base (gr/ml/uni) o None → lote estándar en producción."""
     from unidades_operativas import (
@@ -1001,6 +1051,11 @@ def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | Non
     if expl is not None:
         return expl
     if cod_sub:
+        natural = _cantidad_natural_en_texto(texto)
+        if natural is not None:
+            r = resolver_cantidad_produccion_sub(cod_sub, natural, texto=texto)
+            if r.get("cantidad_base") is not None:
+                return float(r["cantidad_base"])
         suelta = _cantidad_suelta_en_texto(texto, cod_sub)
         if suelta is not None:
             return suelta

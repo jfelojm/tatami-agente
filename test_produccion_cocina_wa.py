@@ -152,6 +152,62 @@ class TestCantidadSueltaProduccion(unittest.TestCase):
 
         self.assertIsNone(_extraer_cantidad_sub("producir sub 006", cod_sub="006"))
 
+    @patch(
+        "unidades_operativas.cargar_rendimiento_subrecetas",
+        return_value={
+            "SUB-006": {
+                "rendimiento_estandar": 60.0,
+                "unidad": "uni",
+                "nombre_subreceta": "pan bao",
+            }
+        },
+    )
+    def test_cantidad_antes_nombre_luis(self, _mock) -> None:
+        from whatsapp_webhook import _extraer_cantidad_sub
+
+        cant = _extraer_cantidad_sub(
+            "Producir 186 pan bao en bodega 005", cod_sub="006"
+        )
+        self.assertEqual(cant, 186.0)
+
+    @patch(
+        "unidades_operativas.cargar_rendimiento_subrecetas",
+        return_value={
+            "SUB-006": {
+                "rendimiento_estandar": 60.0,
+                "unidad": "uni",
+                "nombre_subreceta": "pan bao",
+            }
+        },
+    )
+    def test_cantidad_antes_en_bodega(self, _mock) -> None:
+        from whatsapp_webhook import _extraer_cantidad_sub
+
+        cant = _extraer_cantidad_sub(
+            "Producir pan bao 186 en bodega 005", cod_sub="006"
+        )
+        self.assertEqual(cant, 186.0)
+
+    @patch(
+        "unidades_operativas.cargar_rendimiento_subrecetas",
+        return_value={
+            "SUB-006": {
+                "rendimiento_estandar": 60.0,
+                "unidad": "uni",
+                "nombre_subreceta": "pan bao",
+            }
+        },
+    )
+    def test_parse_batch_luis(self, _mock) -> None:
+        from whatsapp_webhook import _parse_batch_lenguaje_natural
+
+        batch = _parse_batch_lenguaje_natural(
+            "Producir 186 pan bao en bodega 005", "593"
+        )
+        self.assertEqual(batch.get("cods"), ["006"])
+        self.assertEqual(batch.get("bodega"), "BOD-005")
+        self.assertEqual(batch.get("cantidad"), 186.0)
+
 
 class TestResolverProduccionNombre(unittest.TestCase):
     def test_pendiente_obsoleta_si_alias_distinto(self) -> None:
