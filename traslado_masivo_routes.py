@@ -28,9 +28,19 @@ import re
 import unicodedata
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 router = APIRouter()
+
+
+def _recalcular_stock_tras_masivo() -> None:
+    """Una pasada a BD_MP_SISTEMA (evita N recálculos y timeout 502 en Railway)."""
+    try:
+        from recalcular_stock_sheets import recalcular
+
+        recalcular(dry_run=False)
+    except Exception as e:
+        print(f"WARN traslado_masivo: recalcular Sheets: {e}")
 
 
 def _norm_email(email: str) -> str:
@@ -119,7 +129,7 @@ def ping_traslado_masivo(request: Request):
 
 
 @router.post("/enviar")
-async def recibir_traslado_masivo(request: Request):
+async def recibir_traslado_masivo(request: Request, background_tasks: BackgroundTasks):
     _check_traslado_secret(request)
     try:
         payload = await request.json()
@@ -129,7 +139,10 @@ async def recibir_traslado_masivo(request: Request):
         raise HTTPException(status_code=400, detail="El cuerpo debe ser un objeto JSON")
 
     try:
-        return _procesar_traslado_masivo(payload)
+        result, recalcular_despues = _procesar_traslado_masivo(payload)
+        if recalcular_despues:
+            background_tasks.add_task(_recalcular_stock_tras_masivo)
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -282,16 +295,8 @@ def _procesar_traslado_masivo(payload: dict):
             err_count += 1
         resultados.append(res)
 
-    if not modo_prueba and cods_ok:
-        try:
-            from recalcular_stock_sheets import recalcular_produccion
-
-            for cod in sorted(cods_ok):
-                recalcular_produccion(cod_mp_filtro=cod)
-        except Exception as e:
-            print(f"WARN traslado_masivo: recalcular Sheets: {e}")
-
     trx = "TRA-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    recalcular_despues = bool(not modo_prueba and cods_ok)
     return {
         "ok": err_count == 0,
         "trx": trx if not modo_prueba else "PRUEBA — nada se movió",
@@ -302,4 +307,5 @@ def _procesar_traslado_masivo(payload: dict):
         "traslados": ok_count,
         "errores": err_count,
         "lineas": resultados,
-    }
+        "recalculo_stock": "en_segundo_plano" if recalcular_despues else None,
+    }, recalcular_despues
