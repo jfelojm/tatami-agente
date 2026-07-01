@@ -6829,8 +6829,18 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
     _wa_ya_respondio_turno.pop(wa_key, None)
     try:
         from wa_chat_guard import touch_wa_chat
+        from wa_entrega_alertas import registrar_inbound
 
         touch_wa_chat(wa_id)
+        registrar_inbound(wa_id)
+        try:
+            from wa_entrega_alertas import entregar_alertas_pendientes_async
+
+            n_cola = await entregar_alertas_pendientes_async(wa_id)
+            if n_cola:
+                print(f"[Meta] {wa_id}: entregadas {n_cola} alerta(s) en cola")
+        except Exception as e:
+            print(f"[Meta] entregar_alertas_pendientes: {e}")
         if get_rol(wa_id) is None:
             await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
             return
@@ -7456,6 +7466,12 @@ async def recibir_webhook_meta(request: Request):
                     _log_webhook_event(
                         f"IN from={wa_from} type={mtype} id={msg_id} build={TATAMI_WA_BUILD} body={preview!r}"
                     )
+                    try:
+                        from wa_entrega_alertas import registrar_inbound
+
+                        registrar_inbound(wa_from)
+                    except Exception as e:
+                        print(f"[Meta webhook] registrar_inbound: {e}")
                     if msg_id and mensaje_ya_procesado(msg_id):
                         continue
                     wa_id = wa_from
@@ -7508,7 +7524,7 @@ def health():
                 sheets_ok = True
             except Exception as e:
                 sheets_ok = False
-                sheets_err = str(e)
+                sheets_err = str(e).strip() or repr(e)
         else:
             sheets_err = "sin credenciales"
     except Exception as e:

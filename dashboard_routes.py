@@ -377,6 +377,32 @@ def _parse_meses_query(values: list[str] | None) -> set[str] | None:
     return meses or None
 
 
+TIPOS_MOV_COMPRA = ("ENTRADA", "ENTRADA_COSTO_HIST")
+
+
+def _leer_sheets_dashboard() -> tuple[list[dict], list[dict]]:
+    """BD_MP_SISTEMA + BD_PROV con errores identificables por hoja."""
+    from dashboard_services.sheets_data import leer_bd_mp_sistema, leer_bd_prov
+
+    errores: list[str] = []
+    rows_mp: list[dict] = []
+    rows_prov: list[dict] = []
+    try:
+        rows_mp = leer_bd_mp_sistema()
+    except Exception as e:
+        errores.append(f"BD_MP_SISTEMA ({type(e).__name__}: {e})")
+    try:
+        rows_prov = leer_bd_prov()
+    except Exception as e:
+        errores.append(f"BD_PROV ({type(e).__name__}: {e})")
+    if errores:
+        raise HTTPException(
+            status_code=503,
+            detail="No se pudo leer Sheets: " + "; ".join(errores),
+        )
+    return rows_mp, rows_prov
+
+
 def _fetch_paginated(q, *, order: tuple[tuple[str, bool], ...] = ()) -> list[dict]:
     """Paginación estable en Supabase (requiere ORDER BY para >1000 filas)."""
     rows: list[dict] = []
@@ -424,12 +450,15 @@ def _query_mov_inventario(
     *,
     desde: str | None,
     hasta: str | None,
+    tipos_mov: tuple[str, ...] | list[str] | None = None,
 ) -> list[dict]:
     """Lectura mov_inventario para dashboards (compras, rentabilidad, roturas). Solo lectura."""
     q = sb.table("mov_inventario").select(
         "fecha,tipo_mov,cod_mp_sistema,nombre_mp,cantidad_mov,"
         "costo_unitario,costo_total,num_documento,cod_bodega_origen,cod_bodega_destino,observaciones"
     )
+    if tipos_mov:
+        q = q.in_("tipo_mov", list(tipos_mov))
     if desde:
         q = q.gte("fecha", desde)
     if hasta:
@@ -952,12 +981,18 @@ def dashboard_compras(
     if cached is not None:
         return _json_no_store(cached)
     try:
-        rows_mp = leer_bd_mp_sistema()
-        rows_prov = leer_bd_prov()
+        rows_mp, rows_prov = _leer_sheets_dashboard()
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"No se pudo leer Sheets: {e}") from e
+        raise HTTPException(
+            status_code=503,
+            detail=f"No se pudo leer Sheets: {type(e).__name__}: {e}",
+        ) from e
     result = build_resumen_compras(
-        query_mov_fn=lambda d, h: _query_mov_inventario(sb, desde=d, hasta=h),
+        query_mov_fn=lambda d, h: _query_mov_inventario(
+            sb, desde=d, hasta=h, tipos_mov=TIPOS_MOV_COMPRA
+        ),
         query_facturas_fn=lambda d, h: _query_facturas_procesadas(sb, desde=d, hasta=h),
         rows_mp=rows_mp,
         rows_prov=rows_prov,
@@ -1030,17 +1065,12 @@ def dashboard_rentabilidad(
             cat_filtros=cat_filtros,
             platos_filtro=platos_filtro,
         )
-        entradas = [
-            m for m in _query_mov_inventario(sb, desde=desde, hasta=hasta)
-            if (m.get("tipo_mov") or "") in ("ENTRADA", "ENTRADA_COSTO_HIST")
-        ]
+        entradas = _query_mov_inventario(
+            sb, desde=desde, hasta=hasta, tipos_mov=TIPOS_MOV_COMPRA
+        )
         from dashboard_services.compras import total_compras_dashboard
 
-        try:
-            rows_mp = leer_bd_mp_sistema()
-            rows_prov = leer_bd_prov()
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=f"No se pudo leer Sheets: {e}") from e
+        rows_mp, rows_prov = _leer_sheets_dashboard()
         facturas = _query_facturas_procesadas(sb, desde=desde, hasta=hasta)
         compras_total = total_compras_dashboard(entradas, facturas, rows_mp, rows_prov)
         result = build_rentabilidad_from_catalog(
