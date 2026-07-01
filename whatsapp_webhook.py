@@ -3971,6 +3971,76 @@ def tool_consumo_ingrediente_recetas(args):
 
 
 # ── Costo teórico platos (BD_RECETAS_DETALLE + MPs + subrecetas) ─
+_STOP_BUSQUEDA_PLATO = frozenset({
+    "busca",
+    "buscar",
+    "cuanto",
+    "cuesta",
+    "costo",
+    "costos",
+    "precio",
+    "precios",
+    "dame",
+    "quiero",
+    "ver",
+    "el",
+    "la",
+    "los",
+    "las",
+    "un",
+    "una",
+    "de",
+    "del",
+    "receta",
+    "plato",
+    "hacer",
+    "preparar",
+    "ingredientes",
+    "detalle",
+})
+
+
+def _tokens_nombre_plato(nom_q: str) -> list[str]:
+    return [
+        t
+        for t in _tokens_busqueda_mp(nom_q)
+        if t not in _STOP_BUSQUEDA_PLATO and len(t) >= 2
+    ]
+
+
+def _nombre_plato_coincide_busqueda(nom_q: str, nombre: str, varied: str) -> bool:
+    """Substring o todas las palabras del query en nombre/variedad (ej. rice tamago)."""
+    if nom_q in nombre or nom_q in varied:
+        return True
+    tokens = _tokens_nombre_plato(nom_q)
+    if not tokens:
+        return False
+    haystack = f"{nombre} {varied}".strip()
+    return bool(haystack) and all(t in haystack for t in tokens)
+
+
+def _mismo_nombre_receta_en_matches(
+    matches: list[tuple[str, list[dict]]],
+) -> bool:
+    if not matches:
+        return False
+    ref = (matches[0][1][0].get("nombre_receta") or "").strip().upper()
+    return all(
+        (lineas[0].get("nombre_receta") or "").strip().upper() == ref
+        for _, lineas in matches
+    )
+
+
+def _ordenar_matches_por_variedad(
+    matches: list[tuple[str, list[dict]]],
+) -> list[tuple[str, list[dict]]]:
+    def _key(item: tuple[str, list[dict]]) -> tuple[int, str]:
+        var = (item[1][0].get("variedad_smart_menu") or "").strip().lower()
+        return (0 if not var else 1, var)
+
+    return sorted(matches, key=_key)
+
+
 def _buscar_platos_receta(
     *,
     cod_receta: str = "",
@@ -4005,11 +4075,11 @@ def _buscar_platos_receta(
                 continue
             nombre = (lineas[0].get("nombre_receta") or "").strip().lower()
             varied = (lineas[0].get("variedad_smart_menu") or "").strip().lower()
-            if nom_q in nombre or nom_q in varied:
+            if _nombre_plato_coincide_busqueda(nom_q, nombre, varied):
                 if var and var.lower() not in varied:
                     continue
                 hits.append((key, lineas))
-        return hits
+        return _ordenar_matches_por_variedad(hits)
 
     return []
 
@@ -4055,12 +4125,8 @@ def tool_costo_plato(args):
                     "nombre_receta": (ln0.get("nombre_receta") or "").strip(),
                 }
             )
-        # Si hay pocas variedades del mismo producto, devolver costos de todas (ej. Fernet SHOT/BOTELLA).
-        if len(matches) <= 4 and all(
-            (lineas[0].get("nombre_receta") or "").strip().upper()
-            == (matches[0][1][0].get("nombre_receta") or "").strip().upper()
-            for _, lineas in matches
-        ):
+        # Mismo plato con varias variedades: listar costos (ej. TAMAGO RICE base/CAMARON/LOMO).
+        if _mismo_nombre_receta_en_matches(matches):
             try:
                 costos_mp, unitarios_sub, _, _ = cargar_contexto_costos()
             except Exception as e:
@@ -4080,12 +4146,40 @@ def tool_costo_plato(args):
                         ),
                     }
                 return {"error": err}
-            lines = [f"Costos de {(matches[0][1][0].get('nombre_receta') or nombre).strip()}:"]
-            for _key, lineas in matches:
-                res = resumen_plato_costo(lineas, costos_mp, unitarios_sub)
-                var_out = (res.get("variedad_smart_menu") or "").strip() or "base"
-                costo_v = float(res.get("costo_plato_estandar") or 0.0)
-                lines.append(f"- {var_out}: {costo_v:.2f} USD")
+            nom_plato = (matches[0][1][0].get("nombre_receta") or nombre).strip()
+            if ocultar_costos:
+                lines = [
+                    f"Encontré {len(matches)} variedades de {nom_plato}:",
+                    "",
+                ]
+                for _key, lineas in matches:
+                    ln0 = lineas[0]
+                    var_out = (ln0.get("variedad_smart_menu") or "").strip() or "base"
+                    lines.append(f"- {var_out}")
+                lines.append("")
+                lines.append(
+                    "Indicela con la variedad si quieres ingredientes "
+                    "(ej. tamago rice camarón)."
+                )
+            elif not incluir_ingredientes:
+                lines = [f"Costos de {nom_plato} (por 1 unidad):"]
+                for _key, lineas in matches:
+                    res = resumen_plato_costo(lineas, costos_mp, unitarios_sub)
+                    var_out = (res.get("variedad_smart_menu") or "").strip() or "base"
+                    costo_v = float(res.get("costo_plato_estandar") or 0.0)
+                    lines.append(f"- {var_out}: {costo_v:.2f} USD")
+                lines.append("")
+                lines.append(
+                    "¿Quieres ingredientes de alguna variedad? "
+                    "Indica cuál (ej. tamago rice lomo)."
+                )
+            else:
+                lines = [f"Costos de {nom_plato} (por 1 unidad):"]
+                for _key, lineas in matches:
+                    res = resumen_plato_costo(lineas, costos_mp, unitarios_sub)
+                    var_out = (res.get("variedad_smart_menu") or "").strip() or "base"
+                    costo_v = float(res.get("costo_plato_estandar") or 0.0)
+                    lines.append(f"- {var_out}: {costo_v:.2f} USD")
             texto = "\n".join(lines)
             return {
                 "encontrado": True,
@@ -4094,9 +4188,10 @@ def tool_costo_plato(args):
                 "texto_whatsapp": texto,
             }
         return {
+            "encontrado": True,
             "ambiguo": True,
             "opciones": opciones,
-            "mensaje": "Varias variedades o coincidencias; repite con cod_receta y variedad_smart_menu.",
+            "mensaje": "Varias coincidencias distintas; repite con cod_receta y variedad_smart_menu.",
         }
 
     try:
@@ -6358,6 +6453,8 @@ def _llamar_agente_inner(mensaje, telefono):
                     "ventas_por_dia",
                     "compras_facturas_rango",
                     "listar_subrecetas",
+                    "costo_plato",
+                    "receta_ingredientes",
                 )
                 and isinstance(result, dict)
                 and (result.get("texto_whatsapp") or "").strip()
