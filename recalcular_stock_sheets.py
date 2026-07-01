@@ -58,7 +58,12 @@ def _cod_mp_norm(c: str) -> str:
 
 
 def _clave_stock(cod_mp: str, cod_bodega: str) -> tuple[str, str]:
-    return _cod_mp_norm(cod_mp), normalizar_cod_bodega(cod_bodega)
+    """Clave canónica (cod_mp, bodega) alineada a norm_mp / BD_MP_SISTEMA (ej. 089, no 89)."""
+    from inventario_stock_mp import norm_mp
+
+    s = (cod_mp or "").strip()
+    key = norm_mp(s) if s.isdigit() else s
+    return key, normalizar_cod_bodega(cod_bodega)
 
 
 def _dias_ventana_costo() -> int:

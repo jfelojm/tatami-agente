@@ -7,7 +7,7 @@ from typing import Any
 
 from bodegas_config import BODEGAS, normalizar_cod_bodega
 from inventario_stock_mp import norm_mp
-from recalcular_stock_sheets import build_stock_calculado
+from recalcular_stock_sheets import _clave_stock, build_stock_calculado
 
 
 # Dashboard: solo bodegas operativas con nombre visible
@@ -136,7 +136,7 @@ def build_inventario_vivo(
     perdida_total = 0.0
 
     for (_cod, bod), meta in meta_mp.items():
-        stock = float(stock_map.get((_cod, bod), 0.0))
+        stock = float(stock_map.get(_clave_stock(_cod, bod), 0.0))
         info = clasificar_fila(
             stock=stock,
             par=meta["par_level"],
