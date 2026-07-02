@@ -33,6 +33,24 @@ class TestParseBodegaConteo(unittest.TestCase):
     def test_conteo_cocina(self) -> None:
         self.assertEqual(_parse_bodega_conteo("conteo cocina"), "BOD-001")
 
+    def test_conteo_barra(self) -> None:
+        self.assertEqual(_parse_bodega_conteo("Conteo barra"), "BOD-002")
+
+
+class TestQuiereIniciarConteo(unittest.TestCase):
+    def test_conteo_barra_lista_no_inicia(self) -> None:
+        bod = _parse_bodega_conteo("Conteo barra")
+        self.assertEqual(bod, "BOD-002")
+        self.assertFalse(_quiere_iniciar_conteo("Conteo barra", bod, ctx_activo=False))
+
+    def test_iniciar_conteo_barra_si_inicia(self) -> None:
+        bod = _parse_bodega_conteo("INICIAR CONTEO barra")
+        self.assertTrue(_quiere_iniciar_conteo("INICIAR CONTEO barra", bod, ctx_activo=False))
+
+    def test_iniciar_002_con_ctx(self) -> None:
+        bod = _parse_bodega_conteo("iniciar 002", seguimiento=True)
+        self.assertTrue(_quiere_iniciar_conteo("iniciar 002", bod, ctx_activo=True))
+
 
 class TestParseIniciarConteoComando(unittest.TestCase):
     def test_005(self) -> None:

@@ -97,7 +97,7 @@ def iniciar_conteo_wa(
             f"Abrir la hoja '{hoja}' en el maestro de datos.",
             f"Verificar ciclo_id en celda B2: {ciclo_id}",
             "Rellenar columna G (conteo_fisico) en todas las filas; 0 es válido.",
-            "Menú Conteo → Enviar a Tatami (requiere Apps Script y TATAMI_CONTEO_API_URL configurados).",
+            "Menu Conteo > Enviar a Tatami (requiere Apps Script y TATAMI_CONTEO_API_URL configurados).",
             "Tras enviar, Moisés puede aprobar por WhatsApp (APROBAR TODO / APROBAR nombre).",
         ],
     }

@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250626-prod-confirm-bodega-v37"
+TATAMI_WA_BUILD = "20250702-conteo-lista-barra-v38"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -583,14 +583,15 @@ def _msg_disambig_bod_sub(cod: str) -> str:
 def _quiere_iniciar_conteo(
     texto: str, bod: str | None, *, ctx_activo: bool = False
 ) -> bool:
+    """True solo si el usuario pide crear ciclo (no «conteo barra» = consultar abiertos)."""
     t = (texto or "").lower()
     if re.search(r"\b(abiert[oa]s?|revisar|estado|ciclos?|borrador)\b", t):
         return False
-    if re.search(r"\b(iniciar|nuevo|empezar|crear)\b", t):
+    if re.search(r"\b(iniciar|nuevo|empezar|crear)\s+conteo\b", t):
+        return True
+    if re.search(r"\b(iniciar|nuevo|empezar|crear)\b", t) and bod:
         return True
     if ctx_activo and bod:
-        return True
-    if bod and re.search(r"\bconteo\b", t):
         return True
     return False
 
@@ -608,7 +609,7 @@ def _es_mensaje_conteo(texto: str, wa_id: str | None = None) -> bool:
     # Producción / subreceta no es conteo aunque diga «cocina» o «barra»
     if re.search(r"\b(produc|prepar|subreceta|semi)\w*", t):
         return False
-    if re.search(r"\bconteo", t):
+    if re.search(r"\bconteo", t) or re.search(r"\bonteo\b", t):
         return True
     if re.search(r"inventario\s+f[ií]sico", t):
         return True
@@ -665,6 +666,21 @@ def _texto_resumen_conteo_wa(ciclos: list[dict], *, bod: str | None = None) -> s
 
 
 async def _manejar_mensaje_conteo(wa_id: str, texto: str) -> None:
+    try:
+        await _manejar_mensaje_conteo_impl(wa_id, texto)
+    except Exception as e:
+        import traceback
+
+        print(f"[Meta] _manejar_mensaje_conteo wa_id={wa_id!r}: {e}")
+        print(traceback.format_exc())
+        await enviar_mensaje_meta(
+            wa_id,
+            f"No pude procesar el conteo: {e!s}\n"
+            "Prueba: *INICIAR CONTEO BOD-002* (barra) o *conteo barra*.",
+        )
+
+
+async def _manejar_mensaje_conteo_impl(wa_id: str, texto: str) -> None:
     if not (
         autorizado_tool(wa_id, "conteo_ciclos_abiertos")
         or autorizado_tool(wa_id, "conteo_iniciar")
@@ -683,6 +699,9 @@ async def _manejar_mensaje_conteo(wa_id: str, texto: str) -> None:
     )
     quiere_iniciar = _quiere_iniciar_conteo(
         texto, bod, ctx_activo=bool(ctx_prev.get("active"))
+    )
+    print(
+        f"[Meta] {wa_id}: route=conteo iniciar={quiere_iniciar} bod={bod or '-'}"
     )
     if quiere_iniciar and bod:
         if not autorizado_tool(wa_id, "conteo_iniciar"):
@@ -703,9 +722,13 @@ async def _manejar_mensaje_conteo(wa_id: str, texto: str) -> None:
             out = f"Error: {e}"
         await enviar_mensaje_meta(wa_id, out)
         return
-    r = await asyncio.to_thread(tool_conteo_ciclos_abiertos, {})
-    ciclos = r.get("ciclos") or []
-    await enviar_mensaje_meta(wa_id, _texto_resumen_conteo_wa(ciclos, bod=bod))
+    try:
+        r = await asyncio.to_thread(tool_conteo_ciclos_abiertos, {})
+        ciclos = r.get("ciclos") or []
+        out = _texto_resumen_conteo_wa(ciclos, bod=bod)
+    except Exception as e:
+        out = f"No pude consultar ciclos abiertos: {e!s}"
+    await enviar_mensaje_meta(wa_id, out)
 
 
 _PRODUCCION_VERBOS_RE = re.compile(
@@ -5005,6 +5028,7 @@ def _normalizar_texto_comando_wa(texto: str) -> str:
     t = re.sub(r"\braslad", "traslad", t, flags=re.I)
     t = re.sub(r"\btralsad", "traslad", t, flags=re.I)
     t = re.sub(r"\bchoclate\b", "chocolate", t, flags=re.I)
+    t = re.sub(r"\bonteo\b", "conteo", t, flags=re.I)
     return t
 
 
@@ -7127,7 +7151,12 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 await enviar_mensaje_meta(wa_id, MSG_AYUDA_SUBRECETA)
                 return
 
-            # Respuesta BARRA / COCINA (o «producir cocina») — antes que conteo
+            # Conteo físico — antes que pick BARRA/COCINA (evita «conteo barra» → producción)
+            if _es_mensaje_conteo(texto, wa_id):
+                await _manejar_mensaje_conteo(wa_id, texto)
+                return
+
+            # Respuesta BARRA / COCINA (o «producir cocina») — no si el mensaje es conteo
             if _pending_prod_area.get(wa_id) == "pick":
                 if _es_mensaje_traslado(texto):
                     print(f"[Meta] {wa_id}: route=traslado (cancela pick producción)")
@@ -7164,7 +7193,7 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     await _manejar_mensaje_conteo(wa_id, f"iniciar {cod_amb}")
                     return
 
-            # Conteo físico — después de pick producción (barra/cocina no son batches)
+            # Conteo físico — respaldo si no entró arriba
             if _es_mensaje_conteo(texto, wa_id):
                 await _manejar_mensaje_conteo(wa_id, texto)
                 return
