@@ -18,8 +18,9 @@
  *   5. Ejecutar solicitarPermisosExternos → Guardar → F5
  *
  * HOJAS (Python):
- *   python setup_ingreso_factura_manual.py
- *   python setup_ingreso_traslado_masivo.py
+ *   python setup_ingreso_factura_manual.py      — primera vez INGRESO_FACTURA
+ *   python setup_ingreso_traslado_masivo.py     — primera vez INGRESO_TRASLADO
+ *   python staging_sync_desde_maestro.py        — tras cambios en maestro (catálogos)
  *
  * MENÚS: Tatami Admin | Tatami Tests | Tatami Facturas | Tatami Traslados
  *
@@ -48,6 +49,8 @@ function onOpen() {
     .addItem("Refrescar listas aux subrecetas (dropdowns)", "refrescarAuxSubrecetasMenu")
     .addSeparator()
     .addItem("Promover Productos aprobados → BD_PRODUCTOS", "promoverProductos")
+    .addSeparator()
+    .addItem("↻ Tras sync Python: refrescar dropdown traslados", "postSyncRefrescarTraslados")
     .addToUi();
 
   ui.createMenu("🧪 Tatami Tests")
@@ -71,6 +74,7 @@ function onOpen() {
   ui.createMenu("📦 Tatami Traslados")
     .addItem("🔐 Autorizar conexión con agente", "solicitarPermisosExternosMenu")
     .addItem("🔍 Verificar URL y correos", "verificarConexionTraslado")
+    .addItem("↻ Refrescar dropdown productos (post-sync maestro)", "postSyncRefrescarTraslados")
     .addItem("🔽 Filtrar lista por bodega origen (opcional)", "actualizarListaProductosTraslado")
     .addItem("📋 Restaurar lista completa de productos", "restaurarListaCompletaTraslado")
     .addItem("🔒 Proteger hoja INGRESO_TRASLADO", "protegerIngresoTraslado")
@@ -1395,6 +1399,23 @@ function onEdit(e) {
   // Sin accion automatica en INGRESO_TRASLADO (evita invalidar productos ya elegidos).
 }
 
+/** Tras `python staging_sync_desde_maestro.py`: recarga columna H según bodega origen. */
+function postSyncRefrescarTraslados() {
+  var ing = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HOJA_TRASLADO);
+  if (!ing) {
+    SpreadsheetApp.getUi().alert(
+      "No existe INGRESO_TRASLADO.\nEjecuta: python setup_ingreso_traslado_masivo.py"
+    );
+    return;
+  }
+  var bodTxt = String(ing.getRange("B2").getValue() || "").trim();
+  if (bodTxt) {
+    actualizarListaProductosTraslado_(true);
+  } else {
+    restaurarListaCompletaTraslado_(true);
+  }
+}
+
 /** Escribe en H2:H los productos de CAT_TRASLADO filtrados por bodega origen (F1/B2). */
 function actualizarListaProductosTraslado() {
   actualizarListaProductosTraslado_(true);
@@ -1645,7 +1666,8 @@ function aceptarTraslado_(modoPrueba) {
   }
 
   limpiarTraslado_(hoja);
-  ui.alert("✅ Traslados registrados.\n\nCódigo: " + trx + "\nLíneas: " + body.traslados);
+  var notaStock = body.recalculo_stock ? "\n\nStock en Sheets se actualiza en segundo plano (1-2 min)." : "";
+  ui.alert("✅ Traslados registrados.\n\nCódigo: " + trx + "\nLíneas: " + body.traslados + notaStock);
 }
 
 function registrarHistorialTraslado_(ss, trx, usuario, origen, destino, lineas) {
@@ -1672,7 +1694,7 @@ function registrarHistorialTraslado_(ss, trx, usuario, origen, destino, lineas) 
   }
   if (filas.length) {
     var startRow = reg.getLastRow() + 1;
-    reg.getRange(startRow, 1, filas.length, filas[0].length).setValues(filas);
+    reg.getRange(startRow, 1, startRow + filas.length - 1, filas[0].length).setValues(filas);
   }
 }
 

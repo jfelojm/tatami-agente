@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import os
 import re
-import unicodedata
 from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -85,23 +84,9 @@ def _validar_email_usuario(usuario: str) -> None:
 
 
 def _extraer_cod_producto(texto: str) -> str:
-    """Código MP o SUB desde línea del catálogo Sheets."""
-    s = unicodedata.normalize("NFKC", str(texto or "").strip())
-    m = re.search(r"\b(SUB-\d{2,4})\b", s, re.I)
-    if m:
-        return m.group(1).upper()
-    m = re.search(r"\bSUB\s*[-_]?\s*(\d{2,4})\b", s, re.I)
-    if m:
-        return f"SUB-{m.group(1).zfill(3)}"
-    parts = re.split(r"[\t|—–\-]+", s)
-    for p in parts:
-        p = p.strip()
-        if re.fullmatch(r"SUB-\d{2,4}", p, re.I):
-            return p.upper()
-        if re.fullmatch(r"\d{2,4}", p):
-            return p
-    m = re.search(r"\b(\d{2,4})\b", s)
-    return m.group(1) if m else s.strip()
+    from inventario_maestro_data import extraer_cod_producto
+
+    return extraer_cod_producto(texto)
 
 
 @router.get("/ping")
@@ -120,10 +105,23 @@ def ping_traslado_masivo(request: Request):
             if traslado_permitido(origen, destino):
                 pares.append(f"{origen}→{destino}")
     emails = sorted(_emails_autorizados())
+    maestro_ok = False
+    maestro_fuente = ""
+    maestro_err = ""
+    try:
+        from inventario_maestro_data import leer_bd_mp_sistema_unificado
+
+        rows, maestro_fuente = leer_bd_mp_sistema_unificado()
+        maestro_ok = bool(rows)
+    except Exception as e:
+        maestro_err = f"{type(e).__name__}: {e}".strip() or repr(e)
     return {
         "ok": True,
         "pares_traslado": pares,
         "emails_autorizados": len(emails),
+        "maestro_ok": maestro_ok,
+        "maestro_fuente": maestro_fuente or None,
+        "maestro_error": maestro_err or None,
         "nota": "Stock negativo permitido; solo correos autorizados.",
     }
 
@@ -183,9 +181,18 @@ def _procesar_traslado_masivo(payload: dict):
     if not isinstance(lineas, list) or not lineas:
         raise HTTPException(status_code=400, detail="lineas debe ser un arreglo no vacío")
 
-    from whatsapp_webhook import conectar_supabase, leer_bd_mp_sistema
+    from inventario_maestro_data import (
+        conectar_supabase,
+        leer_bd_mp_sistema_unificado,
+        resolver_mp_linea_traslado,
+    )
 
-    rows = leer_bd_mp_sistema(force_refresh=True)
+    rows, fuente_maestro = leer_bd_mp_sistema_unificado(force_refresh=True)
+    if not rows:
+        raise HTTPException(
+            status_code=503,
+            detail="No se pudo cargar inventario (Sheets ni Supabase)",
+        )
     resultados: list[dict] = []
     ok_count = 0
     err_count = 0
@@ -213,11 +220,9 @@ def _procesar_traslado_masivo(payload: dict):
             resultados.append(res)
             continue
 
-        from whatsapp_webhook import _resolver_mp_por_nombre
-
-        res_mp = _resolver_mp_por_nombre(
+        res_mp = resolver_mp_linea_traslado(
             rows,
-            nombre_mp=producto,
+            producto=producto,
             cod_mp=cod_buscar,
             bodega_origen=origen,
         )
@@ -233,7 +238,7 @@ def _procesar_traslado_masivo(payload: dict):
         res["cod_mp_sistema"] = cod_mp
         res["nombre_mp"] = nombre_mp
 
-        unidad_base = unidad_ln
+        unidad_base = unidad_ln or str(res_mp.get("unidad_base") or "").strip()
         stock_origen = None
         costo_ref = 0.0
         for r in rows:
@@ -307,5 +312,6 @@ def _procesar_traslado_masivo(payload: dict):
         "traslados": ok_count,
         "errores": err_count,
         "lineas": resultados,
+        "maestro_fuente": fuente_maestro,
         "recalculo_stock": "en_segundo_plano" if recalcular_despues else None,
     }, recalcular_despues
