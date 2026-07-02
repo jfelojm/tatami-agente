@@ -7608,22 +7608,33 @@ async def webhook(Body: str = Form(...), From: str = Form(...)):
 @app.get("/")
 def health():
     try:
-        from google_credentials import has_google_credentials, pin_cloud_env
+        from google_credentials import (
+            google_credentials_status,
+            has_google_credentials,
+            open_gspread_workbook,
+            pin_cloud_env,
+        )
 
         pin_cloud_env()
         tools_n = len(TOOLS)
         sheets_ok = False
         sheets_err = ""
+        google_status = google_credentials_status()
         if has_google_credentials():
             try:
-                sh = conectar_sheets()
-                sh.sheet1.get("A1")
+                sh = open_gspread_workbook(
+                    ["https://www.googleapis.com/auth/spreadsheets"]
+                )
+                sh.get_worksheet(0).get("A1")
                 sheets_ok = True
             except Exception as e:
                 sheets_ok = False
-                sheets_err = str(e).strip() or repr(e)
+                msg = str(e).strip()
+                if not msg and getattr(e, "args", None):
+                    msg = ", ".join(repr(a) for a in e.args if a)
+                sheets_err = f"{type(e).__name__}: {msg or repr(e)}"
         else:
-            sheets_err = "sin credenciales"
+            sheets_err = google_status.get("json_error") or "sin credenciales"
     except Exception as e:
         return {
             "status": "ok",
@@ -7638,6 +7649,7 @@ def health():
         "git_commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:12],
         "anthropic_key_set": bool((os.getenv("ANTHROPIC_API_KEY") or "").strip()),
         "google_creds_set": has_google_credentials(),
+        "google_status": google_status,
         "sheets_ping": sheets_ok,
         "spreadsheet_id_set": bool((os.getenv("SPREADSHEET_ID") or "").strip()),
     }
