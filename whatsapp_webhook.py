@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250702-conteo-lista-barra-v38"
+TATAMI_WA_BUILD = "20250702-prod-subs-cache-v39"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -890,7 +890,8 @@ def _buscar_cods_subreceta_por_nombre(texto: str, area: str | None = None) -> li
     """Resuelve códigos SUB desde nombre parcial (BD_SUBRECETAS)."""
     from codigos_subreceta import cod_sub_sin_prefijo
 
-    q = re.sub(r"\s+", " ", (texto or "").strip().lower())
+    frag = _fragmento_nombre_sub_en_texto(texto)
+    q = re.sub(r"\s+", " ", (frag or texto or "").strip().lower())
     if not q or len(q) < 2 or _es_consulta_no_produccion(q):
         return []
 
@@ -938,7 +939,8 @@ def _buscar_opciones_subreceta(
     """Lista (cod, nombre) de subs parecidas para desambiguación."""
     from codigos_subreceta import cod_sub_sin_prefijo
 
-    q = re.sub(r"\s+", " ", (texto or "").strip())
+    frag = _fragmento_nombre_sub_en_texto(texto)
+    q = re.sub(r"\s+", " ", (frag or texto or "").strip())
     if not q or len(q) < 2:
         return []
     hits: dict[str, tuple[str, dict, list]] = {}
@@ -1347,6 +1349,11 @@ BD_MP_CACHE_TTL_SEC = 60
 _bd_prov_cache: list[dict] | None = None
 _bd_prov_cache_at: float = 0.0
 BD_PROV_CACHE_TTL_SEC = 120
+
+# Catálogo SUB para búsqueda por nombre (sin recalcular costos en cada token)
+_subs_catalogo_cache: tuple[dict[str, dict], dict[str, list]] | None = None
+_subs_catalogo_cache_at: float = 0.0
+SUBS_CATALOGO_CACHE_TTL_SEC = 120
 
 _sheet_workbook = None
 
@@ -4319,14 +4326,50 @@ def _norm_sub_cod_wa(cod: str) -> str:
     return cod_sub_canonico(cod)
 
 
+def _subs_catalogo_cached() -> tuple[dict[str, dict], dict[str, list]]:
+    """Cabeceras + detalle agrupado; cache TTL (evita 429 en búsquedas WA)."""
+    global _subs_catalogo_cache, _subs_catalogo_cache_at
+    now = time.time()
+    if (
+        _subs_catalogo_cache is not None
+        and now - _subs_catalogo_cache_at < SUBS_CATALOGO_CACHE_TTL_SEC
+    ):
+        return _subs_catalogo_cache
+    from subrecetas_detalle import (
+        agrupar_detalle_por_padre,
+        cargar_bd_subrecetas,
+        cargar_bd_subrecetas_detalle,
+    )
+
+    cab = cargar_bd_subrecetas()
+    por_padre = agrupar_detalle_por_padre(cargar_bd_subrecetas_detalle())
+    _subs_catalogo_cache = (cab, por_padre)
+    _subs_catalogo_cache_at = now
+    return cab, por_padre
+
+
+def _mensaje_error_sheets_produccion(exc: BaseException) -> str:
+    err = str(exc).strip() or repr(exc)
+    if "429" in err or "Quota exceeded" in err or "Read requests" in err:
+        return (
+            "Google Sheets está saturado (demasiadas lecturas). "
+            "Espera 1–2 minutos e intenta de nuevo.\n"
+            "Comando directo: *PRODUCIR SUB 049 3800 GR BOD-005*"
+        )
+    if "credenciales Google" in err or "GOOGLE_CREDENTIALS" in err:
+        return (
+            "No pude conectar a Google Sheets para buscar la subreceta.\n"
+            "En Railway verifica GOOGLE_CREDENTIALS_JSON."
+        )
+    return f"No pude interpretar la producción: {err}"
+
+
 def _buscar_subrecetas(
     *,
     cod_subreceta: str = "",
     nombre_subreceta: str = "",
 ) -> list[tuple[str, dict, list[dict]]]:
-    from calcular_costo_subrecetas import cargar_contexto_subrecetas
-
-    cab, por_padre, _, _ = cargar_contexto_subrecetas()
+    cab, por_padre = _subs_catalogo_cached()
     cod = (cod_subreceta or "").strip()
     nom_q = (nombre_subreceta or "").strip().lower()
     hits: list[tuple[str, dict, list[dict]]] = []
@@ -7246,7 +7289,15 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             # Batch / producción
             if _es_intento_produccion(texto, wa_id):
                 await _feedback_procesando(wa_id, msg)
-            prod_sub = await asyncio.to_thread(_resolver_prod_sub, texto, wa_id)
+            try:
+                prod_sub = await asyncio.to_thread(_resolver_prod_sub, texto, wa_id)
+            except Exception as e:
+                import traceback
+
+                print(f"[Meta] _resolver_prod_sub wa_id={wa_id!r}: {e}")
+                print(traceback.format_exc())
+                await enviar_mensaje_meta(wa_id, _mensaje_error_sheets_produccion(e))
+                return
             if prod_sub is not None:
                 await _manejar_produccion_sub(wa_id, prod_sub, msg, texto=texto)
                 return

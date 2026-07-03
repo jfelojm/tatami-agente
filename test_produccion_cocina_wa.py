@@ -249,5 +249,21 @@ class TestResolverProduccionNombre(unittest.TestCase):
         self.assertEqual(r.get("cantidad"), 3000.0)
 
 
+    @patch(
+        "whatsapp_webhook._resolver_cods_produccion_desde_texto",
+        return_value=(["049"], None),
+    )
+    def test_batch_pistacho_3800gr_bod005(self, _mock) -> None:
+        from whatsapp_webhook import _parse_batch_lenguaje_natural
+
+        r = _parse_batch_lenguaje_natural(
+            "Producir 3800gr de pistacho en 005", "593987122959"
+        )
+        self.assertIsNotNone(r)
+        self.assertEqual(r.get("cods"), ["049"])
+        self.assertEqual(r.get("bodega"), "BOD-005")
+        self.assertEqual(r.get("cantidad"), 3800.0)
+
+
 if __name__ == "__main__":
     unittest.main()
