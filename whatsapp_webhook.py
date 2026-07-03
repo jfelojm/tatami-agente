@@ -61,7 +61,7 @@ TZ = pytz.timezone("America/Guayaquil")
 LOG_DIR = Path(__file__).resolve().parent / "logs"
 
 # Verificar en producción: GET / debe mostrar este valor tras cada deploy.
-TATAMI_WA_BUILD = "20250702-prod-subs-cache-v39"
+TATAMI_WA_BUILD = "20250703-wa-entrega-pistacho-v40"
 
 
 def _log_webhook_event(line: str) -> None:
@@ -4341,11 +4341,17 @@ def _subs_catalogo_cached() -> tuple[dict[str, dict], dict[str, list]]:
         cargar_bd_subrecetas_detalle,
     )
 
-    cab = cargar_bd_subrecetas()
-    por_padre = agrupar_detalle_por_padre(cargar_bd_subrecetas_detalle())
-    _subs_catalogo_cache = (cab, por_padre)
-    _subs_catalogo_cache_at = now
-    return cab, por_padre
+    try:
+        cab = cargar_bd_subrecetas()
+        por_padre = agrupar_detalle_por_padre(cargar_bd_subrecetas_detalle())
+        _subs_catalogo_cache = (cab, por_padre)
+        _subs_catalogo_cache_at = now
+        return cab, por_padre
+    except Exception as e:
+        if _subs_catalogo_cache is not None:
+            print(f"WARN _subs_catalogo_cached stale (refresh falló): {e}")
+            return _subs_catalogo_cache
+        raise
 
 
 def _mensaje_error_sheets_produccion(exc: BaseException) -> str:
@@ -4894,7 +4900,7 @@ _COCINA_ALIASES: list[tuple[tuple[str, ...], str]] = [
     (("salsa drunken",), "060"),
     (("aceite jengibre", "aceite de jengibre"), "044"),
     (("torta de chocolate", "tortas de chocolate", "torta chocolate", "tortas de choclate", "torta choclate"), "061"),
-    (("brigadeiro", "brigadeiro pistacho", "brigadeiro de pistacho"), "049"),
+    (("brigadeiro", "brigadeiro pistacho", "brigadeiro de pistacho", "pistacho"), "049"),
     (("carne de hamburguesa", "carne hamburguesa", "hamburguesa"), "004"),
     (
         (
@@ -4921,9 +4927,8 @@ def _aliases_subrecetas() -> list[tuple[str, str]]:
             pairs.append((g.lower(), cod.zfill(3)))
     try:
         from codigos_subreceta import cod_sub_canonico
-        from subrecetas_detalle import cargar_bd_subrecetas
 
-        cab = cargar_bd_subrecetas(conectar_sheets())
+        cab, _ = _subs_catalogo_cached()
         for cod_raw, info in cab.items():
             if (info.get("activa") or "SI").strip().upper() == "NO":
                 continue
@@ -6922,7 +6927,7 @@ async def _manejar_produccion_sub(
                     "En Railway verifica GOOGLE_CREDENTIALS_JSON (JSON completo del service account)."
                 )
             else:
-                out = f"Error al simular producción: {err}"
+                out = _mensaje_error_sheets_produccion(e)
         await enviar_mensaje_meta(wa_id, out)
     except Exception as e:
         import traceback
@@ -6993,18 +6998,20 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
     _wa_ya_respondio_turno.pop(wa_key, None)
     try:
         from wa_chat_guard import touch_wa_chat
-        from wa_entrega_alertas import registrar_inbound
 
         touch_wa_chat(wa_id)
-        registrar_inbound(wa_id)
         try:
-            from wa_entrega_alertas import entregar_alertas_pendientes_async
+            from wa_entrega_alertas import (
+                entregar_alertas_pendientes_async,
+                registrar_inbound,
+            )
 
+            registrar_inbound(wa_id)
             n_cola = await entregar_alertas_pendientes_async(wa_id)
             if n_cola:
                 print(f"[Meta] {wa_id}: entregadas {n_cola} alerta(s) en cola")
         except Exception as e:
-            print(f"[Meta] entregar_alertas_pendientes: {e}")
+            print(f"[Meta] wa_entrega_alertas: {e}")
         if get_rol(wa_id) is None:
             await enviar_mensaje_meta(wa_id, MSG_NO_AUTORIZADO)
             return
@@ -7287,9 +7294,9 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                 return
 
             # Batch / producción
-            if _es_intento_produccion(texto, wa_id):
-                await _feedback_procesando(wa_id, msg)
             try:
+                if _es_intento_produccion(texto, wa_id):
+                    await _feedback_procesando(wa_id, msg)
                 prod_sub = await asyncio.to_thread(_resolver_prod_sub, texto, wa_id)
             except Exception as e:
                 import traceback
