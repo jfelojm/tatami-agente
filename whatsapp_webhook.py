@@ -732,7 +732,7 @@ async def _manejar_mensaje_conteo_impl(wa_id: str, texto: str) -> None:
 
 
 _PRODUCCION_VERBOS_RE = re.compile(
-    r"\b(producir|produccion|producción|preparar|preparacion|preparación|"
+    r"\b(producir|produce|producen|produzca|produccion|producción|preparar|preparacion|preparación|"
     r"registrar|hacer|batch|subreceta|sub)\w*",
     re.I,
 )
@@ -1041,7 +1041,7 @@ def _cantidad_natural_en_texto(texto: str) -> float | None:
         return False
 
     m = re.search(
-        r"\b(?:producir|producci[oó]n|preparar|registrar|hacer|batch)\w*\s+"
+        r"\b(?:producir|produce|producen|produzca|producci[oó]n|preparar|registrar|hacer|batch)\w*\s+"
         r"(\d[\d.,]*)\s+"
         r"(?!sub\b|bod[- ]?|bodega\b|00[1-5]\b)",
         raw,
@@ -1217,18 +1217,18 @@ def _es_intento_produccion(texto: str, wa_id: str | None = None) -> bool:
         return False
     t = (texto or "").lower()
     if re.search(r"\bproducto?s?\b", t) and not re.search(
-        r"\b(producir|produccion|producción|preparar|preparacion|preparación)\w*",
+        r"\b(producir|produce|producen|produzca|produccion|producción|preparar|preparacion|preparación)\w*",
         t,
     ):
         return False
     if re.search(r"\b(subreceta|semi)\b", t) and not re.search(
-        r"\b(producir|preparar|registrar|hacer|batch)\w*",
+        r"\b(producir|produce|producen|produzca|preparar|registrar|hacer|batch)\w*",
         t,
     ):
         return False
     return bool(
         re.search(
-            r"\b(producir|produccion|producción|preparar|preparacion|preparación|registrar|hacer|batch)\w*",
+            r"\b(producir|produce|producen|produzca|produccion|producción|preparar|preparacion|preparación|registrar|hacer|batch)\w*",
             t,
         )
     )
@@ -1236,9 +1236,9 @@ def _es_intento_produccion(texto: str, wa_id: str | None = None) -> bool:
 
 def _es_orden_produccion_afirmativa(texto: str) -> bool:
     t = (texto or "").lower().strip()
-    if re.search(r"\b(preparar|preparacion|preparación|producir|produccion|producción)\w*", t):
+    if re.search(r"\b(preparar|preparacion|preparación|producir|produce|producen|produzca|produccion|producción)\w*", t):
         return True
-    return bool(t.startswith("si ") and re.search(r"\b(prepar|producir|haz|hacer)\w*", t))
+    return bool(t.startswith("si ") and re.search(r"\b(prepar|producir|produce|haz|hacer)\w*", t))
 
 
 def autorizado_tool(telefono: str, tool_name: str) -> bool:
