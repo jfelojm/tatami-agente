@@ -35,6 +35,11 @@ CAT_SUB = {
         "unidad": "uni",
         "nombre_subreceta": "dumpling de camaron",
     },
+    "SUB-071": {
+        "rendimiento_estandar": 16.0,
+        "unidad": "uni",
+        "nombre_subreceta": "TARTA VASCA",
+    },
 }
 
 
@@ -141,6 +146,16 @@ class TestResolverProduccion(unittest.TestCase):
             catalogo_sub=CAT_SUB,
         )
         self.assertEqual(r["cantidad_base"], 120.0)
+
+    def test_tarta_vasca_10_es_unidades_no_lotes(self):
+        r = resolver_cantidad_produccion_sub(
+            "071",
+            10,
+            texto="Producir 10 tarta vasca en 005",
+            catalogo_sub=CAT_SUB,
+        )
+        self.assertEqual(r["cantidad_base"], 10.0)
+        self.assertAlmostEqual(r["lotes"], 10 / 16.0)
 
 
 if __name__ == "__main__":

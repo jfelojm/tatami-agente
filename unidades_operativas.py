@@ -508,7 +508,15 @@ def resolver_cantidad_produccion_sub(
                 "rendimiento_estandar": rend,
                 "lotes": cant / rend if rend > 0 else None,
             }
-        if rend > 0 and cant == int(cant) and 0 < cant <= 30 and cant < rend:
+        # Entero pequeño < rendimiento → lotes solo en gr/ml (ej. «6» torta chocolate = 6×1054 gr).
+        # En uni el número es piezas (ej. «10 tarta vasca» = 10 uni, no 10×16).
+        if (
+            rend > 0
+            and cant == int(cant)
+            and 0 < cant <= 30
+            and cant < rend
+            and un not in ("uni", "unidad")
+        ):
             base = cant * rend
             return {
                 "cantidad_base": base,
