@@ -5134,6 +5134,11 @@ def _es_contexto_bodegas_no_sub(texto: str) -> bool:
     if _TRASLADO_DE_A_RE.search(texto or ""):
         return True
     t = (texto or "").lower()
+    # Si hay verbo de producción («produce 10 de 071»), el 0xx es un código SUB no una bodega
+    if re.search(
+        r"\b(?:producir|produce|producen|produzca|producci[oó]n|preparar|batch)\w*", t
+    ):
+        return False
     if re.search(r"\b(?:bod[- ]?)?0\d{2,3}\b", t) and re.search(
         r"\b(?:de|desde|a|hacia)\b", t
     ):
