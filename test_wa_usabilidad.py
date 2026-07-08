@@ -43,7 +43,7 @@ class TestMensajesPorRol(unittest.TestCase):
                 sin_fila_maestro=True,
             )
         self.assertIn("SÍ", msg)
-        self.assertIn("administración", msg)
+        self.assertNotIn("administración", msg)
         self.assertNotIn("BD_MP", msg)
         self.assertNotIn("sync", msg.lower())
 

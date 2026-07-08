@@ -422,6 +422,11 @@ def es_personal_cocina(telefono: str) -> bool:
     return bool(phone_roles(telefono) & ROLES_COCINA)
 
 
+def operador_recibe_aviso_stock_negativo(telefono: str) -> bool:
+    """False para cocina (Jacky, Charlie, etc.): no WA de stock negativo al operador."""
+    return not es_personal_cocina(telefono)
+
+
 def puede_consultar_ventas(telefono: str) -> bool:
     return autorizado_tool(telefono, "ventas_dia")
 
@@ -513,6 +518,12 @@ def telefonos_por_roles(role_codes: Iterable[str]) -> list[tuple[str, str]]:
 
 def alertas_wa_cocina_activas() -> bool:
     """False = ningún WA de digest/alertas cocina (solo barra por ahora)."""
+    import os
+
+    env_on = (os.getenv("TATAMI_ALERTAS_COCINA_ACTIVO") or "").strip().lower()
+    if env_on in ("1", "true", "yes", "si", "sí"):
+        return True
+
     from config_sheets import cfg
 
     v = cfg("alert_cocina_wa_activo")
@@ -550,6 +561,12 @@ def filtrar_items_bodega_barra(items: list[dict]) -> list[dict]:
 
 def telefonos_alerta(clave_roles_csv: str) -> list[tuple[str, str]]:
     """Lee clave BD_CONFIG con CSV de roles (ej. alert_stock_negativo_roles_barra)."""
+    from alertas_tatami import destino_preview_alertas, preview_alertas_activo
+
+    if preview_alertas_activo():
+        d = destino_preview_alertas()
+        return [(d, "preview alertas")]
+
     clave_l = (clave_roles_csv or "").lower()
     if "cocina" in clave_l and not alertas_wa_cocina_activas():
         return []

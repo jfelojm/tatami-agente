@@ -1,15 +1,20 @@
 """
-Digest matutino 8:00 — costos teóricos + alertas por área (BD_CONFIG digest_*, alert_*).
+Digest matutino 8:00 — alertas por área + costos teóricos (BD_CONFIG digest_*, alert_*).
+
+Las alertas WA se envían **antes** de recalcular costos teóricos (evita 429 Sheets
+bloqueando bajo PAR / pedidos barra).
 
 Mary: delta costos + pedidos barra (+ SRI aparte en pipeline).
 Stock negativo / bajo PAR: jefes + OPS_ALERTAS (Mary pendiente definir — ver BD_CONFIG).
 
 Uso:
   python digest_matutino.py
+  python digest_matutino.py --forzar
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -217,50 +222,54 @@ def _enviar_a_roles(clave_roles: str, texto: str, etiqueta: str) -> int:
     return n
 
 
-def main() -> int:
-    from config_sheets import cfg
+def _enviar_alertas_wa() -> None:
+    """Alertas inventario / pedidos — antes de costos teóricos (Sheets pesado)."""
+    from config_sheets import cfg, cfg_tokens
+    from estrategia_config import alertas_wa_barra_activas, alertas_wa_cocina_activas
 
-    if not cfg("digest_matutino_activo", True):
-        print("  INFO: digest_matutino_activo=false")
-        return 0
+    from alertas_tatami import preview_alertas_activo
 
-    print("=" * 60)
-    print(f"DIGEST MATUTINO — {datetime.now(ZONA_EC):%Y-%m-%d %H:%M} EC")
-    print("=" * 60)
+    if preview_alertas_activo():
+        print("  Modo preview alertas: destino único (TATAMI_ALERTAS_PREVIEW_DESTINO)")
 
-    if cfg("pipe_costos_activo", True):
-        rc = _run_script(str(cfg("pipe_costos_script", "recalcular_todos_costos.py")), ["--produccion"])
-        if rc != 0:
-            print(f"  WARN: costos teóricos exit {rc}")
-        else:
-            try:
-                from alertas_pipeline import ping_wa_paso_proceso
-
-                ping_wa_paso_proceso("Costos teóricos (digest 8:00)")
-            except Exception as e:
-                print(f"  WARN: ping WA costos: {e}")
-
-    from config_sheets import cfg_tokens
-
-    bod_barra = cfg_tokens("area_barra_bodegas", {"BOD-002", "BOD-003"})
-    bod_cocina = cfg_tokens("area_cocina_bodegas", {"BOD-001", "BOD-005"})
-    mps_barra = _mps_proveedor_tipo("Barra")
-    mps_cocina = _mps_proveedor_tipo("Cocina")
-    deltas = _delta_precios_ayer()
+    print("\n--- Alertas WA (prioridad) ---")
 
     if cfg("alert_pedidos_barra_activo", True):
         try:
             from alertas_ordenes_compra_barra import enviar_alertas_ordenes_compra_barra
 
             oc = enviar_alertas_ordenes_compra_barra(origen="digest_matutino")
-            if oc.get("enviado"):
-                print(f"  WA pedidos barra: {oc.get('proveedores')} proveedores")
+            n_env = int(oc.get("enviados") or 0)
+            if n_env:
+                print(
+                    f"  WA pedidos barra: {oc.get('proveedores')} proveedores, "
+                    f"{n_env} mensaje(s) enviado(s)"
+                )
+            elif oc.get("omitido"):
+                print(f"  INFO pedidos barra: {oc.get('omitido')}")
         except Exception as e:
             print(f"  WARN pedidos barra: {e}")
 
-    fecha = datetime.now(ZONA_EC).strftime("%Y-%m-%d")
+    try:
+        from alertas_inventario_barra import enviar_alertas_inventario_barra
 
-    from estrategia_config import alertas_wa_barra_activas, alertas_wa_cocina_activas
+        ab = enviar_alertas_inventario_barra(origen="digest_matutino")
+        if ab.get("enviado"):
+            print(
+                f"  WA inventario barra: bajo PAR={ab.get('bajo_par')} "
+                f"negativos={ab.get('negativos')}"
+            )
+        elif ab.get("omitido") and ab.get("omitido") != "sin alertas":
+            print(f"  INFO inventario barra: {ab.get('omitido')}")
+    except Exception as e:
+        print(f"  WARN inventario barra: {e}")
+
+    bod_barra = cfg_tokens("area_barra_bodegas", {"BOD-002", "BOD-003"})
+    bod_cocina = cfg_tokens("area_cocina_bodegas", {"BOD-001", "BOD-005"})
+    mps_barra = _mps_proveedor_tipo("Barra")
+    mps_cocina = _mps_proveedor_tipo("Cocina")
+    deltas = _delta_precios_ayer()
+    fecha = datetime.now(ZONA_EC).strftime("%Y-%m-%d")
 
     areas: list[str] = []
     if alertas_wa_barra_activas():
@@ -269,35 +278,134 @@ def main() -> int:
         areas.append("cocina")
     if not areas:
         print("  INFO: sin areas con alertas WA activas")
-        print("Digest matutino finalizado.")
-        return 0
+        return
 
     for area in areas:
-        ops_partes = []
+        neg_partes: list[str] = []
+        par_partes: list[str] = []
         if cfg("alert_stock_negativo_activo", True):
             bod = set(bod_barra if area == "barra" else bod_cocina)
             neg = _negativos_area(bod)
             if neg:
-                ops_partes.append(_formatear_negativos(neg))
+                neg_partes.append(_formatear_negativos(neg))
         if cfg("alert_bajo_par_activo", True):
             mps = mps_barra if area == "barra" else mps_cocina
             par = _bajo_par_area(mps or None)
             if par:
-                ops_partes.append(_formatear_par(par))
-        if ops_partes:
-            texto_ops = f"📋 *Inventario {area.upper()}* — {fecha}\n\n" + "\n\n".join(ops_partes)
-            _enviar_a_roles(f"alert_bajo_par_roles_{area}", texto_ops[:4000], f"digest ops {area}")
+                par_partes.append(_formatear_par(par))
+        if neg_partes:
+            texto_neg = f"📋 *Stock negativo {area.upper()}* — {fecha}\n\n" + "\n\n".join(
+                neg_partes
+            )
+            n = _enviar_a_roles(
+                f"alert_stock_negativo_roles_{area}",
+                texto_neg[:4000],
+                f"digest negativos {area}",
+            )
+            print(f"  digest negativos {area}: {n} destinatario(s)")
+        if par_partes:
+            texto_par = f"📋 *Inventario {area.upper()}* — {fecha}\n\n" + "\n\n".join(
+                par_partes
+            )
+            n = _enviar_a_roles(
+                f"alert_bajo_par_roles_{area}",
+                texto_par[:4000],
+                f"digest ops {area}",
+            )
+            print(f"  digest ops {area}: {n} destinatario(s)")
 
         if cfg("alert_delta_costos_activo", True) and deltas:
             texto_delta = f"📈 *Delta costos {area.upper()}* — {fecha}\n\n" + _formatear_delta(deltas)
-            _enviar_a_roles(
+            n = _enviar_a_roles(
                 f"alert_delta_costos_roles_{area}",
                 texto_delta[:4000],
                 f"digest delta {area}",
             )
+            print(f"  digest delta {area}: {n} destinatario(s)")
 
-    print("Digest matutino finalizado.")
-    return 0
+
+def main() -> int:
+    from config_sheets import cfg
+
+    ap = argparse.ArgumentParser(description="Digest matutino Tatami")
+    ap.add_argument(
+        "--forzar",
+        action="store_true",
+        help="Ignora deduplicación del día (repetir digest ya completado)",
+    )
+    args = ap.parse_args()
+
+    if not cfg("digest_matutino_activo", True):
+        print("  INFO: digest_matutino_activo=false")
+        return 0
+
+    from config_sheets import cfg_int
+    from pipeline_run_guard import corrida_fuera_de_tolerancia
+
+    hora_digest = 8
+    raw_h = str(cfg("digest_matutino_hora", "8:00") or "8:00").strip()
+    if ":" in raw_h:
+        try:
+            hora_digest = int(raw_h.split(":")[0]) % 24
+        except ValueError:
+            pass
+    else:
+        try:
+            hora_digest = int(raw_h) % 24
+        except ValueError:
+            pass
+    tol = max(1, min(cfg_int("sched_tolerancia_min", 8), 30))
+    if not args.forzar:
+        tarde, motivo = corrida_fuera_de_tolerancia(
+            hora_esperada=hora_digest, minuto_esperado=0, tolerancia_min=tol
+        )
+        if tarde:
+            print(
+                f"  INFO: digest omitido — fuera de ventana programada ({motivo}). "
+                f"Esperado ~{hora_digest:02d}:00 EC."
+            )
+            return 0
+
+    fecha = datetime.now(ZONA_EC).date().strftime("%Y-%m-%d")
+    slot = f"digest_{fecha}"
+
+    from pipeline_run_guard import corrida_unica, marcar_slot_completado
+
+    with corrida_unica(
+        "digest_matutino",
+        slot_id=slot,
+        slots_name="digest_matutino",
+        forzar=args.forzar,
+        lock_ttl_min=120,
+    ) as ejecutar:
+        if not ejecutar:
+            return 0
+
+        print("=" * 60)
+        print(f"DIGEST MATUTINO — {datetime.now(ZONA_EC):%Y-%m-%d %H:%M} EC")
+        print("=" * 60)
+
+        _enviar_alertas_wa()
+
+        if cfg("pipe_costos_activo", True):
+            print("\n--- Costos teóricos (post-alertas) ---")
+            rc = _run_script(
+                str(cfg("pipe_costos_script", "recalcular_todos_costos.py")),
+                ["--produccion"],
+            )
+            if rc != 0:
+                print(f"  WARN: costos teóricos exit {rc}")
+                return rc
+            try:
+                from alertas_pipeline import ping_wa_paso_proceso
+
+                ping_wa_paso_proceso("Costos teóricos (digest 8:00)")
+            except Exception as e:
+                print(f"  WARN: ping WA costos: {e}")
+
+        marcar_slot_completado("digest_matutino", slot)
+        print("Digest matutino finalizado.")
+        return 0
 
 
 if __name__ == "__main__":

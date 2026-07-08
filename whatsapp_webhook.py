@@ -6637,20 +6637,25 @@ async def _notificar_stock_negativo_operacion(
     resumen: str,
     avisos: list[str],
 ) -> None:
-    """Aviso al operador y a Felipe cuando se registra con stock insuficiente."""
-    from estrategia_config import filtrar_avisos_stock_produccion, telefono_admin_alertas
+    """Aviso al operador (excepto cocina) y a Felipe cuando se registra con stock insuficiente."""
+    from estrategia_config import (
+        filtrar_avisos_stock_produccion,
+        operador_recibe_aviso_stock_negativo,
+        telefono_admin_alertas,
+    )
 
     stock_avisos = filtrar_avisos_stock_produccion(avisos) if avisos else []
     if not stock_avisos and not avisos:
         return
     lineas = stock_avisos or avisos
     detalle = "\n".join(f"• {a}" for a in lineas[:10])
-    await enviar_mensaje_meta(
-        wa_id,
-        "⚠ *Registrado con stock insuficiente*\n"
-        f"{resumen}\n\n{detalle}\n\n"
-        "Se notificó a administración para seguimiento.",
-    )
+    if operador_recibe_aviso_stock_negativo(wa_id):
+        await enviar_mensaje_meta(
+            wa_id,
+            "⚠ *Registrado con stock insuficiente*\n"
+            f"{resumen}\n\n{detalle}\n\n"
+            "Se notificó a administración para seguimiento.",
+        )
     admin = telefono_admin_alertas()
     if admin and _norm_tel(admin) != _norm_tel(wa_id):
         await enviar_mensaje_meta(
@@ -6791,6 +6796,7 @@ async def _manejar_produccion_sub(
     from estrategia_config import (
         bodega_default_produccion_sub,
         filtrar_avisos_stock_produccion,
+        operador_recibe_aviso_stock_negativo,
         permitir_stock_negativo_operaciones,
         validar_bodega_produccion_sub,
     )
@@ -6876,13 +6882,19 @@ async def _manejar_produccion_sub(
                 simular=not prod_sub["confirmar"],
                 forzar=forzar,
                 recalcular=prod_sub["confirmar"],
+                omitir_avisos_stock=not operador_recibe_aviso_stock_negativo(wa_id),
             )
             out = r.get("texto_whatsapp") or str(r)
             avisos_plan: list[str] = []
             for p in r.get("planes") or []:
                 avisos_plan.extend(p.get("avisos") or [])
             stock_avisos = filtrar_avisos_stock_produccion(avisos_plan)
-            if not prod_sub["confirmar"] and stock_avisos and permitir_stock_negativo_operaciones(wa_id):
+            if (
+                not prod_sub["confirmar"]
+                and stock_avisos
+                and permitir_stock_negativo_operaciones(wa_id)
+                and operador_recibe_aviso_stock_negativo(wa_id)
+            ):
                 out += (
                     "\n\n⚠ Hay stock insuficiente. Si confirmas, se registra igual "
                     "y se envía aviso a administración."

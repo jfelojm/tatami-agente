@@ -110,6 +110,26 @@ class TestStockNegativoOperaciones(unittest.TestCase):
             ec._phone_to_roles.cache_clear()
             self.assertTrue(ec.permitir_stock_negativo_operaciones(JEFE_COCINA))
 
+    def test_cocina_no_recibe_aviso_stock_negativo(self) -> None:
+        with patch.dict(
+            ec.ROLE_ALLOWLIST_ENV,
+            {
+                "JEFE_COCINA": "ALLOWLIST_JEFE_COCINA",
+                "STAFF_COCINA": "ALLOWLIST_STAFF_COCINA",
+            },
+            clear=False,
+        ), patch.dict(
+            "os.environ",
+            {
+                "ALLOWLIST_JEFE_COCINA": JEFE_COCINA,
+                "ALLOWLIST_STAFF_COCINA": STAFF_COCINA,
+            },
+            clear=False,
+        ), patch("config_sheets.cfg", return_value=None):
+            ec._phone_to_roles.cache_clear()
+            self.assertFalse(ec.operador_recibe_aviso_stock_negativo(JEFE_COCINA))
+            self.assertFalse(ec.operador_recibe_aviso_stock_negativo(STAFF_COCINA))
+
     def test_filtrar_avisos_stock(self) -> None:
         avisos = [
             "HARINA (001)@BOD-005: stock -1500.0 < consumo 1500.0",

@@ -59,6 +59,7 @@ BD_CONFIG_ROWS: list[list[str]] = [
     ["sched_hora_inicio", "7", "Primera corrida (hora local)", "int"],
     ["sched_hora_fin", "0", "Última corrida (0=medianoche)", "int"],
     ["sched_intervalo_min", "60", "Minutos entre corridas", "int"],
+    ["sched_tolerancia_min", "8", "Máx minutos tras :00 para iniciar corrida (evita 12:47)", "int"],
     [
         "sched_orden_pipelines",
         "ventas_reconciliar,descargo,facturas_sri,carga_inventario_mp",
@@ -193,7 +194,7 @@ BD_CONFIG_ROWS: list[list[str]] = [
     ["alert_delta_costos_roles_cocina", "ADMIN,JEFE_COCINA,ADMIN_COMPRAS,OPS_ALERTAS", "Delta cocina", "csv"],
     ["alert_delta_costos_roles_barra", "ADMIN,JEFE_BARRA,ADMIN_COMPRAS,OPS_ALERTAS", "Delta barra", "csv"],
     ["alert_stock_negativo_activo", "true", "Stock negativo 8am", "bool"],
-    ["alert_stock_negativo_roles_cocina", "ADMIN,JEFE_COCINA,OPS_ALERTAS", "Negativos cocina", "csv"],
+    ["alert_stock_negativo_roles_cocina", "ADMIN,OPS_ALERTAS", "Negativos cocina", "csv"],
     ["alert_stock_negativo_roles_barra", "ADMIN,JEFE_BARRA,OPS_ALERTAS", "Negativos barra", "csv"],
     ["alert_bajo_par_activo", "true", "Bajo PAR 8am", "bool"],
     ["alert_bajo_par_roles_cocina", "ADMIN,JEFE_COCINA,OPS_ALERTAS", "PAR cocina", "csv"],

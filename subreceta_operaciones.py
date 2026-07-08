@@ -91,6 +91,7 @@ def _formatear_plan_wa(
     simular: bool,
     nombres_mp: dict[str, str] | None = None,
     subs_meta: dict[str, dict] | None = None,
+    omitir_avisos_stock: bool = False,
 ) -> str:
     ctx = {"nombres_mp": nombres_mp, "subs_meta": subs_meta}
     etiqueta = lambda item: _etiqueta_mp(item, **ctx)
@@ -107,9 +108,16 @@ def _formatear_plan_wa(
     if len(plan["salidas_mp"]) > 12:
         lines.append(f"  … +{len(plan['salidas_mp']) - 12} líneas más")
     if plan["avisos"]:
-        lines.append("Avisos:")
-        for a in plan["avisos"][:8]:
-            lines.append(f"  ! {a}")
+        avisos_plan = list(plan["avisos"])
+        if omitir_avisos_stock:
+            from estrategia_config import filtrar_avisos_stock_produccion
+
+            stock_set = set(filtrar_avisos_stock_produccion(avisos_plan))
+            avisos_plan = [a for a in avisos_plan if a not in stock_set]
+        if avisos_plan:
+            lines.append("Avisos:")
+            for a in avisos_plan[:8]:
+                lines.append(f"  ! {a}")
     if simular:
         lines.append("Para aplicar: responde *SÍ* o *confirmo*.")
     return "\n".join(lines)
@@ -124,6 +132,7 @@ def producir_subreceta_wa(
     simular: bool = True,
     forzar: bool = False,
     recalcular: bool = True,
+    omitir_avisos_stock: bool = False,
 ) -> dict:
     """
     Una o varias subrecetas (051 052 …). simular=True solo muestra el plan (evaluación).
@@ -166,6 +175,7 @@ def producir_subreceta_wa(
                     simular=simular,
                     nombres_mp=nombres_mp,
                     subs_meta=subs_meta,
+                    omitir_avisos_stock=omitir_avisos_stock,
                 )
             )
 

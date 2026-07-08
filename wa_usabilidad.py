@@ -6,6 +6,7 @@ import re
 import time
 
 from estrategia_config import (
+    operador_recibe_aviso_stock_negativo,
     phone_roles,
     primary_role,
     puede_consultar_inventario,
@@ -188,7 +189,11 @@ def msg_confirmacion_traslado(
         "_Puedes ajustar antes (ej. *2* o *3 tortas*)._",
     ]
     avisos: list[str] = []
-    if permitir_stock_negativo and stock_insuficiente:
+    if (
+        permitir_stock_negativo
+        and stock_insuficiente
+        and operador_recibe_aviso_stock_negativo(telefono)
+    ):
         avisos.append(
             f"⚠ Stock insuficiente en origen ({stock_origen:g} {unidad_base}). "
             "Si confirmas, se registra igual y se envía aviso a administración."
