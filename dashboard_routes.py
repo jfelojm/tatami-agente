@@ -335,6 +335,16 @@ def _resolver_producto(
     if len(filas) == 1:
         return filas[0]
 
+    # Variedad del hist no matchea (ej. "PAD THAI clasico", notas OBS):
+    # usar fila base del catálogo (sin variedad) en vez de mandar a OTRO.
+    if filas:
+        base = next(
+            (m for m in filas if not (m.get("variedad_smart_menu") or "").strip()),
+            None,
+        )
+        if base is not None:
+            return base
+
     return {
         "pv": "OTRO",
         "cat": "SIN CATEGORIA",

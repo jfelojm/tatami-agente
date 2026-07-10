@@ -161,5 +161,65 @@ class TestVentasIntegracion(unittest.TestCase):
             self.assertEqual(jun_tot, jun_bar)
 
 
+class TestResolverProductoClasico(unittest.TestCase):
+    def test_variedad_clasico_usa_fila_base(self):
+        from dashboard_routes import _resolver_producto
+
+        base = {
+            "pv": "COCINA",
+            "cat": "PLATOS FUERTES",
+            "nombre": "PAD THAI",
+            "cod_smart_menu": "10",
+            "variedad_smart_menu": "",
+            "cod_receta": "010",
+        }
+        lomo = {
+            **base,
+            "variedad_smart_menu": "LOMO",
+        }
+        catalogo = {
+            "by_cod_var": {
+                ("10", ""): base,
+                ("10", "LOMO"): lomo,
+            },
+            "by_cod": {"10": [base, lomo]},
+            "multivariety_cods": {"10"},
+        }
+        meta = _resolver_producto(
+            catalogo,
+            cod_smart_menu="10",
+            variedad_smart_menu="PAD THAI clasico",
+            nombre_producto="PAD THAI",
+        )
+        self.assertEqual(meta["pv"], "COCINA")
+        self.assertEqual(meta["cat"], "PLATOS FUERTES")
+        self.assertEqual(meta["variedad_smart_menu"], "")
+
+    def test_variedad_conocida_sigue_exacta(self):
+        from dashboard_routes import _resolver_producto
+
+        base = {
+            "pv": "COCINA",
+            "cat": "PLATOS FUERTES",
+            "nombre": "PAD THAI",
+            "cod_smart_menu": "10",
+            "variedad_smart_menu": "",
+            "cod_receta": "010",
+        }
+        lomo = {**base, "variedad_smart_menu": "LOMO"}
+        catalogo = {
+            "by_cod_var": {("10", ""): base, ("10", "LOMO"): lomo},
+            "by_cod": {"10": [base, lomo]},
+            "multivariety_cods": {"10"},
+        }
+        meta = _resolver_producto(
+            catalogo,
+            cod_smart_menu="10",
+            variedad_smart_menu="LOMO",
+            nombre_producto="PAD THAI",
+        )
+        self.assertEqual(meta["variedad_smart_menu"], "LOMO")
+
+
 if __name__ == "__main__":
     unittest.main()
