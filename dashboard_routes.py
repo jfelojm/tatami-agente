@@ -62,7 +62,11 @@ def _inline_dashboard_js(html: str) -> str:
         js = _escape_script(js_path.read_text(encoding="utf-8"))
         html = html.replace(src, f"<script>\n{js}\n</script>")
     return html
+
+
 _cache_catalogo: dict | None = None
+_cache_catalogo_at: float = 0.0
+_CATALOGO_TTL_SEC = float(os.getenv("DASHBOARD_CATALOGO_TTL_SEC", "120"))
 
 
 def _check_token(token: str) -> None:
