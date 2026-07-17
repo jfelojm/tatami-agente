@@ -1589,12 +1589,59 @@ async function loadMeta() {
     const v = _meta.ventas_hasta || '—';
     const m = _meta.movimientos_hasta || '—';
     const md = _meta.movimientos_desde || '—';
-    el.textContent = `Datos de ventas hasta ${v} · Movimientos inventario ${md} → ${m}`;
+    let extra = '';
+    if (_meta.hoy && _meta.ventas_hasta === _meta.hoy) {
+      const neto = Number(_meta.hoy_neto || 0).toLocaleString('es-EC', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+      const docs = _meta.hoy_docs != null ? _meta.hoy_docs : '—';
+      const uh = _meta.hoy_ultima_hora || '—';
+      const uc = _meta.hoy_ultima_carga || '—';
+      extra = ` · Hoy: $${neto} (${docs} docs, hasta ${uh}, sync ${uc})`;
+    }
+    const refreshed = new Date().toLocaleTimeString('es-EC', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    el.textContent =
+      `Datos de ventas hasta ${v}${extra} · Movimientos inventario ${md} → ${m} · Actualizado ${refreshed}`;
     el.classList.remove('hid');
     if (ag === 'semana') refreshSemanasPanel();
     if (ag === 'dia') refreshDiasPanel();
     if (window.currentDash === 'compras' && typeof cargarCompras === 'function') cargarCompras();
   } catch (_) {}
+}
+
+/** Recarga meta + vista activa (alineado al pipeline horario). */
+async function refreshDashboardData(reason) {
+  try {
+    await loadMeta();
+    if (typeof window.cargarDashboard === 'function') {
+      await window.cargarDashboard();
+    } else if (typeof cargar === 'function') {
+      await cargar();
+    }
+  } catch (e) {
+    console.warn('refreshDashboardData', reason, e);
+  }
+}
+
+const DASH_AUTO_REFRESH_MS = 60 * 60 * 1000; // 1 hora, igual que TatamiPipelineHorario
+let _dashAutoRefreshTimer = null;
+
+function startDashboardAutoRefresh() {
+  if (_dashAutoRefreshTimer) clearInterval(_dashAutoRefreshTimer);
+  _dashAutoRefreshTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') {
+      refreshDashboardData('interval');
+    }
+  }, DASH_AUTO_REFRESH_MS);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      refreshDashboardData('visible');
+    }
+  });
 }
 
 function renderSocios() {
@@ -2710,6 +2757,7 @@ function bootDashboard() {
     if (typeof initComprasMeses === 'function') initComprasMeses();
     if (typeof window.syncSharedFilters === 'function') window.syncSharedFilters();
     cargar();
+    startDashboardAutoRefresh();
   })();
 }
 bootDashboard();
