@@ -5,7 +5,8 @@ Flujo:
   1. Pipeline SRI/Drive procesa XML (match + precios + pendientes).
   2. Si el proveedor es Barra y SRI_BARRA_REQUIERE_OK=1:
      NO crea ENTRADA; encola líneas en staging POR_RECIBIR_BARRA.
-  3. Operador confirma OK total en Sheets → API → ENTRADA + cierra factura.
+  3. Operador marca usuario_ok (+ opcional cantidad_recibida) → API → ENTRADA.
+     Puede ser OK total, por líneas, o por cantidad parcial (el resto queda en cola).
 
 Otros proveedores (cocina, etc.) siguen con ENTRADA automática.
 """
@@ -45,7 +46,8 @@ HEADERS = [
     "cod_proveedor",
     "cod_item_xml",
     "descripcion",
-    "cantidad",
+    "cantidad",  # cantidad factura (pendiente en cola)
+    "cantidad_recibida",  # opcional: vacío = toda la cantidad; parcial = solo esa
     "costo_unitario",
     "total_linea",
     "cod_mp_sistema",
@@ -142,6 +144,19 @@ def clave_linea_cola(num_factura: str, cod_item_xml: str) -> str:
     return f"{n}|{c}"
 
 
+def _parse_qty(raw) -> float | None:
+    s = str(raw or "").strip().replace(",", ".")
+    if not s:
+        return None
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if v != v:  # NaN
+        return None
+    return v
+
+
 def setup_hoja_por_recibir(*, force_headers: bool = False) -> str:
     """Crea/actualiza POR_RECIBIR_BARRA en staging. Retorna spreadsheet id."""
     sid = staging_spreadsheet_id()
@@ -165,6 +180,15 @@ def setup_hoja_por_recibir(*, force_headers: bool = False) -> str:
         except Exception:
             pass
         log.info("Headers escritos en %s", SHEET_POR_RECIBIR)
+    else:
+        # Migrar columna cantidad_recibida si falta (sin borrar datos).
+        headers = [(c or "").strip() for c in vals[0]]
+        if "cantidad_recibida" not in headers and "cantidad" in headers:
+            idx = headers.index("cantidad") + 1  # 0-based insert after cantidad
+            nrows = max(len(vals), 1)
+            ws.insert_cols([[""] * nrows], col=idx + 1)
+            ws.update_cell(1, idx + 1, "cantidad_recibida")
+            log.info("Columna cantidad_recibida insertada en %s", SHEET_POR_RECIBIR)
     return sid
 
 
@@ -252,6 +276,7 @@ def encolar_lineas_por_recibir(
                 cod_xml,
                 (ln.get("descripcion") or "").strip()[:120],
                 str(ln.get("cantidad") or ""),
+                "",  # cantidad_recibida (operador)
                 str(ln.get("costo_unitario") or ""),
                 str(ln.get("total_linea") or ""),
                 (ln.get("cod_mp_sistema") or "").strip(),
@@ -302,12 +327,15 @@ def confirmar_factura_ok(
     usuario: str = "",
     dry_run: bool = False,
     claves_linea: list[str] | None = None,
+    cantidades_recibidas: dict[str, float] | None = None,
 ) -> dict:
     """
     OK de recepción: líneas POR_RECIBIR → ENTRADA inventario.
 
-    Si ``claves_linea`` viene con valores, solo esas líneas (OK parcial).
-    Si está vacío/None, OK total de todas las POR_RECIBIR de la factura.
+    - ``claves_linea``: si viene, solo esas líneas (OK parcial por ítem).
+    - ``cantidades_recibidas``: {clave_linea: qty} opcional; si no, usa columna
+      ``cantidad_recibida`` de la hoja; si vacía, toda ``cantidad``.
+    - Si qty recibida < cantidad factura, deja resto en nueva fila POR_RECIBIR.
     """
     from procesar_facturas_drive import (
         calcular_entrada_desde_factura,
@@ -329,6 +357,14 @@ def confirmar_factura_ok(
         filtro_claves = {str(c).strip() for c in claves_linea if str(c).strip()}
         if not filtro_claves:
             filtro_claves = None
+
+    qty_override: dict[str, float] = {}
+    if cantidades_recibidas:
+        for k, v in cantidades_recibidas.items():
+            kk = str(k).strip()
+            q = _parse_qty(v)
+            if kk and q is not None and q > 0:
+                qty_override[kk] = q
 
     headers, filas = _leer_filas_cola()
     pendientes = []
@@ -380,24 +416,59 @@ def confirmar_factura_ok(
     deltas_costo: dict[tuple[str, str], float] = {}
     rows_ok: list[int] = []
     claves_ok: list[str] = []
+    qtys_ok: list[dict] = []
+    restos_rows: list[list[str]] = []
+    qty_parcial_lineas = 0
 
     for row_n, d in pendientes:
+        cant_fac = _parse_qty(d.get("cantidad")) or 0.0
+        clave = (d.get("clave_linea") or "").strip() or clave_linea_cola(
+            num, d.get("cod_item_xml") or ""
+        )
+        cant_rec = qty_override.get(clave)
+        if cant_rec is None:
+            cant_rec = _parse_qty(d.get("cantidad_recibida"))
+        if cant_rec is None:
+            cant_rec = cant_fac
+
+        if cant_fac <= 0:
+            errores.append(f"{d.get('cod_item_xml')}: cantidad factura inválida")
+            continue
+        if cant_rec <= 0:
+            errores.append(f"{d.get('cod_item_xml')}: cantidad_recibida debe ser > 0")
+            continue
+        if cant_rec > cant_fac + 1e-9:
+            errores.append(
+                f"{d.get('cod_item_xml')}: cantidad_recibida ({cant_rec}) > "
+                f"cantidad factura ({cant_fac})"
+            )
+            continue
+
+        resto = round(cant_fac - cant_rec, 6)
+        if resto > 1e-9:
+            qty_parcial_lineas += 1
+            modo_parcial = True
+
+        costo_u_fac = _parse_qty(d.get("costo_unitario")) or 0.0
+        total_rec = round(cant_rec * costo_u_fac, 4) if costo_u_fac else (
+            _parse_qty(d.get("total_linea")) or 0.0
+        )
+        if cant_fac > 0 and (_parse_qty(d.get("total_linea")) or 0) > 0 and costo_u_fac <= 0:
+            total_rec = round(
+                (_parse_qty(d.get("total_linea")) or 0) * (cant_rec / cant_fac), 4
+            )
+
         item_factura = {
             "cod_item_xml": d.get("cod_item_xml") or "",
             "descripcion_proveedor": d.get("descripcion") or "",
-            "cantidad": float(str(d.get("cantidad") or "0").replace(",", ".") or 0),
-            "costo_efectivo": float(
-                str(d.get("costo_unitario") or "0").replace(",", ".") or 0
+            "cantidad": cant_rec,
+            "costo_efectivo": costo_u_fac
+            if costo_u_fac > 0
+            else (
+                (_parse_qty(d.get("total_linea")) or 0) / cant_fac if cant_fac else 0
             ),
-            "precio_total_sin_impuesto": float(
-                str(d.get("total_linea") or "0").replace(",", ".") or 0
-            ),
+            "precio_total_sin_impuesto": total_rec,
         }
-        # Enriquecer total si falta
-        if item_factura["precio_total_sin_impuesto"] <= 0:
-            item_factura["precio_total_sin_impuesto"] = round(
-                item_factura["cantidad"] * item_factura["costo_efectivo"], 4
-            )
 
         item_prov = buscar_item_prov(
             factura["ruc"],
@@ -433,20 +504,26 @@ def confirmar_factura_ok(
 
         bodega = (d.get("cod_bodega") or item_prov.get("cod_bodega_destino") or "BOD-002").strip()
         item_mov = dict(item_factura)
+        extra_qty = ""
+        if resto > 1e-9:
+            extra_qty = f" | QTY_PARCIAL:{cant_rec}/{cant_fac}"
         item_mov["descripcion_proveedor"] = (
-            f"{item_factura['descripcion_proveedor']} | ORIGEN:RECEPCION_BARRA"
-        )
-        clave = (d.get("clave_linea") or "").strip() or clave_linea_cola(
-            num, item_factura["cod_item_xml"]
+            f"{item_factura['descripcion_proveedor']} | ORIGEN:RECEPCION_BARRA{extra_qty}"
         )
 
         if dry_run:
             factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
             cant, _, _ = calcular_entrada_desde_factura(item_factura, item_prov, factor or 1)
-            print(f"  [DRY RUN] ENTRADA {item_prov.get('cod_mp_sistema')} +{cant} @ {bodega}")
+            print(
+                f"  [DRY RUN] ENTRADA {item_prov.get('cod_mp_sistema')} +{cant} @ {bodega}"
+                + (f" (recibido {cant_rec} de {cant_fac})" if resto > 1e-9 else "")
+            )
             entradas += 1
             rows_ok.append(row_n)
             claves_ok.append(clave)
+            qtys_ok.append(
+                {"clave": clave, "recibida": cant_rec, "factura": cant_fac, "resto": max(0, resto)}
+            )
             continue
 
         ok = registrar_entrada_inventario(
@@ -468,18 +545,56 @@ def confirmar_factura_ok(
         entradas += 1
         rows_ok.append(row_n)
         claves_ok.append(clave)
+        qtys_ok.append(
+            {"clave": clave, "recibida": cant_rec, "factura": cant_fac, "resto": max(0, resto)}
+        )
+
+        if resto > 1e-9:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            total_resto = round(resto * (item_factura["costo_efectivo"] or 0), 4)
+            restos_rows.append(
+                [
+                    now,
+                    num,
+                    factura["fecha_factura"],
+                    factura["ruc"],
+                    factura["razon_social"][:80],
+                    (d.get("cod_proveedor") or "").strip(),
+                    (d.get("cod_item_xml") or "").strip(),
+                    (d.get("descripcion") or "").strip()[:120],
+                    str(resto),
+                    "",  # cantidad_recibida
+                    str(d.get("costo_unitario") or ""),
+                    str(total_resto),
+                    (d.get("cod_mp_sistema") or "").strip(),
+                    (d.get("nombre_mp") or "").strip()[:60],
+                    (d.get("unidad_base") or "").strip(),
+                    bodega,
+                    ESTADO_POR_RECIBIR,
+                    "",
+                    "",
+                    clave,
+                ]
+            )
 
     if not dry_run and (deltas_stock or deltas_costo):
         _flush_mp_sistema(deltas_stock, deltas_costo)
 
-    # Marcar filas OK
+    # Marcar filas OK + cantidad_recibida efectiva
     if not dry_run and rows_ok:
         i_est = headers.index("estado") if "estado" in headers else None
         i_usr = headers.index("usuario_ok") if "usuario_ok" in headers else None
         i_fh = headers.index("fecha_ok") if "fecha_ok" in headers else None
+        i_crec = (
+            headers.index("cantidad_recibida") if "cantidad_recibida" in headers else None
+        )
         ws = open_staging().worksheet(SHEET_POR_RECIBIR)
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         updates = []
+        qty_by_row = {}
+        for i, row_n in enumerate(rows_ok):
+            if i < len(qtys_ok):
+                qty_by_row[row_n] = qtys_ok[i].get("recibida")
         for row_n in rows_ok:
             if i_est is not None:
                 updates.append(
@@ -496,8 +611,42 @@ def confirmar_factura_ok(
                 updates.append(
                     {"range": rowcol_to_a1(row_n, i_fh + 1), "values": [[now]]}
                 )
+            if i_crec is not None and row_n in qty_by_row:
+                updates.append(
+                    {
+                        "range": rowcol_to_a1(row_n, i_crec + 1),
+                        "values": [[str(qty_by_row[row_n])]],
+                    }
+                )
         if updates:
             ws.batch_update(updates, value_input_option=ValueInputOption.user_entered)
+
+        if restos_rows:
+            # Alinear columnas al header actual de la hoja
+            vals = ws.get_all_values()
+            start = len(vals) + 1
+            # Si la hoja aún no tiene cantidad_recibida, setup ya debió migrar;
+            # restos_rows sigue el orden HEADERS canónico.
+            if headers == HEADERS or (
+                "cantidad_recibida" in headers and len(headers) >= len(HEADERS)
+            ):
+                ws.update(
+                    range_name=f"A{start}",
+                    values=restos_rows,
+                    value_input_option=ValueInputOption.user_entered,
+                )
+            else:
+                # Mapear por nombre de columna
+                mapped = []
+                for resto_vals in restos_rows:
+                    by_h = dict(zip(HEADERS, resto_vals))
+                    mapped.append([(by_h.get(h) or "") for h in headers])
+                ws.update(
+                    range_name=f"A{start}",
+                    values=mapped,
+                    value_input_option=ValueInputOption.user_entered,
+                )
+            print(f"  POR_RECIBIR_BARRA: +{len(restos_rows)} resto(s) qty parcial")
 
     quedan_n = 0
     # Actualizar facturas_procesadas
@@ -524,8 +673,9 @@ def confirmar_factura_ok(
                     "at": datetime.now().isoformat(),
                     "usuario": usuario or "sheets",
                     "entradas": entradas,
-                    "parcial": modo_parcial or bool(filtro_claves),
+                    "parcial": modo_parcial or bool(filtro_claves) or qty_parcial_lineas > 0,
                     "claves": claves_ok,
+                    "cantidades": qtys_ok,
                 }
             )
             meta["recepcion_barra_oks"] = hist[-20:]
@@ -565,7 +715,7 @@ def confirmar_factura_ok(
             log.warning("No se pudo actualizar facturas_procesadas: %s", e)
             errores.append(f"facturas_procesadas: {e}")
     elif dry_run:
-        quedan_n = max(0, total_pend_factura - entradas)
+        quedan_n = max(0, total_pend_factura - entradas) + len(restos_rows)
 
     if not dry_run and entradas > 0 and not errores:
         ok_flag = True
@@ -583,8 +733,13 @@ def confirmar_factura_ok(
         "pendientes_previas": total_pend_factura,
         "lineas_ok": len(claves_ok),
         "quedan_por_recibir": quedan_n,
-        "parcial": modo_parcial or bool(filtro_claves and quedan_n > 0),
+        "parcial": modo_parcial
+        or bool(filtro_claves and quedan_n > 0)
+        or qty_parcial_lineas > 0,
+        "qty_parcial_lineas": qty_parcial_lineas,
+        "restos_encolados": len(restos_rows),
         "claves_ok": claves_ok,
+        "cantidades": qtys_ok,
         "errores": errores,
         "dry_run": dry_run,
         "staging": f"https://docs.google.com/spreadsheets/d/{staging_spreadsheet_id()}",

@@ -1299,14 +1299,32 @@ function tatamiAgenteBaseUrl_() {
 
 var HOJA_POR_RECIBIR_BARRA = "POR_RECIBIR_BARRA";
 
+function _celdaMarcadaOk_(raw) {
+  var s = String(raw || "").trim().toUpperCase();
+  if (!s) return false;
+  return (
+    s === "OK" ||
+    s === "SI" ||
+    s === "SÍ" ||
+    s === "YES" ||
+    s === "X" ||
+    s === "1" ||
+    s === "TRUE" ||
+    s === "RECIBIDO"
+  );
+}
+
 /**
- * Selección en POR_RECIBIR_BARRA → { num, claves[], nSel, nPendFactura }.
- * Solo filas con estado POR_RECIBIR.
+ * Líneas a confirmar en POR_RECIBIR_BARRA.
+ * Prioridad:
+ *  1) Filas con usuario_ok marcado (ok / si / x) y estado POR_RECIBIR
+ *  2) Filas seleccionadas con estado POR_RECIBIR
+ * Retorna { num, claves[], cantidades{}, nSel, nPendFactura }.
  */
 function seleccionPorRecibir_() {
-  var empty = { num: "", claves: [], nSel: 0, nPendFactura: 0 };
+  var empty = { num: "", claves: [], cantidades: {}, nSel: 0, nPendFactura: 0 };
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sh = ss.getActiveSheet();
+  var sh = ss.getSheetByName(HOJA_POR_RECIBIR_BARRA) || ss.getActiveSheet();
   if (!sh || sh.getName() !== HOJA_POR_RECIBIR_BARRA) return empty;
   var vals = sh.getDataRange().getValues();
   if (!vals || vals.length < 2) return empty;
@@ -1315,15 +1333,10 @@ function seleccionPorRecibir_() {
   var iEst = headers.indexOf("estado");
   var iClave = headers.indexOf("clave_linea");
   var iCod = headers.indexOf("cod_item_xml");
+  var iUsr = headers.indexOf("usuario_ok");
+  var iCant = headers.indexOf("cantidad");
+  var iCantRec = headers.indexOf("cantidad_recibida");
   if (iNum < 0) return empty;
-
-  var range = sh.getActiveRange();
-  if (!range) return empty;
-  var start = range.getRow();
-  var end = start + range.getNumRows() - 1;
-  var nums = {};
-  var claves = [];
-  var claveSet = {};
 
   function claveDe_(row, num) {
     if (iClave >= 0) {
@@ -1334,24 +1347,87 @@ function seleccionPorRecibir_() {
     return num + "|" + cod;
   }
 
-  for (var r = start; r <= end; r++) {
-    if (r < 2 || r > vals.length) continue;
-    var row = vals[r - 1];
-    var num = String(row[iNum] || "").trim();
-    if (!num) continue;
-    if (iEst >= 0) {
-      var est = String(row[iEst] || "").trim().toUpperCase();
-      if (est && est !== "POR_RECIBIR") continue;
-    }
-    nums[num] = true;
-    var clave = claveDe_(row, num);
-    if (clave && !claveSet[clave]) {
-      claveSet[clave] = true;
-      claves.push(clave);
-    }
+  function esPendiente_(row) {
+    if (iEst < 0) return true;
+    var est = String(row[iEst] || "").trim().toUpperCase();
+    return !est || est === "POR_RECIBIR";
   }
 
-  var keys = Object.keys(nums);
+  function qtyRecibida_(row) {
+    if (iCantRec >= 0) {
+      var raw = String(row[iCantRec] || "").trim().replace(",", ".");
+      if (raw) {
+        var q = Number(raw);
+        if (!isNaN(q) && q > 0) return q;
+      }
+    }
+    return null;
+  }
+
+  function pushLinea_(bag, num, row) {
+    var clave = claveDe_(row, num);
+    if (!clave) return;
+    if (!bag[num]) bag[num] = { claves: [], cantidades: {} };
+    if (bag[num].claves.indexOf(clave) >= 0) return;
+    bag[num].claves.push(clave);
+    var q = qtyRecibida_(row);
+    if (q != null) bag[num].cantidades[clave] = q;
+  }
+
+  // 1) Marcas en columna usuario_ok
+  var porNumOk = {};
+  if (iUsr >= 0) {
+    for (var r = 1; r < vals.length; r++) {
+      var row = vals[r];
+      if (!_celdaMarcadaOk_(row[iUsr])) continue;
+      if (!esPendiente_(row)) continue;
+      var num = String(row[iNum] || "").trim();
+      if (!num) continue;
+      pushLinea_(porNumOk, num, row);
+    }
+  }
+  var numsOk = Object.keys(porNumOk);
+  if (numsOk.length > 1) {
+    SpreadsheetApp.getUi().alert(
+      "Hay «ok» en " + numsOk.length + " facturas distintas.\n" +
+      "Dejá ok solo en una factura y volvé a confirmar."
+    );
+    return empty;
+  }
+  if (numsOk.length === 1) {
+    var numFac = numsOk[0];
+    var pack = porNumOk[numFac];
+    var nPend = 0;
+    for (var i = 1; i < vals.length; i++) {
+      var rr = vals[i];
+      if (String(rr[iNum] || "").trim() !== numFac) continue;
+      if (!esPendiente_(rr)) continue;
+      nPend++;
+    }
+    return {
+      num: numFac,
+      claves: pack.claves,
+      cantidades: pack.cantidades,
+      nSel: pack.claves.length,
+      nPendFactura: nPend,
+    };
+  }
+
+  // 2) Selección de filas (sin marcas ok)
+  var range = sh.getActiveRange();
+  if (!range) return empty;
+  var start = range.getRow();
+  var end = start + range.getNumRows() - 1;
+  var porSel = {};
+  for (var r2 = start; r2 <= end; r2++) {
+    if (r2 < 2 || r2 > vals.length) continue;
+    var row2 = vals[r2 - 1];
+    var num2 = String(row2[iNum] || "").trim();
+    if (!num2) continue;
+    if (!esPendiente_(row2)) continue;
+    pushLinea_(porSel, num2, row2);
+  }
+  var keys = Object.keys(porSel);
   if (keys.length > 1) {
     SpreadsheetApp.getUi().alert(
       "Seleccionaste filas de " + keys.length + " facturas distintas.\n" +
@@ -1359,20 +1435,24 @@ function seleccionPorRecibir_() {
     );
     return empty;
   }
-  if (keys.length !== 1 || !claves.length) return empty;
+  if (keys.length !== 1) return empty;
 
-  var numFac = keys[0];
-  var nPend = 0;
-  for (var i = 1; i < vals.length; i++) {
-    var rr = vals[i];
-    if (String(rr[iNum] || "").trim() !== numFac) continue;
-    if (iEst >= 0) {
-      var e2 = String(rr[iEst] || "").trim().toUpperCase();
-      if (e2 && e2 !== "POR_RECIBIR") continue;
-    }
-    nPend++;
+  var numFac2 = keys[0];
+  var pack2 = porSel[numFac2];
+  var nPend2 = 0;
+  for (var j = 1; j < vals.length; j++) {
+    var rj = vals[j];
+    if (String(rj[iNum] || "").trim() !== numFac2) continue;
+    if (!esPendiente_(rj)) continue;
+    nPend2++;
   }
-  return { num: numFac, claves: claves, nSel: claves.length, nPendFactura: nPend };
+  return {
+    num: numFac2,
+    claves: pack2.claves,
+    cantidades: pack2.cantidades,
+    nSel: pack2.claves.length,
+    nPendFactura: nPend2,
+  };
 }
 
 /** num_factura desde filas seleccionadas (compat). */
@@ -1397,17 +1477,17 @@ function fetchPendientesBarra_(base, secret) {
 
 /**
  * Resuelve qué confirmar:
- * - Con selección → esa factura + claves (parcial o total según filas)
- * - Sin selección y 1 pendiente → OK total
- * - Varias → pedir selección en hoja
+ * - usuario_ok = ok (o selección) → esas claves (parcial/total)
+ * - Sin marcas y 1 pendiente → pide marcar ok o seleccionar (no asume total a ciegas)
  */
 function resolverOkPorRecibir_(base, secret) {
   var ui = SpreadsheetApp.getUi();
   var sel = seleccionPorRecibir_();
-  if (sel.num) {
+  if (sel.num && sel.claves.length) {
     return {
       num: sel.num,
       claves: sel.claves,
+      cantidades: sel.cantidades || {},
       nSel: sel.nSel,
       nPend: sel.nPendFactura,
       parcial: sel.nSel < sel.nPendFactura,
@@ -1423,26 +1503,25 @@ function resolverOkPorRecibir_(base, secret) {
   if (!facts.length) {
     ui.alert(
       "No hay facturas Barra POR_RECIBIR.\n\n" +
-      "Si ves filas en la hoja con estado RECIBIDA_OK, ya fueron confirmadas."
+      "Si ves filas con estado RECIBIDA_OK, ya fueron confirmadas."
     );
     return null;
-  }
-  if (facts.length === 1) {
-    var n = String(facts[0].num_factura || "").trim();
-    var nLin = Number(facts[0].lineas || 0) || 0;
-    return { num: n, claves: [], nSel: nLin, nPend: nLin, parcial: false };
   }
 
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName(HOJA_POR_RECIBIR_BARRA);
   if (sh) ss.setActiveSheet(sh);
-  var lines = facts.map(function (f, i) {
-    return (i + 1) + ". " + f.num_factura + " | " + (f.razon_social || "") + " | " + f.lineas + " línea(s)";
+  var lines = facts.map(function (f) {
+    return "• " + f.num_factura + " | " + (f.razon_social || "") + " | " + f.lineas + " línea(s)";
   }).join("\n");
   ui.alert(
-    "Hay " + facts.length + " facturas por recibir.\n\n" + lines +
-    "\n\nSeleccioná las filas a ingresar (podés elegir solo algunas = OK parcial)\n" +
-    "en " + HOJA_POR_RECIBIR_BARRA + " y volvé a «OK recepción Barra»."
+    "Para confirmar recepción:\n\n" +
+    "1) En usuario_ok escribí «ok» en las líneas que llegaron\n" +
+    "2) Opcional: en cantidad_recibida poné cuánto llegó\n" +
+    "   (vacío = toda la cantidad de la línea)\n" +
+    "3) Menú «OK recepción Barra».\n\n" +
+    "El resto de líneas/cantidades sigue POR_RECIBIR.\n\n" +
+    lines
   );
   return null;
 }
@@ -1477,8 +1556,9 @@ function listarPorRecibirBarra() {
   if (sh) ss.setActiveSheet(sh);
   ui.alert(
     "POR_RECIBIR_BARRA — " + facts.length + " factura(s)\n\n" + lines +
-    "\n\nOK total: seleccioná todas las filas de la factura.\n" +
-    "OK parcial: seleccioná solo las que llegaron → «OK recepción Barra»."
+    "\n\nEscribí «ok» en usuario_ok.\n" +
+    "Si llegó menos cantidad: llená cantidad_recibida.\n" +
+    "Luego «OK recepción Barra»."
   );
 }
 
@@ -1506,6 +1586,10 @@ function okRecepcionBarra_(modoPrueba) {
   var detalleLineas = res.parcial
     ? ("OK PARCIAL: " + res.nSel + " de " + res.nPend + " línea(s)\n(el resto sigue POR_RECIBIR)")
     : ("OK TOTAL: " + (res.nPend || res.nSel || "?") + " línea(s)");
+  var nQty = Object.keys(res.cantidades || {}).length;
+  if (nQty > 0) {
+    detalleLineas += "\nCantidad parcial en " + nQty + " línea(s) (columna cantidad_recibida)";
+  }
 
   var conf = ui.alert(
     modoPrueba ? "Probar OK recepción Barra" : "OK recepción Barra",
@@ -1520,9 +1604,12 @@ function okRecepcionBarra_(modoPrueba) {
     usuario: Session.getActiveUser().getEmail() || "sheets",
     dry_run: !!modoPrueba,
   };
-  // Solo enviar claves si hay selección explícita (parcial o total desde hoja)
+  // Solo enviar claves si hay selección/marcas explícitas
   if (res.claves && res.claves.length) {
     payload.claves_linea = res.claves;
+  }
+  if (res.cantidades && Object.keys(res.cantidades).length) {
+    payload.cantidades_recibidas = res.cantidades;
   }
 
   var usuario = payload.usuario;
@@ -1544,11 +1631,14 @@ function okRecepcionBarra_(modoPrueba) {
   var extraQuedan = quedan !== "" && Number(quedan) > 0
     ? "\nQuedan POR_RECIBIR: " + quedan
     : "";
+  var extraQty = (body.restos_encolados || body.qty_parcial_lineas)
+    ? "\nRestos qty en cola: " + (body.restos_encolados || 0)
+    : "";
   if (modoPrueba) {
     ui.alert(
       "🧪 PRUEBA OK Barra — sin ENTRADA real\n\n" +
       "Factura: " + res.num + "\nEntradas simuladas: " + (body.entradas || 0) +
-      extraQuedan + (errs ? "\n\n" + errs : "")
+      extraQuedan + extraQty + (errs ? "\n\n" + errs : "")
     );
     return;
   }
@@ -1562,7 +1652,7 @@ function okRecepcionBarra_(modoPrueba) {
     "✅ Recepción Barra confirmada\n\nFactura: " + res.num +
     "\nENTRADAs: " + (body.entradas || 0) +
     (body.parcial ? " (parcial)" : "") +
-    extraQuedan +
+    extraQuedan + extraQty +
     (errs ? "\nAvisos:\n" + errs : "") +
     "\n\nRevisá estado en POR_RECIBIR_BARRA."
   );

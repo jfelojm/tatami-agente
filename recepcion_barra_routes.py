@@ -93,6 +93,18 @@ async def confirmar_ok(request: Request):
     if isinstance(raw_claves, list):
         claves = [str(c).strip() for c in raw_claves if str(c).strip()]
 
+    cantidades: dict[str, float] = {}
+    raw_qty = payload.get("cantidades_recibidas") or payload.get("cantidades") or {}
+    if isinstance(raw_qty, dict):
+        for k, v in raw_qty.items():
+            try:
+                q = float(str(v).replace(",", "."))
+            except (TypeError, ValueError):
+                continue
+            kk = str(k).strip()
+            if kk and q > 0:
+                cantidades[kk] = q
+
     from recepcion_compras_barra import confirmar_factura_ok
 
     result = confirmar_factura_ok(
@@ -100,6 +112,7 @@ async def confirmar_ok(request: Request):
         usuario=usuario,
         dry_run=dry_run,
         claves_linea=claves or None,
+        cantidades_recibidas=cantidades or None,
     )
     if not result.get("ok") and not dry_run:
         # Soft fail con 200 + ok:false para que Apps Script muestre el mensaje
