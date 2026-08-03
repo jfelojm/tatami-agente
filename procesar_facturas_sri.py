@@ -391,6 +391,7 @@ def fase_proceso(
             items_mat,
             items_warn,
             dry_run=dry_run,
+            estado_override=estado,
         )
 
         if not dry_run:
@@ -412,6 +413,11 @@ def fase_proceso(
         if estado == "COMPLETA":
             ok += 1
             ingresos_detalle.append(f"✅ {num} ({items_mat} ítems)")
+        elif estado == "POR_RECIBIR":
+            parcial += 1
+            ingresos_detalle.append(
+                f"📦 {num} POR_RECIBIR ({items_mat} ítems — OK físico en Sheets)"
+            )
         else:
             parcial += 1
             ingresos_detalle.append(f"⚠️ {num} PARCIAL ({items_mat} ítems)")
@@ -486,10 +492,17 @@ def main(argv: list[str] | None = None) -> int:
 
     print("=" * 60)
     print(f"Tatami - Facturas SRI | {datetime.now().strftime('%Y-%m-%d %H:%M')} | corrida {args.corrida}")
-    fecha_desde, fecha_hasta = ventana_fechas(config.ventana_dias)
+    fecha_desde, fecha_hasta = ventana_fechas(
+        config.ventana_dias, excluir_hoy=config.ventana_excluir_hoy
+    )
+    ventana_txt = (
+        f"{config.ventana_dias} dias hasta ayer (sin hoy)"
+        if config.ventana_excluir_hoy
+        else f"{config.ventana_dias} dias previos + hoy"
+    )
     print(
         f"Ambiente SOAP: {config.ambiente} | ventana descarga: "
-        f"{fecha_desde} .. {fecha_hasta} ({config.ventana_dias} dias previos + hoy)"
+        f"{fecha_desde} .. {fecha_hasta} ({ventana_txt})"
     )
     print(
         f"Portal: modo={config.consulta_modo} | "

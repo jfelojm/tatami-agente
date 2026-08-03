@@ -3,7 +3,12 @@ API: confirmación física de compras SRI de proveedores Tipo=Barra.
 
 POST /api/recepcion_barra/ok
   Header: X-Tatami-Factura-Secret = FACTURA_SHEETS_INGEST_SECRET
-  Body: { "num_factura": "...", "usuario": "felipe@...", "dry_run": false }
+  Body: {
+    "num_factura": "...",
+    "usuario": "felipe@...",
+    "dry_run": false,
+    "claves_linea": ["num|cod", ...]   // opcional → OK parcial solo esas líneas
+  }
 
 GET  /api/recepcion_barra/pendientes
   Lista líneas POR_RECIBIR en staging.
@@ -33,7 +38,7 @@ def ping_recepcion(request: Request):
     return {
         "ok": True,
         "sri_barra_requiere_ok": barra_requiere_ok(),
-        "nota": "OK total por num_factura → ENTRADA inventario.",
+        "nota": "OK total o parcial (claves_linea) → ENTRADA inventario.",
     }
 
 
@@ -83,10 +88,19 @@ async def confirmar_ok(request: Request):
 
     usuario = str(payload.get("usuario") or "").strip()
     dry_run = bool(payload.get("dry_run") or payload.get("modo_prueba"))
+    raw_claves = payload.get("claves_linea") or payload.get("claves") or []
+    claves: list[str] = []
+    if isinstance(raw_claves, list):
+        claves = [str(c).strip() for c in raw_claves if str(c).strip()]
 
     from recepcion_compras_barra import confirmar_factura_ok
 
-    result = confirmar_factura_ok(num, usuario=usuario, dry_run=dry_run)
+    result = confirmar_factura_ok(
+        num,
+        usuario=usuario,
+        dry_run=dry_run,
+        claves_linea=claves or None,
+    )
     if not result.get("ok") and not dry_run:
         # Soft fail con 200 + ok:false para que Apps Script muestre el mensaje
         return result

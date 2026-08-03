@@ -301,9 +301,13 @@ def confirmar_factura_ok(
     *,
     usuario: str = "",
     dry_run: bool = False,
+    claves_linea: list[str] | None = None,
 ) -> dict:
     """
-    OK total: todas las líneas POR_RECIBIR de la factura → ENTRADA inventario.
+    OK de recepción: líneas POR_RECIBIR → ENTRADA inventario.
+
+    Si ``claves_linea`` viene con valores, solo esas líneas (OK parcial).
+    Si está vacío/None, OK total de todas las POR_RECIBIR de la factura.
     """
     from procesar_facturas_drive import (
         calcular_entrada_desde_factura,
@@ -320,19 +324,46 @@ def confirmar_factura_ok(
     if not num:
         return {"ok": False, "error": "num_factura vacío"}
 
+    filtro_claves: set[str] | None = None
+    if claves_linea:
+        filtro_claves = {str(c).strip() for c in claves_linea if str(c).strip()}
+        if not filtro_claves:
+            filtro_claves = None
+
     headers, filas = _leer_filas_cola()
-    pendientes = [
-        (row_n, d)
-        for row_n, d in filas
-        if (d.get("num_factura") or "").strip() == num
-        and (d.get("estado") or "").strip().upper() == ESTADO_POR_RECIBIR
-    ]
+    pendientes = []
+    for row_n, d in filas:
+        if (d.get("num_factura") or "").strip() != num:
+            continue
+        if (d.get("estado") or "").strip().upper() != ESTADO_POR_RECIBIR:
+            continue
+        clave = (d.get("clave_linea") or "").strip() or clave_linea_cola(
+            num, d.get("cod_item_xml") or ""
+        )
+        if filtro_claves is not None and clave not in filtro_claves:
+            continue
+        pendientes.append((row_n, d))
+
     if not pendientes:
         return {
             "ok": False,
-            "error": f"No hay líneas POR_RECIBIR para factura {num}",
+            "error": (
+                f"No hay líneas POR_RECIBIR seleccionadas para factura {num}"
+                if filtro_claves
+                else f"No hay líneas POR_RECIBIR para factura {num}"
+            ),
             "num_factura": num,
+            "parcial": bool(filtro_claves),
         }
+
+    # Total POR_RECIBIR de la factura (antes de filtrar) para mensaje parcial
+    total_pend_factura = sum(
+        1
+        for _, d in filas
+        if (d.get("num_factura") or "").strip() == num
+        and (d.get("estado") or "").strip().upper() == ESTADO_POR_RECIBIR
+    )
+    modo_parcial = filtro_claves is not None and len(pendientes) < total_pend_factura
 
     # Construir factura mínima + items
     sample = pendientes[0][1]
@@ -348,6 +379,7 @@ def confirmar_factura_ok(
     deltas_stock: dict[tuple[str, str], float] = {}
     deltas_costo: dict[tuple[str, str], float] = {}
     rows_ok: list[int] = []
+    claves_ok: list[str] = []
 
     for row_n, d in pendientes:
         item_factura = {
@@ -404,6 +436,9 @@ def confirmar_factura_ok(
         item_mov["descripcion_proveedor"] = (
             f"{item_factura['descripcion_proveedor']} | ORIGEN:RECEPCION_BARRA"
         )
+        clave = (d.get("clave_linea") or "").strip() or clave_linea_cola(
+            num, item_factura["cod_item_xml"]
+        )
 
         if dry_run:
             factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
@@ -411,6 +446,7 @@ def confirmar_factura_ok(
             print(f"  [DRY RUN] ENTRADA {item_prov.get('cod_mp_sistema')} +{cant} @ {bodega}")
             entradas += 1
             rows_ok.append(row_n)
+            claves_ok.append(clave)
             continue
 
         ok = registrar_entrada_inventario(
@@ -431,6 +467,7 @@ def confirmar_factura_ok(
         deltas_costo[key] = costo_u
         entradas += 1
         rows_ok.append(row_n)
+        claves_ok.append(clave)
 
     if not dry_run and (deltas_stock or deltas_costo):
         _flush_mp_sistema(deltas_stock, deltas_costo)
@@ -462,6 +499,7 @@ def confirmar_factura_ok(
         if updates:
             ws.batch_update(updates, value_input_option=ValueInputOption.user_entered)
 
+    quedan_n = 0
     # Actualizar facturas_procesadas
     if not dry_run and entradas > 0:
         try:
@@ -480,20 +518,27 @@ def confirmar_factura_ok(
                 or []
             )
             meta = dict((existing[0].get("meta") if existing else {}) or {})
-            meta["recepcion_barra_ok"] = {
-                "at": datetime.now().isoformat(),
-                "usuario": usuario or "sheets",
-                "entradas": entradas,
-            }
+            hist = list(meta.get("recepcion_barra_oks") or [])
+            hist.append(
+                {
+                    "at": datetime.now().isoformat(),
+                    "usuario": usuario or "sheets",
+                    "entradas": entradas,
+                    "parcial": modo_parcial or bool(filtro_claves),
+                    "claves": claves_ok,
+                }
+            )
+            meta["recepcion_barra_oks"] = hist[-20:]
+            meta["recepcion_barra_ok"] = hist[-1]
             # Si aún quedan POR_RECIBIR de esta factura → sigue POR_RECIBIR
-            quedan = [
+            quedan_n = sum(
                 1
                 for _, d in _leer_filas_cola()[1]
                 if (d.get("num_factura") or "").strip() == num
                 and (d.get("estado") or "").upper() == ESTADO_POR_RECIBIR
-            ]
+            )
             sin_match = int((existing[0].get("items_sin_match") if existing else 0) or 0)
-            if quedan:
+            if quedan_n:
                 nuevo_estado = ESTADO_POR_RECIBIR
             elif sin_match > 0:
                 nuevo_estado = "PARCIAL"
@@ -519,6 +564,8 @@ def confirmar_factura_ok(
         except Exception as e:
             log.warning("No se pudo actualizar facturas_procesadas: %s", e)
             errores.append(f"facturas_procesadas: {e}")
+    elif dry_run:
+        quedan_n = max(0, total_pend_factura - entradas)
 
     if not dry_run and entradas > 0 and not errores:
         ok_flag = True
@@ -533,7 +580,11 @@ def confirmar_factura_ok(
         "ok": ok_flag,
         "num_factura": num,
         "entradas": entradas,
-        "pendientes_previas": len(pendientes),
+        "pendientes_previas": total_pend_factura,
+        "lineas_ok": len(claves_ok),
+        "quedan_por_recibir": quedan_n,
+        "parcial": modo_parcial or bool(filtro_claves and quedan_n > 0),
+        "claves_ok": claves_ok,
         "errores": errores,
         "dry_run": dry_run,
         "staging": f"https://docs.google.com/spreadsheets/d/{staging_spreadsheet_id()}",

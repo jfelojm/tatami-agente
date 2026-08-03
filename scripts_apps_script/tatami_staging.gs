@@ -1,7 +1,13 @@
 /**
- * tatami_staging.gs — SCRIPT MASTERS SHEETS (staging)
+ * tatami_staging.gs — ÚNICO script del libro Masters Sheets (staging)
  * =============================================================================
- * Incluye: promoción al maestro, tests, facturas manuales y traslados masivos.
+ * Pegá TODO este archivo en un solo proyecto Apps Script (borrá .gs viejos).
+ * Incluye TODAS las funcionalidades del staging:
+ *   - Promoción al maestro (MP, proveedores, recetas, subrecetas, productos)
+ *   - Tests de staging
+ *   - Facturas manuales (INGRESO_FACTURA)
+ *   - Recepción física Barra SRI (POR_RECIBIR_BARRA → OK → ENTRADA)
+ *   - Traslados masivos (INGRESO_TRASLADO)
  *
  * LIBRO STAGING (pegar aquí, NO en el maestro de datos):
  *   https://docs.google.com/spreadsheets/d/1TJu70BNG4i3it4y51Eg3YlDNswLkh1QGRt6v-qAyexU/edit
@@ -20,10 +26,12 @@
  * HOJAS (Python):
  *   python setup_ingreso_factura_manual.py      — primera vez INGRESO_FACTURA
  *   python setup_ingreso_traslado_masivo.py     — primera vez INGRESO_TRASLADO
+ *   python recepcion_compras_barra.py           — primera vez POR_RECIBIR_BARRA
  *   python staging_sync_desde_maestro.py        — tras cambios en maestro (catálogos)
  *
- * MENÚS: Tatami Admin | Tatami Tests | Tatami Facturas | Tatami Traslados
+ * MENÚS: Tatami Admin | Tatami Tests | Tatami Facturas (manual + OK Barra) | Tatami Traslados
  *
+ * Copia de deploy (mismo contenido): deploy/STAGING_APPS_SCRIPT_COMPLETO.gs
  * Master ID destino: 1rTVMfsOBssx2R-Sbuj1SRx9NZSd_hinEa9IK_ahGqZY
  * =============================================================================
  */
@@ -1289,6 +1297,156 @@ function tatamiAgenteBaseUrl_() {
   return url.replace(/\/api\/factura_manual\/enviar\/?$/i, "");
 }
 
+var HOJA_POR_RECIBIR_BARRA = "POR_RECIBIR_BARRA";
+
+/**
+ * Selección en POR_RECIBIR_BARRA → { num, claves[], nSel, nPendFactura }.
+ * Solo filas con estado POR_RECIBIR.
+ */
+function seleccionPorRecibir_() {
+  var empty = { num: "", claves: [], nSel: 0, nPendFactura: 0 };
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getActiveSheet();
+  if (!sh || sh.getName() !== HOJA_POR_RECIBIR_BARRA) return empty;
+  var vals = sh.getDataRange().getValues();
+  if (!vals || vals.length < 2) return empty;
+  var headers = vals[0].map(function (c) { return String(c || "").trim(); });
+  var iNum = headers.indexOf("num_factura");
+  var iEst = headers.indexOf("estado");
+  var iClave = headers.indexOf("clave_linea");
+  var iCod = headers.indexOf("cod_item_xml");
+  if (iNum < 0) return empty;
+
+  var range = sh.getActiveRange();
+  if (!range) return empty;
+  var start = range.getRow();
+  var end = start + range.getNumRows() - 1;
+  var nums = {};
+  var claves = [];
+  var claveSet = {};
+
+  function claveDe_(row, num) {
+    if (iClave >= 0) {
+      var k = String(row[iClave] || "").trim();
+      if (k) return k;
+    }
+    var cod = iCod >= 0 ? String(row[iCod] || "").trim() : "";
+    return num + "|" + cod;
+  }
+
+  for (var r = start; r <= end; r++) {
+    if (r < 2 || r > vals.length) continue;
+    var row = vals[r - 1];
+    var num = String(row[iNum] || "").trim();
+    if (!num) continue;
+    if (iEst >= 0) {
+      var est = String(row[iEst] || "").trim().toUpperCase();
+      if (est && est !== "POR_RECIBIR") continue;
+    }
+    nums[num] = true;
+    var clave = claveDe_(row, num);
+    if (clave && !claveSet[clave]) {
+      claveSet[clave] = true;
+      claves.push(clave);
+    }
+  }
+
+  var keys = Object.keys(nums);
+  if (keys.length > 1) {
+    SpreadsheetApp.getUi().alert(
+      "Seleccionaste filas de " + keys.length + " facturas distintas.\n" +
+      "Seleccioná filas de una sola factura y volvé a OK."
+    );
+    return empty;
+  }
+  if (keys.length !== 1 || !claves.length) return empty;
+
+  var numFac = keys[0];
+  var nPend = 0;
+  for (var i = 1; i < vals.length; i++) {
+    var rr = vals[i];
+    if (String(rr[iNum] || "").trim() !== numFac) continue;
+    if (iEst >= 0) {
+      var e2 = String(rr[iEst] || "").trim().toUpperCase();
+      if (e2 && e2 !== "POR_RECIBIR") continue;
+    }
+    nPend++;
+  }
+  return { num: numFac, claves: claves, nSel: claves.length, nPendFactura: nPend };
+}
+
+/** num_factura desde filas seleccionadas (compat). */
+function numFacturaDesdeSeleccionPorRecibir_() {
+  return seleccionPorRecibir_().num;
+}
+
+/** Pendientes vía API; retorna {ok, facturas[], error}. */
+function fetchPendientesBarra_(base, secret) {
+  var resp = UrlFetchApp.fetch(base + "/api/recepcion_barra/pendientes", {
+    method: "get",
+    headers: { "X-Tatami-Factura-Secret": secret },
+    muteHttpExceptions: true,
+  });
+  var body = {};
+  try { body = JSON.parse(resp.getContentText()); } catch (e) {}
+  if (resp.getResponseCode() !== 200 || !body.ok) {
+    return { ok: false, facturas: [], error: resp.getContentText().slice(0, 400) };
+  }
+  return { ok: true, facturas: body.facturas || [], error: "" };
+}
+
+/**
+ * Resuelve qué confirmar:
+ * - Con selección → esa factura + claves (parcial o total según filas)
+ * - Sin selección y 1 pendiente → OK total
+ * - Varias → pedir selección en hoja
+ */
+function resolverOkPorRecibir_(base, secret) {
+  var ui = SpreadsheetApp.getUi();
+  var sel = seleccionPorRecibir_();
+  if (sel.num) {
+    return {
+      num: sel.num,
+      claves: sel.claves,
+      nSel: sel.nSel,
+      nPend: sel.nPendFactura,
+      parcial: sel.nSel < sel.nPendFactura,
+    };
+  }
+
+  var pend = fetchPendientesBarra_(base, secret);
+  if (!pend.ok) {
+    ui.alert("Error listando pendientes:\n" + pend.error);
+    return null;
+  }
+  var facts = pend.facturas || [];
+  if (!facts.length) {
+    ui.alert(
+      "No hay facturas Barra POR_RECIBIR.\n\n" +
+      "Si ves filas en la hoja con estado RECIBIDA_OK, ya fueron confirmadas."
+    );
+    return null;
+  }
+  if (facts.length === 1) {
+    var n = String(facts[0].num_factura || "").trim();
+    var nLin = Number(facts[0].lineas || 0) || 0;
+    return { num: n, claves: [], nSel: nLin, nPend: nLin, parcial: false };
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(HOJA_POR_RECIBIR_BARRA);
+  if (sh) ss.setActiveSheet(sh);
+  var lines = facts.map(function (f, i) {
+    return (i + 1) + ". " + f.num_factura + " | " + (f.razon_social || "") + " | " + f.lineas + " línea(s)";
+  }).join("\n");
+  ui.alert(
+    "Hay " + facts.length + " facturas por recibir.\n\n" + lines +
+    "\n\nSeleccioná las filas a ingresar (podés elegir solo algunas = OK parcial)\n" +
+    "en " + HOJA_POR_RECIBIR_BARRA + " y volvé a «OK recepción Barra»."
+  );
+  return null;
+}
+
 function listarPorRecibirBarra() {
   var ui = SpreadsheetApp.getUi();
   var props = PropertiesService.getScriptProperties();
@@ -1298,28 +1456,29 @@ function listarPorRecibirBarra() {
     ui.alert("Falta TATAMI_FACTURA_API_URL / TATAMI_FACTURA_SECRET.");
     return;
   }
-  var resp = UrlFetchApp.fetch(base + "/api/recepcion_barra/pendientes", {
-    method: "get",
-    headers: { "X-Tatami-Factura-Secret": secret },
-    muteHttpExceptions: true,
-  });
-  var body = {};
-  try { body = JSON.parse(resp.getContentText()); } catch (e) {}
-  if (resp.getResponseCode() !== 200 || !body.ok) {
-    ui.alert("Error listando pendientes:\n" + resp.getContentText().slice(0, 400));
+  var pend = fetchPendientesBarra_(base, secret);
+  if (!pend.ok) {
+    ui.alert("Error listando pendientes:\n" + pend.error);
     return;
   }
-  var facts = body.facturas || [];
+  var facts = pend.facturas || [];
   if (!facts.length) {
-    ui.alert("No hay facturas Barra POR_RECIBIR.");
+    ui.alert(
+      "No hay facturas Barra POR_RECIBIR.\n\n" +
+      "Filas con RECIBIDA_OK ya están ingresadas al stock."
+    );
     return;
   }
   var lines = facts.map(function (f) {
     return "• " + f.num_factura + " | " + (f.razon_social || "") + " | " + f.lineas + " línea(s)";
   }).join("\n");
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sh = ss.getSheetByName(HOJA_POR_RECIBIR_BARRA);
+  if (sh) ss.setActiveSheet(sh);
   ui.alert(
     "POR_RECIBIR_BARRA — " + facts.length + " factura(s)\n\n" + lines +
-    "\n\nUsa «OK recepción Barra» e ingresa el número de factura."
+    "\n\nOK total: seleccioná todas las filas de la factura.\n" +
+    "OK parcial: seleccioná solo las que llegaron → «OK recepción Barra»."
   );
 }
 
@@ -1340,26 +1499,37 @@ function okRecepcionBarra_(modoPrueba) {
     ui.alert("Falta TATAMI_FACTURA_API_URL / TATAMI_FACTURA_SECRET.");
     return;
   }
-  var r = ui.prompt(
+
+  var res = resolverOkPorRecibir_(base, secret);
+  if (!res || !res.num) return;
+
+  var detalleLineas = res.parcial
+    ? ("OK PARCIAL: " + res.nSel + " de " + res.nPend + " línea(s)\n(el resto sigue POR_RECIBIR)")
+    : ("OK TOTAL: " + (res.nPend || res.nSel || "?") + " línea(s)");
+
+  var conf = ui.alert(
     modoPrueba ? "Probar OK recepción Barra" : "OK recepción Barra",
-    "Número de factura SRI (tal como en POR_RECIBIR_BARRA):",
-    ui.ButtonSet.OK_CANCEL
+    (modoPrueba ? "Simular ENTRADA (sin stock)\n\n" : "Confirmar recepción e ingresar stock\n\n") +
+      "Factura: " + res.num + "\n" + detalleLineas + "\n\n¿Continuar?",
+    ui.ButtonSet.YES_NO
   );
-  if (r.getSelectedButton() !== ui.Button.OK) return;
-  var num = String(r.getResponseText() || "").trim();
-  if (!num) {
-    ui.alert("num_factura vacío.");
-    return;
+  if (conf !== ui.Button.YES) return;
+
+  var payload = {
+    num_factura: res.num,
+    usuario: Session.getActiveUser().getEmail() || "sheets",
+    dry_run: !!modoPrueba,
+  };
+  // Solo enviar claves si hay selección explícita (parcial o total desde hoja)
+  if (res.claves && res.claves.length) {
+    payload.claves_linea = res.claves;
   }
-  var usuario = Session.getActiveUser().getEmail() || "sheets";
+
+  var usuario = payload.usuario;
   var resp = UrlFetchApp.fetch(base + "/api/recepcion_barra/ok", {
     method: "post",
     contentType: "application/json; charset=utf-8",
-    payload: JSON.stringify({
-      num_factura: num,
-      usuario: usuario,
-      dry_run: !!modoPrueba,
-    }),
+    payload: JSON.stringify(payload),
     headers: { "X-Tatami-Factura-Secret": secret },
     muteHttpExceptions: true,
   });
@@ -1370,11 +1540,15 @@ function okRecepcionBarra_(modoPrueba) {
     return;
   }
   var errs = (body.errores || []).join("\n");
+  var quedan = body.quedan_por_recibir != null ? body.quedan_por_recibir : "";
+  var extraQuedan = quedan !== "" && Number(quedan) > 0
+    ? "\nQuedan POR_RECIBIR: " + quedan
+    : "";
   if (modoPrueba) {
     ui.alert(
       "🧪 PRUEBA OK Barra — sin ENTRADA real\n\n" +
-      "Factura: " + num + "\nEntradas simuladas: " + (body.entradas || 0) +
-      (errs ? "\n\n" + errs : "")
+      "Factura: " + res.num + "\nEntradas simuladas: " + (body.entradas || 0) +
+      extraQuedan + (errs ? "\n\n" + errs : "")
     );
     return;
   }
@@ -1385,10 +1559,12 @@ function okRecepcionBarra_(modoPrueba) {
     return;
   }
   ui.alert(
-    "✅ Recepción Barra confirmada\n\nFactura: " + num +
+    "✅ Recepción Barra confirmada\n\nFactura: " + res.num +
     "\nENTRADAs: " + (body.entradas || 0) +
+    (body.parcial ? " (parcial)" : "") +
+    extraQuedan +
     (errs ? "\nAvisos:\n" + errs : "") +
-    "\n\nRevisá pestaña POR_RECIBIR_BARRA (estado RECIBIDA_OK)."
+    "\n\nRevisá estado en POR_RECIBIR_BARRA."
   );
 }
 
