@@ -75,11 +75,12 @@ _UNIDADES_LOTE_SUB = (
     "recetas",
 )
 
+# Espacio opcional: acepta «261 uni» y «261uni» (WhatsApp suele pegar número+unidad).
 _PRESENTACION_RE = re.compile(
     r"(?P<cant>"
     r"\d[\d.,]*|"
     + "|".join(re.escape(w) for w in sorted(_NUM_PALABRAS, key=len, reverse=True))
-    + r")\s+"
+    + r")\s*"
     r"(?P<unidad>"
     + "|".join(_UNIDADES_PRESENTACION_MP + _UNIDADES_LOTE_SUB)
     + r")\b",

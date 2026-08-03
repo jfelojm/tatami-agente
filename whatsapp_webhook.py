@@ -1065,6 +1065,36 @@ def _cantidad_natural_en_texto(texto: str) -> float | None:
     return None
 
 
+def _cantidad_entre_sub_y_bodega(texto: str, cod_sub: str) -> float | None:
+    """
+    «PRODUCIR SUB 065 261uni BOD-005» / «SUB 065 261 BOD-005».
+    Captura el número entre el código de sub y la bodega (con o sin 'uni').
+    """
+    raw = (texto or "").strip()
+    if not raw or not cod_sub:
+        return None
+    digits = (
+        cod_sub.replace("SUB-", "").replace("sub-", "").strip().lstrip("0")
+        or cod_sub.replace("SUB-", "").strip()
+    )
+    if not digits:
+        return None
+    m = re.search(
+        rf"(?:^|[\s,;])(?:sub[- ]?)?0*{re.escape(digits)}\s+"
+        rf"(\d[\d.,]*)\s*(?:uni(?:dad(?:es)?)?)?\b"
+        rf"(?:\s*(?:bod[- ]?|bodega)\s*0*0[1-5]|\s*$)",
+        raw,
+        re.I,
+    )
+    if not m:
+        return None
+    try:
+        val = float(m.group(1).replace(",", "."))
+    except ValueError:
+        return None
+    return val if val > 0 else None
+
+
 def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | None:
     """Cantidad en unidad base (gr/ml/uni) o None → lote estándar en producción."""
     from unidades_operativas import (
@@ -1076,6 +1106,11 @@ def _extraer_cantidad_sub(texto: str, cod_sub: str | None = None) -> float | Non
     if expl is not None:
         return expl
     if cod_sub:
+        mid = _cantidad_entre_sub_y_bodega(texto, cod_sub)
+        if mid is not None:
+            r = resolver_cantidad_produccion_sub(cod_sub, mid, texto=texto)
+            if r.get("cantidad_base") is not None:
+                return float(r["cantidad_base"])
         natural = _cantidad_natural_en_texto(texto)
         if natural is not None:
             r = resolver_cantidad_produccion_sub(cod_sub, natural, texto=texto)

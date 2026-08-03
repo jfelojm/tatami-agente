@@ -35,6 +35,11 @@ CAT_SUB = {
         "unidad": "uni",
         "nombre_subreceta": "dumpling de camaron",
     },
+    "SUB-065": {
+        "rendimiento_estandar": 12.0,
+        "unidad": "uni",
+        "nombre_subreceta": "dumpling de res",
+    },
     "SUB-071": {
         "rendimiento_estandar": 16.0,
         "unidad": "uni",
@@ -146,6 +151,23 @@ class TestResolverProduccion(unittest.TestCase):
             catalogo_sub=CAT_SUB,
         )
         self.assertEqual(r["cantidad_base"], 120.0)
+
+    def test_uni_pegado_sin_espacio(self):
+        self.assertEqual(parse_cantidad_presentacion("261uni"), (261.0, "unidad"))
+        self.assertEqual(parse_cantidad_presentacion("120unidades"), (120.0, "unidad"))
+
+    def test_dumpling_res_261uni_comando_wa(self):
+        """Caso real WA: «RODUCIR SUB 065 261uni BOD-005» (cantidad pegada a uni)."""
+        texto = "RODUCIR SUB 065 261uni BOD-005"
+        self.assertEqual(parse_cantidad_presentacion(texto), (261.0, "unidad"))
+        r = resolver_cantidad_produccion_sub(
+            "065",
+            None,
+            texto=texto,
+            catalogo_sub=CAT_SUB,
+        )
+        self.assertEqual(r["cantidad_base"], 261.0)
+        self.assertAlmostEqual(r["lotes"], 261 / 12.0)
 
     def test_tarta_vasca_10_es_unidades_no_lotes(self):
         r = resolver_cantidad_produccion_sub(
