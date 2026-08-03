@@ -5044,6 +5044,13 @@ def _parse_producir_sub_comando(texto: str, wa_id: str | None = None) -> dict | 
     resto = raw[len(prefix) :].strip()
     confirmar = "CONFIRMAR" in upper
     limpio = resto.upper().replace("CONFIRMAR", " ").strip()
+    # Separa «261UNI» / «500GR» en número + unidad (WhatsApp suele pegarlos).
+    limpio = re.sub(
+        r"(\d[\d.,]*)(ML|GR|G|L|LT|LITROS?|UNI(?:DAD(?:ES)?)?|UND)\b",
+        r"\1 \2",
+        limpio,
+        flags=re.I,
+    )
     tokens = [t for t in limpio.split() if t]
     area = _resolver_area_produccion(wa_id, resto, cods=[])
     bodega, bodega_explicita = _resolver_bodega_produccion(wa_id, resto, area=area)
@@ -5072,6 +5079,9 @@ def _parse_producir_sub_comando(texto: str, wa_id: str | None = None) -> dict | 
             cods.append(num.zfill(3))
         else:
             cantidad = val
+    # Respaldo: cantidad pegada/entre código y bodega que el tokenizer no vio.
+    if cantidad is None and cods:
+        cantidad = _extraer_cantidad_sub(raw, cod_sub=cods[0])
     out: dict = {
         "cods": cods,
         "bodega": bodega,
