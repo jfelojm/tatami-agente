@@ -1398,6 +1398,9 @@ app.include_router(conteo_router, prefix="/api/conteo")
 from factura_manual_routes import router as factura_manual_router
 app.include_router(factura_manual_router, prefix="/api/factura_manual")
 
+from recepcion_barra_routes import router as recepcion_barra_router
+app.include_router(recepcion_barra_router, prefix="/api/recepcion_barra")
+
 from traslado_masivo_routes import router as traslado_masivo_router
 app.include_router(traslado_masivo_router, prefix="/api/traslado_masivo")
 

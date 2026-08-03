@@ -138,10 +138,26 @@ def listar_xmls_pendientes() -> list[dict]:
     return out
 
 
-def descargar_xml(file_id: str) -> str:
+def descargar_xml(file_id: str, *, max_intentos: int = 4) -> str:
     service = _get_drive_service()
-    content = service.files().get_media(fileId=file_id).execute()
-    return content.decode("utf-8", errors="replace")
+    last_err: Exception | None = None
+    for intento in range(max_intentos):
+        try:
+            content = service.files().get_media(fileId=file_id).execute()
+            return content.decode("utf-8", errors="replace")
+        except (TimeoutError, OSError) as e:
+            last_err = e
+            if intento + 1 >= max_intentos:
+                raise
+            wait = 2**intento
+            print(
+                f"  WARN: timeout descarga Drive, reintento {intento + 2}/{max_intentos} "
+                f"en {wait}s..."
+            )
+            time.sleep(wait)
+    if last_err:
+        raise last_err
+    raise RuntimeError("descargar_xml: sin respuesta")
 
 
 # ── PARSER XML SRI ────────────────────────────────────────────
@@ -553,12 +569,21 @@ def buscar_item_prov(
     if cod_prov_n:
         return None
 
+    # Factura con RUC pero proveedor no resuelto en BD_PROV: no adivinar por otro
+    # proveedor (evita cruce tipo LOMO FINO → DGER4/Galabdistri).
+    if ruc_s:
+        return None
+
+    # Legacy: XML sin RUC — match por cod_item único en todo el catálogo.
+    cod_global: list[dict] = []
     for item in items:
         item_cod = normalizar_cod_item_para_match(
             item.get("cod_item_prov", ""), razon_social, ruc_s
         )
         if item_cod == cod_item_norm:
-            return item
+            cod_global.append(item)
+    if len(cod_global) == 1:
+        return cod_global[0]
 
     if cod_item_norm:
         mp_any = [
@@ -571,13 +596,6 @@ def buscar_item_prov(
         ]
         if len(mp_any) == 1:
             return mp_any[0]
-
-    if descripcion:
-        desc_upper = descripcion.upper()
-        for item in items:
-            desc = item.get("descripcion_proveedor", "").upper()
-            if desc and desc in desc_upper:
-                return item
 
     return None
 
@@ -906,6 +924,30 @@ def _flush_mp_sistema(
 
 
 # ── REGISTRAR ENTRADA EN MOV_INVENTARIO ──────────────────────
+def _extraer_cod_item_xml_obs(observaciones: str) -> str:
+    """Código ítem XML guardado en observaciones de mov_inventario."""
+    m = re.search(r"ITEM_XML:([^\s|]+)", observaciones or "")
+    return m.group(1).strip() if m else ""
+
+
+def _cod_item_xml_equivalente(a: str, b: str) -> bool:
+    """True si dos códigos XML representan el mismo ítem (ceros / formato distinto)."""
+    if not a or not b:
+        return False
+    return normalizar_cod_item_para_match(a) == normalizar_cod_item_para_match(b)
+
+
+def _observaciones_tienen_item_xml_equivalente(obs: str, cod_xml: str) -> bool:
+    if not cod_xml:
+        return False
+    obs_xml = _extraer_cod_item_xml_obs(obs)
+    if obs_xml and _cod_item_xml_equivalente(obs_xml, cod_xml):
+        return True
+    # Compat: búsqueda literal por si el formato ya coincide
+    marker = f"| ITEM_XML:{cod_xml}"
+    return marker in (obs or "") or f"ITEM_XML:{cod_xml}" in (obs or "")
+
+
 def mov_entrada_factura_linea_ya_registrada(
     num_documento: str,
     cod_mp: str,
@@ -917,7 +959,6 @@ def mov_entrada_factura_linea_ya_registrada(
     """
     cod_xml = (item_factura.get("cod_item_xml") or "").strip()
     desc = (item_factura.get("descripcion_proveedor") or "").strip()
-    marker = f"| ITEM_XML:{cod_xml}" if cod_xml else ""
     try:
         res = (
             supabase.table("mov_inventario")
@@ -933,8 +974,8 @@ def mov_entrada_factura_linea_ya_registrada(
         return False
 
     for row in res.data or []:
-        obs = (row.get("observaciones") or "")
-        if cod_xml and marker in obs:
+        obs = row.get("observaciones") or ""
+        if cod_xml and _observaciones_tienen_item_xml_equivalente(obs, cod_xml):
             return True
         # Compatibilidad: movimientos viejos sin marcador ITEM_XML
         if "| ITEM_XML:" not in obs and obs.strip() == desc:
@@ -956,6 +997,54 @@ def _parse_factor_positivo(raw) -> float | None:
     if v <= 0:
         return None
     return v
+
+
+def _parse_merma_pct_ingreso(raw) -> float:
+    """
+    Fracción descontada del peso bruto al ingresar inventario desde factura.
+    Acepta 0.15, 15, etc.
+    """
+    from numeros_sheets import parse_numero_sheets
+
+    if raw is None or str(raw).strip() == "":
+        return 0.0
+    s = str(raw).strip().rstrip("%")
+    v = parse_numero_sheets(s, 0.0)
+    if v <= 0:
+        return 0.0
+    if v > 1:
+        if v <= 100:
+            v = v / 100.0
+        else:
+            return 0.0
+    if v >= 1:
+        return 0.0
+    return v
+
+
+def factor_neto_ingreso(item_prov: dict) -> float:
+    """Multiplicador sobre cantidad bruta (ej. 0.85 si merma ingreso = 15%)."""
+    merma = _parse_merma_pct_ingreso(item_prov.get("merma_pct_ingreso"))
+    return 1.0 - merma if 0 < merma < 1 else 1.0
+
+
+def calcular_entrada_desde_factura(
+    item_factura: dict,
+    item_prov: dict,
+    factor: float,
+) -> tuple[float, float, float]:
+    """
+    (cantidad_neto, costo_unitario_neto, cantidad_bruta) en unidad_base.
+    costo_total de la línea XML no cambia; sube costo_u al bajar cantidad.
+    """
+    neto = factor_neto_ingreso(item_prov)
+    cant = float(item_factura.get("cantidad") or 0)
+    bruto = cant * factor
+    cantidad_neto = bruto * neto
+    costo_ef = float(item_factura.get("costo_efectivo") or 0)
+    denom = factor * neto
+    costo_u = costo_ef / denom if denom else 0.0
+    return round(cantidad_neto, 4), round(costo_u, 6), round(bruto, 4)
 
 
 def _precio_ref_unidad_base(item_prov: dict, costo_compra_efectivo: float) -> float:
@@ -1033,15 +1122,23 @@ def registrar_entrada_inventario(
     unidad = item_prov.get("unidad_base_sistema", "").strip()
     factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
     assert factor is not None
-    cantidad_base = item_factura["cantidad"] * factor
-    costo_u = item_factura["costo_efectivo"] / factor if factor else 0
+    cantidad_base, costo_u, bruto_base = calcular_entrada_desde_factura(
+        item_factura, item_prov, factor
+    )
+    merma_ing = _parse_merma_pct_ingreso(item_prov.get("merma_pct_ingreso"))
 
     ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
     cod_mov = f"MOV-{factura['fecha_factura'].replace('-', '')}-{cod_mp}-{ts}"
 
     cod_xml = (item_factura.get("cod_item_xml") or "").strip()
+    cod_xml_canon = normalizar_cod_item_para_match(cod_xml) if cod_xml else ""
     desc = (item_factura.get("descripcion_proveedor") or "").strip()
-    observaciones = f"{desc} | ITEM_XML:{cod_xml}" if cod_xml else desc
+    observaciones = f"{desc} | ITEM_XML:{cod_xml_canon}" if cod_xml_canon else desc
+    if merma_ing > 0:
+        observaciones += (
+            f" | bruto={bruto_base:g}{unidad} merma_ingreso={merma_ing:.0%} "
+            f"neto={cantidad_base:g}{unidad}"
+        )
 
     mov = {
         "cod_mov": cod_mov,
@@ -1074,7 +1171,8 @@ def registrar_entrada_inventario(
 
 def _marker_item_xml(item_factura: dict) -> str:
     cod_xml = (item_factura.get("cod_item_xml") or "").strip()
-    return f"ITEM_XML:{cod_xml}" if cod_xml else ""
+    cod_xml_canon = normalizar_cod_item_para_match(cod_xml) if cod_xml else ""
+    return f"ITEM_XML:{cod_xml_canon}" if cod_xml_canon else ""
 
 
 def mov_costo_historico_linea_ya_registrada(
@@ -1100,6 +1198,8 @@ def mov_costo_historico_linea_ya_registrada(
     marker_xml = _marker_item_xml(item_factura)
     for row in res.data or []:
         obs = row.get("observaciones") or ""
+        if cod_xml and _observaciones_tienen_item_xml_equivalente(obs, cod_xml):
+            return True
         if marker_xml and marker_xml in obs:
             return True
         if not cod_xml and desc and obs.strip().startswith(desc):
@@ -1320,7 +1420,7 @@ def registrar_entrada_costo_historico_sin_catalogo(
 def factura_ya_procesada(num_factura: str, ruc_proveedor: str) -> bool:
     """
     Retorna True si la factura ya existe en facturas_procesadas con estado COMPLETA.
-    Las PARCIAL se reprocesán para intentar resolver ítems sin match previos.
+    Las PARCIAL y POR_RECIBIR se reprocesan (resolver sin match / encolar barra).
     """
     try:
         res = (
@@ -1332,12 +1432,17 @@ def factura_ya_procesada(num_factura: str, ruc_proveedor: str) -> bool:
         )
         if not res.data:
             return False
-        estado = res.data[0].get("estado", "")
+        estado = (res.data[0].get("estado") or "").strip().upper()
         if estado == "COMPLETA":
             print(f"  SKIP: factura ya procesada (COMPLETA) — {num_factura}")
             return True
         if estado == "PARCIAL":
             print(f"  REPROCESANDO: factura previa PARCIAL — {num_factura} (intentando resolver sin match)")
+        elif estado == "POR_RECIBIR":
+            print(
+                f"  REPROCESANDO: factura previa POR_RECIBIR — {num_factura} "
+                "(match/cola; sin ENTRADA hasta OK físico)"
+            )
         return False
     except Exception as e:
         print(f"  WARN verificando facturas_procesadas: {e} — procesando igual")
@@ -1350,23 +1455,31 @@ def registrar_factura_procesada(
     items_matcheados: int,
     items_warn: int,
     dry_run: bool = False,
+    estado_override: str | None = None,
 ):
     """
     Escribe o actualiza el registro en facturas_procesadas al finalizar una factura.
-    Estado: COMPLETA si items_warn == 0, PARCIAL si hubo algún sin match.
+    Estado: COMPLETA si items_warn == 0, PARCIAL si hubo algún sin match,
+    o override (p.ej. POR_RECIBIR para barra).
     """
     if dry_run:
-        estado = "COMPLETA" if items_warn == 0 else "PARCIAL"
+        estado = (estado_override or "").strip().upper() or (
+            "COMPLETA" if items_warn == 0 else "PARCIAL"
+        )
         print(f"  [DRY RUN] facturas_procesadas -> {estado} (matcheados={items_matcheados}, sin_match={items_warn})")
         return
 
-    estado = "COMPLETA" if items_warn == 0 else "PARCIAL"
+    estado = (estado_override or "").strip().upper() or (
+        "COMPLETA" if items_warn == 0 else "PARCIAL"
+    )
     from proveedor_favorita import meta_proveedor_factura
 
     meta = dict(factura.get("_meta") or {})
     meta.update(meta_proveedor_factura(factura))
     if factura.get("_pendiente_bodega"):
         meta["pendiente_bodega"] = factura["_pendiente_bodega"]
+    if factura.get("_por_recibir_barra"):
+        meta["por_recibir_barra"] = factura["_por_recibir_barra"]
     total_xml = factura.get("total_sin_impuesto")
     if total_xml is not None:
         try:
@@ -2644,7 +2757,12 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False) -> dict:
         print(f"\n{'-' * 50}")
         print(f"Procesando: {archivo['name']}")
 
-        texto = descargar_xml(archivo["id"])
+        try:
+            texto = descargar_xml(archivo["id"])
+        except Exception as e:
+            print(f"  ERROR: no se pudo descargar XML de Drive: {e}")
+            continue
+
         factura = parsear_xml_sri(texto)
 
         if not factura:
@@ -2730,7 +2848,12 @@ def procesar_facturas(dry_run: bool = False, reprocesar: bool = False) -> dict:
 
         # ── Registrar en facturas_procesadas ──────────────────
         registrar_factura_procesada(
-            factura, archivo, items_matcheados, items_warn, dry_run
+            factura,
+            archivo,
+            items_matcheados,
+            items_warn,
+            dry_run,
+            estado_override=est,
         )
 
         total_matcheados += items_matcheados
@@ -2818,7 +2941,7 @@ def procesar_factura_dict(
     ruc, items, fecha_emision, etc.).
     Retorna:
     {
-        "estado": "COMPLETA" | "PARCIAL",
+        "estado": "COMPLETA" | "PARCIAL" | "POR_RECIBIR",
         "matcheados": int,
         "sin_match": list[dict[str, str]],  # descripcion + estado (pendientes hoja)
         "warn": list[str],
@@ -2838,11 +2961,17 @@ def procesar_factura_dict(
         nombre_bodega,
         resolver_bodega_entrada_linea,
     )
+    from recepcion_compras_barra import (
+        barra_requiere_ok,
+        encolar_lineas_por_recibir,
+        es_proveedor_barra,
+    )
 
     sin_match: list[dict[str, str]] = []
     warns: list[str] = []
     pendiente_bodega: list[dict] = []
     items_matcheados = 0
+    lineas_por_recibir: list[dict] = []
 
     lookup_ruc = cargar_lookup_ruc()
     num_f = str(factura.get("num_factura", "")).strip()
@@ -2850,6 +2979,15 @@ def procesar_factura_dict(
         lookup_ruc, str(factura.get("ruc", "")).strip(), num_f
     )
     archivo = factura.get("_archivo_drive") or {"id": "", "name": ""}
+
+    gate_barra = barra_requiere_ok() and es_proveedor_barra(
+        str(factura.get("ruc") or ""), cod_prov_factura
+    )
+    if gate_barra:
+        print(
+            "  GATE BARRA: sin ENTRADA automática — cola POR_RECIBIR_BARRA "
+            "(OK físico en Sheets)"
+        )
 
     bodegas_linea: dict[str, str] = factura.get("bodegas_linea") or {}
     bodegas_confirmadas: bool = bool(factura.get("bodegas_confirmadas"))
@@ -3024,17 +3162,56 @@ def procesar_factura_dict(
                 procesar_variacion_precio(item_prov, factura, item)
             continue
 
+        if gate_barra:
+            # Match OK pero stock solo tras confirmación física (Sheets OK total).
+            lineas_por_recibir.append(
+                {
+                    "cod_item_xml": item.get("cod_item_xml") or "",
+                    "descripcion": item.get("descripcion_proveedor") or "",
+                    "cantidad": item.get("cantidad"),
+                    "costo_unitario": item.get("costo_efectivo"),
+                    "total_linea": item.get("precio_total_sin_impuesto"),
+                    "cod_mp_sistema": cod_mp,
+                    "nombre_mp": item_prov.get("nombre_mp") or "",
+                    "unidad_base": item_prov.get("unidad_base_sistema")
+                    or item_prov.get("unidad_compra")
+                    or "",
+                    "cod_bodega": bodega_dest,
+                    "cod_proveedor": (item_prov.get("cod_proveedor") or "").strip()
+                    or cod_prov_factura,
+                }
+            )
+            if dry_run:
+                print(
+                    f"    [DRY RUN] POR_RECIBIR_BARRA: {cod_mp} @ {bodega_dest} "
+                    f"(sin ENTRADA hasta OK)"
+                )
+            else:
+                procesar_variacion_precio(item_prov, factura, item)
+                print(
+                    f"    POR_RECIBIR_BARRA: encolado {cod_mp} @ {nombre_bodega(bodega_dest)} "
+                    "(sin ENTRADA)"
+                )
+            continue
+
         if dry_run:
             u_compra = (item_prov.get("unidad_compra") or "").strip()
             factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
             assert factor is not None
-            cantidad_base = item["cantidad"] * factor
-            costo_u = item["costo_efectivo"] / factor if factor else 0
+            cantidad_base, costo_u, bruto_base = calcular_entrada_desde_factura(
+                item, item_prov, factor
+            )
+            merma_ing = _parse_merma_pct_ingreso(item_prov.get("merma_pct_ingreso"))
             print(
                 f"    [DRY RUN] precio_ref={item_prov.get('precio_ref')} -> nuevo={item['costo_efectivo']}"
             )
+            extra_merma = (
+                f" (bruto {bruto_base:g}, merma ingreso {merma_ing:.0%})"
+                if merma_ing > 0
+                else ""
+            )
             print(
-                f"    [DRY RUN] entrada inventario: {cod_mp} +{round(cantidad_base,4)} {u_compra}"
+                f"    [DRY RUN] entrada inventario: {cod_mp} +{round(cantidad_base,4)} {u_compra}{extra_merma}"
             )
             print(
                 f"    [DRY RUN] BD_MP_SISTEMA: stock_actual +{round(cantidad_base,4)} | costo_unitario_ref={round(costo_u,6)}"
@@ -3050,11 +3227,21 @@ def procesar_factura_dict(
             if ok and cod_mp:
                 factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
                 assert factor is not None
-                cantidad_base = item["cantidad"] * factor
+                cantidad_base, costo_u, _bruto = calcular_entrada_desde_factura(
+                    item, item_prov, factor
+                )
                 key = _mp_cache_key(cod_mp, bodega_dest)
                 deltas_stock[key] = deltas_stock.get(key, 0.0) + cantidad_base
-                costo_u = item["costo_efectivo"] / factor if factor else 0
                 deltas_costo[key] = costo_u
+
+    if lineas_por_recibir:
+        n_enc = encolar_lineas_por_recibir(
+            factura, lineas_por_recibir, dry_run=dry_run
+        )
+        factura["_por_recibir_barra"] = {
+            "lineas": len(lineas_por_recibir),
+            "encoladas_nuevas": n_enc,
+        }
 
     if not dry_run and (deltas_stock or deltas_costo):
         _flush_mp_sistema(deltas_stock, deltas_costo)
@@ -3069,7 +3256,10 @@ def procesar_factura_dict(
             print(f"  WARN: alerta bodega pendiente: {e}")
 
     estado = "COMPLETA"
-    if _sin_match_count_alerta(sin_match) > 0 or warns or pendiente_bodega:
+    if lineas_por_recibir:
+        # Prioridad: stock pendiente de OK físico (aunque haya sin_match/warn).
+        estado = "POR_RECIBIR"
+    elif _sin_match_count_alerta(sin_match) > 0 or warns or pendiente_bodega:
         estado = "PARCIAL"
     return {
         "estado": estado,
@@ -3078,6 +3268,7 @@ def procesar_factura_dict(
         "warn": warns,
         "pendiente_bodega": pendiente_bodega,
         "lineas_duda": items_duda_operador,
+        "por_recibir": len(lineas_por_recibir),
     }
 
 

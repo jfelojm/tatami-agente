@@ -34,6 +34,7 @@ Ejecutar desde la carpeta `tatami-agente` (con `venv` activado o `python` del ve
 | `setup_staging_subrecetas.py` | Formulario staging subrecetas (cab + detalle). |
 | `promover_staging_recetas.py` | APROBADO → `BD_RECETAS_DETALLE`. |
 | `promover_staging_subrecetas.py` | APROBADO → `BD_SUBRECETAS*`. |
+| `staging_sync_desde_maestro.py` | Maestro → Masters Sheets: SUB en `BD_MP_SISTEMA` + `CAT_TRASLADO` + `CAT_FM`. |
 | `reporte_semanal.py` | Genera reporte semanal (ventas, costos, precios, stock, texto para revisión). |
 | `generar_pedidos.py` | Arma sugerencias de pedidos a proveedores según stock vs PAR y ventanas de compra. |
 | `agente_tatami.py` | Launcher que invoca los scripts anteriores según subcomando (`ventas`, `descargo`, `facturas`, etc.). |
@@ -271,7 +272,17 @@ python auditar_costos_subrecetas.py --cod 007 012 020
 
 **Maestro:** una fila en `BD_MP_SISTEMA` por par **(cod_mp, cod_bodega)**. **PAR** y `consumo_diario_calculado` son **globales por cod_mp** (mismo valor en todas las filas del MP).
 
-**Compras:** `BD_ITEMS_PROV.cod_bodega_destino` (obligatorio por ítem). Si al procesar la factura la bodega difiere del default (`bodegas_linea` sin `bodegas_confirmadas`), la línea queda **pendiente** y se alerta a Jacky (001/005) o Eduardo (002/003) vía `ALERTA_WA_JACKY` / `ALERTA_WA_EDUARDO`.
+**Compras:** `BD_ITEMS_PROV.cod_bodega_destino` (obligatorio por ítem). Regla operativa (jun-2026):
+
+| Área | Bodega ingreso |
+|------|----------------|
+| Proveedor **Barra** (`BD_PROV.Tipo`) | **BOD-002** |
+| Proveedor **Cocina** | **BOD-005** (externa) |
+| Excepciones cocina en restaurante | **BOD-001** — Sumba Chocho (161), Inguil (165), LA MADRE (172) |
+
+Aplicar/auditar catálogo: `python aplicar_bodega_ingreso_catalogo.py --dry-run` · `--produccion`
+
+Si al procesar la factura la bodega difiere del default (`bodegas_linea` sin `bodegas_confirmadas`), la línea queda **pendiente** y se alerta a Jacky (001/005) o Eduardo (002/003) vía `ALERTA_WA_JACKY` / `ALERTA_WA_EDUARDO`.
 
 **Recetas (`BD_RECETAS_DETALLE`):** columnas  
 `nombre_receta | cod_receta | variedad_smart_menu | nombre_subreceta | cod_subreceta | nombre_mp | cod_mp_sistema | cantidad | unidad_base | cod_bodega | merma_pct | es_opcional | pct_aplicacion`.  
@@ -330,6 +341,69 @@ Promover **cabecera antes que detalle** (el detalle exige que `cod_subreceta_pad
 **Sync stock semi (pseudo-MP):** `python sync_stock_subrecetas_maestro.py --produccion` — ver sección Descargo inventario y `PLAN_DESCARGO_SUBRECETAS.md`.
 
 **Apps Script (solo Masters Sheets / staging):** pegar `scripts_apps_script/tatami_staging.gs` (o `deploy/STAGING_APPS_SCRIPT_COMPLETO.gs`). Menú **🍱 Tatami Admin** → promover subrecetas y recetas.
+
+---
+
+## Maestro operativo → Masters Sheets (ingresos y traslados)
+
+Dos libros distintos:
+
+| Libro | Variable `.env` | Rol |
+|-------|-----------------|-----|
+| **Maestro operativo** | `SPREADSHEET_ID` | `BD_MP_SISTEMA`, `BD_SUBRECETAS`, `BD_ITEMS_PROV`, stock, recetas |
+| **Masters Sheets** | `STAGING_SPREADSHEET_ID` | `INGRESO_TRASLADO`, `INGRESO_FACTURA`, formularios `STAGING_*` |
+
+**Dirección staging → maestro** (altas nuevas): llenar `STAGING_*` → `estado=APROBADO` → menú **🍱 Tatami Admin** o `promover_staging_*.py`.
+
+**Dirección maestro → staging** (catálogos de captura): tras editar MPs, subrecetas, ítems proveedor o rendimientos en el maestro:
+
+```bash
+python staging_sync_desde_maestro.py
+```
+
+Qué hace (orden):
+
+1. **`sync_stock_subrecetas_maestro`** en el **maestro** — crea/actualiza filas `SUB-xxx` en `BD_MP_SISTEMA` según `BD_SUBRECETAS`.
+2. **`CAT_TRASLADO`** en staging — MPs + semis por bodega; lote ref SUB = `rendimiento_estandar`, MP = `par_level`.
+3. **`CAT_FM`** en staging — ítems de proveedores manuales (161, 164, 165) desde `BD_ITEMS_PROV`.
+4. Lista **H** en `INGRESO_TRASLADO` — dropdown de productos.
+
+Opciones:
+
+```bash
+python staging_sync_desde_maestro.py --dry-run          # solo simula paso 1
+python staging_sync_desde_maestro.py --skip-sub-sync    # solo catálogos staging
+python staging_sync_desde_maestro.py --full-setup       # reconfigura hojas INGRESO_* (primera vez)
+```
+
+**En Sheets (después del Python):**
+
+- **Traslados:** menú **📦 Tatami Traslados** → **Refrescar dropdown productos (post-sync maestro)** o filtrar por bodega origen.
+- **Facturas:** el dropdown en `INGRESO_FACTURA` se actualiza solo (fórmula `H1` lee `CAT_FM`).
+
+```mermaid
+flowchart LR
+  subgraph maestro [Maestro SPREADSHEET_ID]
+    MP[BD_MP_SISTEMA]
+    SUB[BD_SUBRECETAS]
+    IPV[BD_ITEMS_PROV]
+  end
+  subgraph py [Python staging_sync_desde_maestro]
+    S1[sync SUB pseudo-MP]
+    S2[CAT_TRASLADO + lista H]
+    S3[CAT_FM]
+  end
+  subgraph staging [Masters Sheets STAGING_SPREADSHEET_ID]
+    IT[INGRESO_TRASLADO]
+    IF[INGRESO_FACTURA]
+  end
+  SUB --> S1 --> MP
+  MP --> S2 --> IT
+  SUB --> S2
+  IPV --> S3 --> IF
+```
+
+**Cuándo correrlo:** cambio de `rendimiento_estandar` (lote ref traslado), nueva MP/SUB ya promovida al maestro, nuevo ítem en `BD_ITEMS_PROV` para factura manual.
 
 ---
 
@@ -462,6 +536,27 @@ Hay **dos archivos distintos**. Cada uno va en **su libro** de Google Sheets (no
 | `TATAMI_TRASLADO_SECRET` | `TRASLADO_SHEETS_INGEST_SECRET` |
 
 Menú **🍣 Tatami Facturas** o **📦 Tatami Traslados** → **Autorizar conexión** (una vez).
+
+### Recepción física Barra (SRI)
+
+Proveedores `BD_PROV.Tipo=Barra` **no** generan `ENTRADA` al procesar el XML. Quedan en staging `POR_RECIBIR_BARRA` hasta OK total.
+
+```bash
+# Crear/reparar hoja en staging
+python recepcion_compras_barra.py
+
+# Flag (default 1). 0 = comportamiento anterior (ENTRADA automática también en Barra)
+SRI_BARRA_REQUIERE_OK=1
+```
+
+API (mismo secret que facturas manuales):
+
+| Método | Path | Uso |
+|--------|------|-----|
+| GET | `/api/recepcion_barra/pendientes` | Listar cola |
+| POST | `/api/recepcion_barra/ok` | `{ "num_factura", "usuario", "dry_run?" }` → ENTRADA |
+
+Menú Sheets: **Listar por recibir** / **OK recepción Barra**.
 
 ### Promover pendientes (`BD_ITEMS_PENDIENTES`) — solo maestro
 

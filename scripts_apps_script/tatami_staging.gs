@@ -69,6 +69,10 @@ function onOpen() {
     .addSeparator()
     .addItem("✅ Aceptar e ingresar factura", "aceptarFactura")
     .addItem("🧪 Probar (sin subir stock)", "probarFactura")
+    .addSeparator()
+    .addItem("📋 Listar por recibir (Barra SRI)", "listarPorRecibirBarra")
+    .addItem("✅ OK recepción Barra (factura completa)", "okRecepcionBarra")
+    .addItem("🧪 Probar OK recepción Barra", "probarOkRecepcionBarra")
     .addToUi();
 
   ui.createMenu("📦 Tatami Traslados")
@@ -1275,6 +1279,117 @@ function aceptarFactura_(modoPrueba) {
   limpiarIngreso_(hoja);
   ui.alert("✅ Factura ingresada al inventario.\n\nCódigo de transacción: " + trx +
            "\nLíneas: " + body.entradas);
+}
+
+/** Base URL del agente (sin path) a partir de TATAMI_FACTURA_API_URL. */
+function tatamiAgenteBaseUrl_() {
+  var props = PropertiesService.getScriptProperties();
+  var url = String(props.getProperty("TATAMI_FACTURA_API_URL") || "").trim();
+  if (!url) return "";
+  return url.replace(/\/api\/factura_manual\/enviar\/?$/i, "");
+}
+
+function listarPorRecibirBarra() {
+  var ui = SpreadsheetApp.getUi();
+  var props = PropertiesService.getScriptProperties();
+  var secret = props.getProperty("TATAMI_FACTURA_SECRET");
+  var base = tatamiAgenteBaseUrl_();
+  if (!base || !secret) {
+    ui.alert("Falta TATAMI_FACTURA_API_URL / TATAMI_FACTURA_SECRET.");
+    return;
+  }
+  var resp = UrlFetchApp.fetch(base + "/api/recepcion_barra/pendientes", {
+    method: "get",
+    headers: { "X-Tatami-Factura-Secret": secret },
+    muteHttpExceptions: true,
+  });
+  var body = {};
+  try { body = JSON.parse(resp.getContentText()); } catch (e) {}
+  if (resp.getResponseCode() !== 200 || !body.ok) {
+    ui.alert("Error listando pendientes:\n" + resp.getContentText().slice(0, 400));
+    return;
+  }
+  var facts = body.facturas || [];
+  if (!facts.length) {
+    ui.alert("No hay facturas Barra POR_RECIBIR.");
+    return;
+  }
+  var lines = facts.map(function (f) {
+    return "• " + f.num_factura + " | " + (f.razon_social || "") + " | " + f.lineas + " línea(s)";
+  }).join("\n");
+  ui.alert(
+    "POR_RECIBIR_BARRA — " + facts.length + " factura(s)\n\n" + lines +
+    "\n\nUsa «OK recepción Barra» e ingresa el número de factura."
+  );
+}
+
+function probarOkRecepcionBarra() {
+  okRecepcionBarra_(true);
+}
+
+function okRecepcionBarra() {
+  okRecepcionBarra_(false);
+}
+
+function okRecepcionBarra_(modoPrueba) {
+  var ui = SpreadsheetApp.getUi();
+  var props = PropertiesService.getScriptProperties();
+  var secret = props.getProperty("TATAMI_FACTURA_SECRET");
+  var base = tatamiAgenteBaseUrl_();
+  if (!base || !secret) {
+    ui.alert("Falta TATAMI_FACTURA_API_URL / TATAMI_FACTURA_SECRET.");
+    return;
+  }
+  var r = ui.prompt(
+    modoPrueba ? "Probar OK recepción Barra" : "OK recepción Barra",
+    "Número de factura SRI (tal como en POR_RECIBIR_BARRA):",
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  var num = String(r.getResponseText() || "").trim();
+  if (!num) {
+    ui.alert("num_factura vacío.");
+    return;
+  }
+  var usuario = Session.getActiveUser().getEmail() || "sheets";
+  var resp = UrlFetchApp.fetch(base + "/api/recepcion_barra/ok", {
+    method: "post",
+    contentType: "application/json; charset=utf-8",
+    payload: JSON.stringify({
+      num_factura: num,
+      usuario: usuario,
+      dry_run: !!modoPrueba,
+    }),
+    headers: { "X-Tatami-Factura-Secret": secret },
+    muteHttpExceptions: true,
+  });
+  var body = {};
+  try { body = JSON.parse(resp.getContentText()); } catch (e) {}
+  if (resp.getResponseCode() !== 200) {
+    ui.alert("HTTP " + resp.getResponseCode() + ":\n" + resp.getContentText().slice(0, 400));
+    return;
+  }
+  var errs = (body.errores || []).join("\n");
+  if (modoPrueba) {
+    ui.alert(
+      "🧪 PRUEBA OK Barra — sin ENTRADA real\n\n" +
+      "Factura: " + num + "\nEntradas simuladas: " + (body.entradas || 0) +
+      (errs ? "\n\n" + errs : "")
+    );
+    return;
+  }
+  if (!body.ok) {
+    ui.alert(
+      "No se pudo confirmar:\n" + (body.error || errs || JSON.stringify(body).slice(0, 300))
+    );
+    return;
+  }
+  ui.alert(
+    "✅ Recepción Barra confirmada\n\nFactura: " + num +
+    "\nENTRADAs: " + (body.entradas || 0) +
+    (errs ? "\nAvisos:\n" + errs : "") +
+    "\n\nRevisá pestaña POR_RECIBIR_BARRA (estado RECIBIDA_OK)."
+  );
 }
 
 function registrarHistorial_(ss, trx, usuario, proveedor, numFactura, fecha, lineas) {
