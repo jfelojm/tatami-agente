@@ -98,11 +98,15 @@ async def confirmar_ok(request: Request):
     if isinstance(raw_qty, dict):
         for k, v in raw_qty.items():
             try:
-                q = float(str(v).replace(",", "."))
+                from numeros_sheets import parse_numero_sheets
+
+                q = parse_numero_sheets(v, default=float("nan"))
+                if q != q or q <= 0:
+                    continue
             except (TypeError, ValueError):
                 continue
             kk = str(k).strip()
-            if kk and q > 0:
+            if kk:
                 cantidades[kk] = q
 
     from recepcion_compras_barra import confirmar_factura_ok

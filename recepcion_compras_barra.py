@@ -145,16 +145,23 @@ def clave_linea_cola(num_factura: str, cod_item_xml: str) -> str:
 
 
 def _parse_qty(raw) -> float | None:
-    s = str(raw or "").strip().replace(",", ".")
+    """Lee cantidad/costo desde Sheets (punto o coma; corrige miles mal aplicados)."""
+    from numeros_sheets import parse_numero_sheets
+
+    s = str(raw or "").strip()
     if not s:
         return None
-    try:
-        v = float(s)
-    except ValueError:
-        return None
+    v = parse_numero_sheets(s, default=float("nan"))
     if v != v:  # NaN
         return None
     return v
+
+
+def _num_cola(v, ndigits: int = 6) -> float | str:
+    """Escribe número como float RAW (evita 11.793.333 por locale es-EC)."""
+    from numeros_sheets import numero_celda_sheets
+
+    return numero_celda_sheets(v, ndigits=ndigits)
 
 
 def setup_hoja_por_recibir(*, force_headers: bool = False) -> str:
@@ -258,7 +265,10 @@ def encolar_lineas_por_recibir(
     num = (factura.get("num_factura") or "").strip()
     ya = lineas_ya_en_cola(num)
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    nuevas: list[list[str]] = []
+    ruc_fac = re.sub(r"\D", "", (factura.get("ruc") or "").strip())
+    if len(ruc_fac) == 12 and not ruc_fac.startswith("0"):
+        ruc_fac = "0" + ruc_fac
+    nuevas: list[list] = []
     for ln in lineas:
         cod_xml = (ln.get("cod_item_xml") or "").strip()
         clave = clave_linea_cola(num, cod_xml)
@@ -270,15 +280,15 @@ def encolar_lineas_por_recibir(
                 now,
                 num,
                 (factura.get("fecha_factura") or "").strip()[:10],
-                (factura.get("ruc") or "").strip(),
+                ruc_fac or (factura.get("ruc") or "").strip(),
                 (factura.get("razon_social") or "").strip()[:80],
                 (ln.get("cod_proveedor") or "").strip(),
                 cod_xml,
                 (ln.get("descripcion") or "").strip()[:120],
-                str(ln.get("cantidad") or ""),
+                _num_cola(ln.get("cantidad"), 4),
                 "",  # cantidad_recibida (operador)
-                str(ln.get("costo_unitario") or ""),
-                str(ln.get("total_linea") or ""),
+                _num_cola(ln.get("costo_unitario"), 6),
+                _num_cola(ln.get("total_linea"), 4),
                 (ln.get("cod_mp_sistema") or "").strip(),
                 (ln.get("nombre_mp") or "").strip()[:60],
                 (ln.get("unidad_base") or "").strip(),
@@ -301,10 +311,11 @@ def encolar_lineas_por_recibir(
     ws = open_staging().worksheet(SHEET_POR_RECIBIR)
     vals = ws.get_all_values()
     start = len(vals) + 1
+    # RAW + float: locale es-EC no interpreta el punto como miles
     ws.update(
         range_name=f"A{start}",
         values=nuevas,
-        value_input_option=ValueInputOption.user_entered,
+        value_input_option=ValueInputOption.raw,
     )
     print(f"  POR_RECIBIR_BARRA: +{len(nuevas)} línea(s) factura {num}")
     return len(nuevas)
@@ -346,7 +357,13 @@ def confirmar_factura_ok(
         _mp_cache_key,
         _parse_factor_positivo,
         buscar_item_prov,
+        invalidar_caches_facturas_inventario,
     )
+    from inventario_stock_mp import norm_mp
+
+    # Siempre datos frescos de Sheets (webhook Railway cachea en memoria)
+    invalidar_caches_facturas_inventario()
+    cargar_bd_items_prov()
 
     num = (num_factura or "").strip()
     if not num:
@@ -401,12 +418,16 @@ def confirmar_factura_ok(
     )
     modo_parcial = filtro_claves is not None and len(pendientes) < total_pend_factura
 
-    # Construir factura mínima + items
+    # Construir factura mínima + items (normalizar RUC 12→13 dígitos)
     sample = pendientes[0][1]
+    ruc_raw = (sample.get("ruc_proveedor") or "").strip()
+    ruc_digits = re.sub(r"\D", "", ruc_raw)
+    if len(ruc_digits) == 12 and not ruc_digits.startswith("0"):
+        ruc_digits = "0" + ruc_digits
     factura = {
         "num_factura": num,
         "fecha_factura": (sample.get("fecha_factura") or "").strip()[:10],
-        "ruc": (sample.get("ruc_proveedor") or "").strip(),
+        "ruc": ruc_digits or ruc_raw,
         "razon_social": (sample.get("razon_social") or "").strip(),
     }
 
@@ -417,8 +438,9 @@ def confirmar_factura_ok(
     rows_ok: list[int] = []
     claves_ok: list[str] = []
     qtys_ok: list[dict] = []
-    restos_rows: list[list[str]] = []
+    restos_rows: list[list] = []
     qty_parcial_lineas = 0
+    cod_movs_creados: list[str] = []
 
     for row_n, d in pendientes:
         cant_fac = _parse_qty(d.get("cantidad")) or 0.0
@@ -478,24 +500,29 @@ def confirmar_factura_ok(
             num,
         )
         if not item_prov:
-            # Fallback desde fila cola
-            item_prov = {
-                "cod_mp_sistema": d.get("cod_mp_sistema") or "",
-                "nombre_mp": d.get("nombre_mp") or "",
-                "unidad_base_sistema": d.get("unidad_base") or "uni",
-                "cod_bodega_destino": d.get("cod_bodega") or "BOD-002",
-                "factor_conversion": "1",
-                "unidad_compra": "uni",
-                "cod_proveedor": d.get("cod_proveedor") or "",
-            }
-            # Intentar factor real del catálogo por MP
+            # Fallback solo por MP+proveedor de la cola — NUNCA inventar factor=1
+            cod_mp_cola = norm_mp(d.get("cod_mp_sistema"))
+            cod_prov_cola = (d.get("cod_proveedor") or "").strip()
             for it in cargar_bd_items_prov():
-                if (it.get("cod_mp_sistema") or "").strip() == item_prov["cod_mp_sistema"]:
-                    if (it.get("cod_proveedor") or "").strip() == (
-                        d.get("cod_proveedor") or ""
-                    ).strip() or not d.get("cod_proveedor"):
-                        item_prov = it
-                        break
+                if norm_mp(it.get("cod_mp_sistema")) != cod_mp_cola:
+                    continue
+                cp = (it.get("cod_proveedor") or "").strip()
+                if cod_prov_cola and cp.lstrip("0") != cod_prov_cola.lstrip("0"):
+                    continue
+                if _parse_factor_positivo(it.get("factor_conversion")):
+                    item_prov = it
+                    break
+        if not item_prov:
+            errores.append(
+                f"{item_factura['cod_item_xml']}: sin match en BD_ITEMS_PROV "
+                "(promover ítem / revisar factor antes de OK)"
+            )
+            continue
+        if not _parse_factor_positivo(item_prov.get("factor_conversion")):
+            errores.append(
+                f"{item_factura['cod_item_xml']}: factor_conversion inválido en catálogo"
+            )
+            continue
 
         ok_conv, motivo = conversion_compra_definida(item_prov)
         if not ok_conv:
@@ -517,6 +544,7 @@ def confirmar_factura_ok(
             print(
                 f"  [DRY RUN] ENTRADA {item_prov.get('cod_mp_sistema')} +{cant} @ {bodega}"
                 + (f" (recibido {cant_rec} de {cant_fac})" if resto > 1e-9 else "")
+                + f" factor={factor}"
             )
             entradas += 1
             rows_ok.append(row_n)
@@ -526,12 +554,13 @@ def confirmar_factura_ok(
             )
             continue
 
-        ok = registrar_entrada_inventario(
+        cod_mov = registrar_entrada_inventario(
             item_prov, item_mov, factura, cod_bodega_destino=bodega
         )
-        if not ok:
+        if not cod_mov:
             errores.append(f"{item_factura['cod_item_xml']}: fallo ENTRADA")
             continue
+        cod_movs_creados.append(cod_mov)
 
         factor = _parse_factor_positivo(item_prov.get("factor_conversion"))
         assert factor is not None
@@ -562,10 +591,10 @@ def confirmar_factura_ok(
                     (d.get("cod_proveedor") or "").strip(),
                     (d.get("cod_item_xml") or "").strip(),
                     (d.get("descripcion") or "").strip()[:120],
-                    str(resto),
+                    _num_cola(resto, 4),
                     "",  # cantidad_recibida
-                    str(d.get("costo_unitario") or ""),
-                    str(total_resto),
+                    _num_cola(d.get("costo_unitario"), 6),
+                    _num_cola(total_resto, 4),
                     (d.get("cod_mp_sistema") or "").strip(),
                     (d.get("nombre_mp") or "").strip()[:60],
                     (d.get("unidad_base") or "").strip(),
@@ -578,9 +607,29 @@ def confirmar_factura_ok(
             )
 
     if not dry_run and (deltas_stock or deltas_costo):
-        _flush_mp_sistema(deltas_stock, deltas_costo)
+        flush = _flush_mp_sistema(deltas_stock, deltas_costo, force_reload=True)
+        if not flush.get("ok"):
+            # Revertir ENTRADAS para no dejar stock desfasado vs Sheets
+            try:
+                from supabase import create_client
 
-    # Marcar filas OK + cantidad_recibida efectiva
+                sb = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+                for cm in cod_movs_creados:
+                    sb.table("mov_inventario").delete().eq("cod_mov", cm).execute()
+                    print(f"  REVERTIDO mov {cm} (flush stock falló)")
+            except Exception as e:
+                print(f"  ERROR revirtiendo ENTRADAS tras fallo flush: {e}")
+            return {
+                "ok": False,
+                "error": flush.get("error")
+                or "No se pudo actualizar stock en BD_MP_SISTEMA",
+                "num_factura": num,
+                "entradas_revertidas": len(cod_movs_creados),
+                "flush": flush,
+                "errores": errores,
+            }
+
+    # Marcar filas OK + cantidad_recibida efectiva (solo si stock quedó actualizado)
     if not dry_run and rows_ok:
         i_est = headers.index("estado") if "estado" in headers else None
         i_usr = headers.index("usuario_ok") if "usuario_ok" in headers else None
@@ -615,11 +664,11 @@ def confirmar_factura_ok(
                 updates.append(
                     {
                         "range": rowcol_to_a1(row_n, i_crec + 1),
-                        "values": [[str(qty_by_row[row_n])]],
+                        "values": [[_num_cola(qty_by_row[row_n], 4)]],
                     }
                 )
         if updates:
-            ws.batch_update(updates, value_input_option=ValueInputOption.user_entered)
+            ws.batch_update(updates, value_input_option=ValueInputOption.raw)
 
         if restos_rows:
             # Alinear columnas al header actual de la hoja
@@ -633,18 +682,18 @@ def confirmar_factura_ok(
                 ws.update(
                     range_name=f"A{start}",
                     values=restos_rows,
-                    value_input_option=ValueInputOption.user_entered,
+                    value_input_option=ValueInputOption.raw,
                 )
             else:
                 # Mapear por nombre de columna
                 mapped = []
                 for resto_vals in restos_rows:
                     by_h = dict(zip(HEADERS, resto_vals))
-                    mapped.append([(by_h.get(h) or "") for h in headers])
+                    mapped.append([(by_h.get(h) if by_h.get(h) is not None else "") for h in headers])
                 ws.update(
                     range_name=f"A{start}",
                     values=mapped,
-                    value_input_option=ValueInputOption.user_entered,
+                    value_input_option=ValueInputOption.raw,
                 )
             print(f"  POR_RECIBIR_BARRA: +{len(restos_rows)} resto(s) qty parcial")
 

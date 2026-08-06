@@ -254,6 +254,22 @@ _items_prov_cache = None
 _bd_items_prov_price_layout: dict | None = None
 
 
+def invalidar_caches_facturas_inventario() -> None:
+    """
+    Fuerza relectura de Sheets en la próxima consulta.
+    Crítico en procesos largos (webhook Railway): sin esto, OK Barra usa
+    factores/stock viejos tras promover ítems o editar BD_ITEMS_PROV.
+    """
+    global _items_prov_cache, _prov_ruc_cache, _mp_sistema_cache
+    global _mp_col_stock, _mp_col_costo
+    _items_prov_cache = None
+    _prov_ruc_cache = None
+    _mp_sistema_cache = None
+    _mp_col_stock = None
+    _mp_col_costo = None
+    _invalidar_cache_layout_precio_items_prov()
+
+
 def _invalidar_cache_layout_precio_items_prov() -> None:
     global _bd_items_prov_price_layout
     _bd_items_prov_price_layout = None
@@ -804,14 +820,15 @@ _mp_col_costo: int | None = None
 
 def _mp_cache_key(cod_mp: str, cod_bodega: str) -> tuple[str, str]:
     from bodegas_config import normalizar_cod_bodega
+    from inventario_stock_mp import norm_mp
 
-    return (cod_mp.strip(), normalizar_cod_bodega(cod_bodega))
+    return (norm_mp(cod_mp), normalizar_cod_bodega(cod_bodega))
 
 
-def _cargar_mp_sistema_cache():
-    """Carga BD_MP_SISTEMA una sola vez por ejecución (clave MP × bodega)."""
+def _cargar_mp_sistema_cache(*, force: bool = False):
+    """Carga BD_MP_SISTEMA (clave MP × bodega). force=True recarga desde Sheets."""
     global _mp_sistema_cache, _mp_col_stock, _mp_col_costo
-    if _mp_sistema_cache is not None:
+    if _mp_sistema_cache is not None and not force:
         return
 
     from bodegas_config import normalizar_cod_bodega
@@ -873,23 +890,39 @@ def _cargar_mp_sistema_cache():
 def _flush_mp_sistema(
     deltas_stock: dict[tuple[str, str], float],
     deltas_costo: dict[tuple[str, str], float],
-):
+    *,
+    force_reload: bool = False,
+) -> dict:
     """
     deltas_stock / deltas_costo: clave (cod_mp, cod_bodega).
+    Retorna {ok, updated, missing, error}. ok=False si no pudo aplicar todos los deltas de stock.
     """
     if not deltas_stock and not deltas_costo:
-        return
-    _cargar_mp_sistema_cache()
+        return {"ok": True, "updated": [], "missing": [], "error": ""}
+
+    if force_reload:
+        global _mp_sistema_cache
+        _mp_sistema_cache = None
+
+    _cargar_mp_sistema_cache(force=force_reload)
     if not _mp_sistema_cache:
-        return
+        return {
+            "ok": False,
+            "updated": [],
+            "missing": [f"{k[0]}@{k[1]}" for k in deltas_stock],
+            "error": "BD_MP_SISTEMA vacío o ilegible",
+        }
 
     sh = _get_sheet()
     ws = sh.worksheet("BD_MP_SISTEMA")
     updates = []
+    missing: list[str] = []
+    updated: list[str] = []
 
     for key, delta in deltas_stock.items():
         info = _mp_sistema_cache.get(key)
         if not info:
+            missing.append(f"{key[0]}@{key[1]}")
             print(
                 f"  WARN: no fila BD_MP_SISTEMA para {key[0]} @ {key[1]} "
                 "(crear fila MP×bodega antes de ingresar)"
@@ -901,6 +934,7 @@ def _flush_mp_sistema(
             "range": rowcol_to_a1(info["row_1based"], _mp_col_stock),
             "values": [[nuevo_stock]],
         })
+        updated.append(f"{key[0]}@{key[1]}:{nuevo_stock}")
         print(f"    -> stock {key[0]}@{key[1]}: +{round(delta,4)} => {nuevo_stock}")
 
     if _mp_col_costo:
@@ -914,13 +948,39 @@ def _flush_mp_sistema(
             })
             print(f"    -> costo {key[0]}@{key[1]}: {round(nuevo_costo, 6)}")
 
-    if not updates:
-        return
+    if missing:
+        return {
+            "ok": False,
+            "updated": updated,
+            "missing": missing,
+            "error": (
+                "Sin fila BD_MP_SISTEMA para: " + ", ".join(missing)
+                + " — no se marca recepción OK"
+            ),
+        }
 
-    batch_size = 50
-    for i in range(0, len(updates), batch_size):
-        _sheets_batch_update_con_retry(ws, updates[i : i + batch_size])
-    print(f"  -> BD_MP_SISTEMA actualizado: {len(updates)} celdas")
+    if not updates:
+        return {
+            "ok": False,
+            "updated": [],
+            "missing": [],
+            "error": "Nada que escribir en BD_MP_SISTEMA",
+        }
+
+    try:
+        batch_size = 50
+        for i in range(0, len(updates), batch_size):
+            _sheets_batch_update_con_retry(ws, updates[i : i + batch_size])
+        print(f"  -> BD_MP_SISTEMA actualizado: {len(updates)} celdas")
+    except Exception as e:
+        return {
+            "ok": False,
+            "updated": [],
+            "missing": missing,
+            "error": f"Error escribiendo BD_MP_SISTEMA: {e}",
+        }
+
+    return {"ok": True, "updated": updated, "missing": [], "error": ""}
 
 
 # ── REGISTRAR ENTRADA EN MOV_INVENTARIO ──────────────────────
@@ -1163,10 +1223,10 @@ def registrar_entrada_inventario(
         print(
             f"    -> mov_inventario ENTRADA: {cod_mp} +{round(cantidad_base, 2)} {unidad}"
         )
-        return True
+        return cod_mov
     except Exception as e:
         print(f"    ERROR insertando mov_inventario: {e}")
-        return False
+        return None
 
 
 def _marker_item_xml(item_factura: dict) -> str:

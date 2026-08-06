@@ -19,6 +19,7 @@ def parse_numero_sheets(v, default: float = 0.0) -> float:
       - 20.408,42 (miles con punto, decimal con coma)
       - 1.630,46
       - 110 / 42,25
+      - 11.793.333 (float mangled por locale → 11.793333 si parece costo/qty)
     """
     try:
         s = str(v or "").strip()
@@ -32,17 +33,39 @@ def parse_numero_sheets(v, default: float = 0.0) -> float:
             s = s.replace(",", ".")
         elif s.count(".") > 1:
             parts = s.split(".")
-            if all(p.isdigit() for p in parts):
-                if len(parts[-1]) == 3 and len(parts) >= 2:
-                    s = "".join(parts[:-1]) + "." + parts[-1] if len(parts[-1]) <= 2 else "".join(parts)
-                    if len(parts[-1]) == 3:
-                        s = "".join(parts)
+            if all(p.isdigit() for p in parts) and len(parts) >= 2:
+                as_miles = float("".join(parts))
+                as_decimal = float(parts[0] + "." + "".join(parts[1:]))
+                # Locale es-EC + USER_ENTERED: "11.793333" se ve como "11.793.333"
+                # (miles≈11M). Si el decimal reconstruido es magnitud de costo/qty, usarlo.
+                if as_miles >= 10_000 and 0 < as_decimal < 1_000:
+                    s = parts[0] + "." + "".join(parts[1:])
+                elif all(len(p) == 3 for p in parts[1:]):
+                    s = "".join(parts)
                 else:
-                    s = "".join(parts[:-1]) + "." + parts[-1]
+                    s = parts[0] + "." + "".join(parts[1:])
 
         return float(s)
     except (TypeError, ValueError):
         return default
+
+
+def numero_celda_sheets(v, ndigits: int = 6) -> float | str:
+    """
+    Número listo para escribir en Sheets (ValueInputOption.raw).
+
+    Devuelve float redondeado para que el locale muestre bien (coma decimal);
+    evita str con puntos que Sheets interpreta como miles.
+    """
+    if v is None or v == "":
+        return ""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if x != x:  # NaN
+        return ""
+    return round(x, ndigits)
 
 
 def _costos_validos_mp(
