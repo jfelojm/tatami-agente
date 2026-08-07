@@ -28,6 +28,22 @@ class TestBodegaProduccionParse(unittest.TestCase):
         )
         self.assertEqual(bod, "BOD-005")
 
+    def test_opcion_numerica(self) -> None:
+        bod = _parse_bodega_produccion_texto(
+            "2",
+            permitidas={"BOD-001", "BOD-005"},
+            opciones=["BOD-001", "BOD-005"],
+        )
+        self.assertEqual(bod, "BOD-005")
+
+    def test_opcion_1_cocina(self) -> None:
+        bod = _parse_bodega_produccion_texto(
+            "1",
+            permitidas={"BOD-001", "BOD-005"},
+            opciones=["BOD-001", "BOD-005"],
+        )
+        self.assertEqual(bod, "BOD-001")
+
 
 class TestRequiereBodegaCocina(unittest.TestCase):
     def setUp(self) -> None:
@@ -93,6 +109,8 @@ class TestMsgPedirBodegaLote(unittest.TestCase):
         )
         self.assertIn("22 uni", msg)
         self.assertIn("PRODUCIR SUB 072 22 uni", msg)
+        self.assertIn("*1* =", msg)
+        self.assertIn("*2* =", msg)
         self.assertNotIn("3800", msg)
 
 
@@ -248,6 +266,18 @@ class TestResolverProduccionNombre(unittest.TestCase):
         pending = {"cods": ["004"], "awaiting_bodega": True, "area": "cocina"}
         self.assertFalse(
             _produccion_pendiente_obsoleta(pending, "005", "593987122959")
+        )
+
+    def test_pendiente_vigente_producir_suelto(self) -> None:
+        pending = {"cods": ["080"], "awaiting_bodega": True, "area": "cocina"}
+        self.assertFalse(
+            _produccion_pendiente_obsoleta(pending, "Producir", "593987122959")
+        )
+
+    def test_pendiente_vigente_subreceta_suelta(self) -> None:
+        pending = {"cods": ["080"], "awaiting_bodega": True, "area": "cocina"}
+        self.assertFalse(
+            _produccion_pendiente_obsoleta(pending, "Subreceta", "593987122959")
         )
 
     def test_match_camaron_caramelizado_alias(self) -> None:

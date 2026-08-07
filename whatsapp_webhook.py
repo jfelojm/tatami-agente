@@ -190,19 +190,43 @@ def _bodega_por_area(area: str | None) -> str | None:
     return None
 
 
+def _parse_bodega_opcion_numerica(
+    texto: str, opciones: list[str]
+) -> str | None:
+    """Resuelve '1', '2', 'opcion 1' contra la lista ordenada de bodegas ofrecidas."""
+    if not opciones:
+        return None
+    t = re.sub(r"\s+", " ", (texto or "").strip().lower())
+    if not t:
+        return None
+    m = re.fullmatch(r"(?:opci[oó]n\s*)?([1-9])(?:\s*[).:-])?", t)
+    if not m:
+        m = re.fullmatch(r"([1-9])\s*(?:bodega)?", t)
+    if not m:
+        return None
+    idx = int(m.group(1)) - 1
+    if 0 <= idx < len(opciones):
+        return opciones[idx]
+    return None
+
+
 def _parse_bodega_produccion_texto(
     texto: str,
     *,
     cod_sub_ignorar: str | None = None,
     permitidas: set[str] | None = None,
+    opciones: list[str] | None = None,
 ) -> str | None:
-    """Resuelve BOD-00x, 005, externa, cocina… en mensajes de producción."""
+    """Resuelve BOD-00x, 005, externa, cocina, 1/2… en mensajes de producción."""
     from bodegas_config import BODEGAS, bodega_activa, resolver_cod_bodega
 
     raw = (texto or "").strip()
     if not raw:
         return None
     ignorar = (cod_sub_ignorar or "").replace("SUB-", "").strip().zfill(3)
+    opts = list(opciones) if opciones else (
+        sorted(permitidas) if permitidas is not None else []
+    )
 
     def _ok(cod: str) -> bool:
         return (
@@ -210,6 +234,10 @@ def _parse_bodega_produccion_texto(
             and bodega_activa(cod)
             and (permitidas is None or cod in permitidas)
         )
+
+    bod_num = _parse_bodega_opcion_numerica(raw, opts)
+    if bod_num and _ok(bod_num):
+        return bod_num
 
     m = re.search(r"\b(bod[- ]?0?\d{3})\b", raw, re.I)
     if m:
@@ -313,12 +341,12 @@ def _necesita_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> bool:
 
 
 def _msg_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> str:
+    from bodegas_config import nombre_bodega
+
     cods_list = prod_sub.get("cods") or []
-    cods = ", ".join(cods_list)
     cod0 = (cods_list[0] if cods_list else "").replace("SUB-", "").zfill(3)
     area = prod_sub.get("area") or _inferir_area_desde_cods(cods_list) or "cocina"
     permitidas = _bodegas_opciones_produccion(wa_id, area)
-    opts = " · ".join(permitidas) if permitidas else "BOD-001 / BOD-005"
     rend_txt, unidad = _rendimiento_sub_display(cod0)
     cant = prod_sub.get("cantidad")
     if cant is not None:
@@ -327,12 +355,22 @@ def _msg_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> str:
         lote_txt = "1 lote estándar"
     else:
         lote_txt = f"{rend_txt} {unidad} (lote estándar)"
+    if permitidas:
+        lineas = []
+        for i, bod in enumerate(permitidas, start=1):
+            nom = nombre_bodega(bod) or bod
+            lineas.append(f"*{i}* = {nom} ({bod})")
+        opts_txt = "\n".join(lineas)
+        ej_corto = " · ".join(str(i) for i in range(1, len(permitidas) + 1))
+    else:
+        opts_txt = "BOD-001 / BOD-005"
+        ej_corto = "005 · 001"
     return (
-        f"Subreceta *{cod0}*: indica la *bodega* donde entra el stock.\n"
+        f"Subreceta *{cod0}*: ¿dónde entra el stock?\n"
         f"Lote sugerido: *{lote_txt}*\n"
-        f"Opciones: {opts}\n"
-        f"Ej: *005* · *001* · externa · cocina\n"
-        f"Ej completo: PRODUCIR SUB {cod0 or '049'} {rend_txt} {unidad} BOD-005"
+        f"{opts_txt}\n"
+        f"Responde solo *{ej_corto}* (o 005 / externa / cocina).\n"
+        f"Ej: PRODUCIR SUB {cod0 or '049'} {rend_txt} {unidad} BOD-005"
     )
 
 
@@ -789,11 +827,34 @@ def _resolver_cods_produccion_desde_texto(
     return [], None
 
 
+def _texto_solo_intencion_producir_o_sub(texto: str) -> bool:
+    """True si el mensaje es solo 'producir'/'preparar'/'subreceta' sin otra sub."""
+    raw = (texto or "").strip()
+    if not raw:
+        return True
+    if _es_palabra_subreceta_sola(raw):
+        return True
+    t = re.sub(r"\s+", " ", raw.lower())
+    if re.fullmatch(
+        r"(producir|produce|preparar|prepara|produccion|producción|prod)\.?",
+        t,
+    ):
+        return True
+    # Verbos de producción sin nombre/código de sub después de limpiar
+    frag = _fragmento_nombre_sub_en_texto(raw)
+    if frag:
+        return False
+    return bool(re.search(r"\b(produc|prepar)\w*", t))
+
+
 def _produccion_pendiente_obsoleta(pending: dict, texto: str, wa_id: str) -> bool:
     """True si el usuario pide otra sub distinta a la pending (evita bucle en bodega)."""
     if not pending:
         return False
     if not parece_nueva_operacion(texto):
+        return False
+    # Mientras pedimos bodega, "Producir" / "Subreceta" no reinician el flujo
+    if pending.get("awaiting_bodega") and _texto_solo_intencion_producir_o_sub(texto):
         return False
     pend_cod = _cod_sub_normalizado_3((pending.get("cods") or [None])[0])
     cods_txt = _match_sub_codigos_en_texto(texto, wa_id)
@@ -7173,14 +7234,19 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     _pending_prod_sub.pop(wa_id, None)
                 else:
                     if pending.get("awaiting_bodega"):
-                        from estrategia_config import bodegas_permitidas_produccion_sub
-
-                        permitidas = bodegas_permitidas_produccion_sub(wa_id)
+                        area_p = (
+                            pending.get("area")
+                            or _inferir_area_desde_cods(pending.get("cods") or [])
+                            or "cocina"
+                        )
+                        opciones = _bodegas_opciones_produccion(wa_id, area_p)
+                        permitidas = set(opciones)
                         cod_sub = (pending.get("cods") or [None])[0]
                         bod = _parse_bodega_produccion_texto(
                             texto,
                             cod_sub_ignorar=str(cod_sub) if cod_sub else None,
                             permitidas=permitidas,
+                            opciones=opciones,
                         )
                         cant = _extraer_cantidad_sub(
                             texto, cod_sub=str(cod_sub) if cod_sub else None
