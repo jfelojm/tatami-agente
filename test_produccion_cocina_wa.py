@@ -95,6 +95,10 @@ class TestConfirmacionNoRepreguntaBodega(unittest.TestCase):
 
 class TestMsgPedirBodegaLote(unittest.TestCase):
     @patch(
+        "whatsapp_webhook._nombre_sub_display",
+        return_value="nachos wonton",
+    )
+    @patch(
         "whatsapp_webhook._rendimiento_sub_display",
         return_value=("22", "uni"),
     )
@@ -102,7 +106,7 @@ class TestMsgPedirBodegaLote(unittest.TestCase):
         "whatsapp_webhook._bodegas_opciones_produccion",
         return_value=["BOD-001", "BOD-005"],
     )
-    def test_ejemplo_usa_rendimiento_sub(self, _bod, _rend) -> None:
+    def test_ejemplo_usa_rendimiento_sub(self, _bod, _rend, _nom) -> None:
         msg = _msg_pedir_bodega_produccion(
             STAFF_COCINA,
             {"cods": ["072"], "area": "cocina"},
@@ -112,6 +116,8 @@ class TestMsgPedirBodegaLote(unittest.TestCase):
         self.assertIn("*1* =", msg)
         self.assertIn("*2* =", msg)
         self.assertNotIn("3800", msg)
+        self.assertIn("nachos wonton", msg)
+        self.assertIn("SUB-072", msg)
 
 
 class TestStockNegativoOperaciones(unittest.TestCase):
@@ -315,6 +321,80 @@ class TestResolverProduccionNombre(unittest.TestCase):
         self.assertEqual(r.get("cods"), ["049"])
         self.assertEqual(r.get("bodega"), "BOD-005")
         self.assertEqual(r.get("cantidad"), 3800.0)
+
+
+class TestPancetaDisambiguacion(unittest.TestCase):
+    """«producir panceta» no debe ir solo a salsa 019; debe listar opciones."""
+
+    def _fake_buscar(self, *, nombre_subreceta: str = "", cod_subreceta: str = ""):
+        catalog = [
+            ("SUB-019", {"nombre_subreceta": "salsa panceta", "activa": "SI"}, []),
+            ("SUB-020", {"nombre_subreceta": "ensalada bao panceta", "activa": "SI"}, []),
+            ("SUB-088", {"nombre_subreceta": "panceta produccion", "activa": "SI"}, []),
+            ("SUB-006", {"nombre_subreceta": "pan bao", "activa": "SI"}, []),
+        ]
+        q = (nombre_subreceta or "").strip().lower()
+        if not q:
+            return []
+        return [row for row in catalog if q in (row[1]["nombre_subreceta"] or "").lower()]
+
+    def test_producir_panceta_pide_eleccion(self) -> None:
+        from whatsapp_webhook import _parse_batch_lenguaje_natural
+
+        with patch(
+            "whatsapp_webhook._buscar_subrecetas", side_effect=self._fake_buscar
+        ), patch(
+            "whatsapp_webhook._filtrar_subs_por_area", side_effect=lambda m, a: m
+        ), patch(
+            "whatsapp_webhook._match_sub_codigos_en_texto", return_value=[]
+        ), patch(
+            "whatsapp_webhook._rendimiento_sub_display", return_value=("5400", "gr")
+        ), patch(
+            "whatsapp_webhook._nombre_sub_display",
+            side_effect=lambda c: {
+                "019": "salsa panceta",
+                "020": "ensalada bao panceta",
+                "088": "panceta produccion",
+            }.get((c or "").replace("SUB-", "").zfill(3), c),
+        ):
+            r = _parse_batch_lenguaje_natural("producir panceta", "593987122959")
+        self.assertIsNotNone(r)
+        self.assertTrue(r.get("ambiguo_sub"))
+        cods = {c for c, _ in (r.get("opciones") or [])}
+        self.assertIn("088", cods)
+        self.assertIn("019", cods)
+
+    def test_msg_bodega_incluye_nombre(self) -> None:
+        with patch(
+            "whatsapp_webhook._nombre_sub_display", return_value="salsa panceta"
+        ), patch(
+            "whatsapp_webhook._rendimiento_sub_display", return_value=("1620", "gr")
+        ), patch(
+            "whatsapp_webhook._bodegas_opciones_produccion",
+            return_value=["BOD-001", "BOD-005"],
+        ):
+            msg = _msg_pedir_bodega_produccion(
+                STAFF_COCINA, {"cods": ["019"], "area": "cocina"}
+            )
+        self.assertIn("salsa panceta", msg)
+        self.assertIn("SUB-019", msg)
+
+    def test_pregunta_nombre_mientras_espera_bodega(self) -> None:
+        from whatsapp_webhook import (
+            _es_pregunta_sobre_sub_pendiente,
+            _msg_info_sub_pendiente,
+        )
+
+        self.assertTrue(_es_pregunta_sobre_sub_pendiente("cual es el nombre de 019"))
+        self.assertFalse(_es_pregunta_sobre_sub_pendiente("2"))
+        with patch(
+            "whatsapp_webhook._nombre_sub_display", return_value="salsa panceta"
+        ), patch(
+            "whatsapp_webhook._rendimiento_sub_display", return_value=("1620", "gr")
+        ):
+            info = _msg_info_sub_pendiente({"cods": ["019"]})
+        self.assertIn("salsa panceta", info)
+        self.assertIn("SUB-019", info)
 
 
 if __name__ == "__main__":

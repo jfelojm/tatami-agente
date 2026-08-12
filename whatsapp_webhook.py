@@ -308,14 +308,33 @@ def _bodegas_opciones_produccion(wa_id: str, area: str | None = None) -> list[st
     return sorted(permitidas)
 
 
-def _rendimiento_sub_display(cod: str) -> tuple[str, str]:
-    """(cantidad texto, unidad) del lote estándar para mensajes WA."""
+def _info_sub_display(cod: str) -> dict:
+    """Cabecera SUB para mensajes WA (nombre, rendimiento, unidad)."""
     from codigos_subreceta import cod_sub_canonico
     from unidades_operativas import cargar_rendimiento_subrecetas
 
     cod3 = (cod or "").replace("SUB-", "").strip().zfill(3)
     cat = cargar_rendimiento_subrecetas()
     info = cat.get(cod_sub_canonico(cod3)) or cat.get(f"SUB-{cod3}") or {}
+    if not info:
+        try:
+            cab, _ = _subs_catalogo_cached()
+            info = cab.get(cod_sub_canonico(cod3)) or cab.get(f"SUB-{cod3}") or {}
+        except Exception:
+            info = {}
+    return info or {}
+
+
+def _nombre_sub_display(cod: str) -> str:
+    info = _info_sub_display(cod)
+    nom = (info.get("nombre_subreceta") or "").strip()
+    cod3 = (cod or "").replace("SUB-", "").strip().zfill(3)
+    return nom or f"SUB-{cod3}"
+
+
+def _rendimiento_sub_display(cod: str) -> tuple[str, str]:
+    """(cantidad texto, unidad) del lote estándar para mensajes WA."""
+    info = _info_sub_display(cod)
     rend = info.get("rendimiento_estandar")
     unidad = (info.get("unidad") or "gr").strip()
     if rend:
@@ -345,6 +364,7 @@ def _msg_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> str:
 
     cods_list = prod_sub.get("cods") or []
     cod0 = (cods_list[0] if cods_list else "").replace("SUB-", "").zfill(3)
+    nombre = _nombre_sub_display(cod0)
     area = prod_sub.get("area") or _inferir_area_desde_cods(cods_list) or "cocina"
     permitidas = _bodegas_opciones_produccion(wa_id, area)
     rend_txt, unidad = _rendimiento_sub_display(cod0)
@@ -366,11 +386,41 @@ def _msg_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> str:
         opts_txt = "BOD-001 / BOD-005"
         ej_corto = "005 · 001"
     return (
-        f"Subreceta *{cod0}*: ¿dónde entra el stock?\n"
+        f"*{nombre}* (SUB-{cod0}): ¿dónde entra el stock?\n"
         f"Lote sugerido: *{lote_txt}*\n"
         f"{opts_txt}\n"
         f"Responde solo *{ej_corto}* (o 005 / externa / cocina).\n"
         f"Ej: PRODUCIR SUB {cod0 or '049'} {rend_txt} {unidad} BOD-005"
+    )
+
+
+def _es_pregunta_sobre_sub_pendiente(texto: str) -> bool:
+    """Pregunta informativa mientras se espera bodega (no es elección 1/2)."""
+    raw = (texto or "").strip()
+    if not raw:
+        return False
+    if _parse_bodega_produccion_texto(raw):
+        return False
+    t = re.sub(r"\s+", " ", raw.lower())
+    if t.endswith("?"):
+        return True
+    return bool(
+        re.search(
+            r"\b(cu[aá]l|qu[eé]|c[oó]mo|nombre|llama|significa|es la|es el)\b",
+            t,
+        )
+    )
+
+
+def _msg_info_sub_pendiente(prod_sub: dict) -> str:
+    cods_list = prod_sub.get("cods") or []
+    cod0 = (cods_list[0] if cods_list else "").replace("SUB-", "").zfill(3)
+    nombre = _nombre_sub_display(cod0)
+    rend_txt, unidad = _rendimiento_sub_display(cod0)
+    return (
+        f"SUB-{cod0} es *{nombre}*.\n"
+        f"Lote estándar: {rend_txt} {unidad}.\n\n"
+        "Aún falta la bodega donde entra el stock."
     )
 
 
@@ -805,25 +855,47 @@ def _resolver_cods_produccion_desde_texto(
     area: str | None = None,
 ) -> tuple[list[str], list[tuple[str, str]] | None]:
     """Resuelve códigos SUB desde texto; opciones si hay varias coincidencias."""
-    cods = _match_sub_codigos_en_texto(texto, wa_id)
-    if cods:
-        return cods, None
     area_res = area or _resolver_area_produccion(wa_id, texto, cods=[])
-    cods = _buscar_cods_subreceta_por_nombre(texto, area=area_res)
-    if not cods:
-        frag = _fragmento_nombre_sub_en_texto(texto)
-        if frag and frag.lower() != (texto or "").strip().lower():
-            cods = _buscar_cods_subreceta_por_nombre(frag, area=area_res)
+    frag = _fragmento_nombre_sub_en_texto(texto)
+    frag_l = re.sub(r"\s+", " ", (frag or "").strip().lower())
+
+    # 1) Alias / coincidencia fuerte (ej. «pan bao», «pistacho»)
+    cods = _match_sub_codigos_en_texto(texto, wa_id)
     if len(cods) == 1:
         return cods, None
-    if len(cods) > 1:
-        return cods, None
-    opciones = _buscar_opciones_subreceta(texto, area_res)
-    opciones = _preferir_opciones_sub_por_tokens(texto, opciones)
+
+    # 2) Nombre único en catálogo
+    cods_nom = _buscar_cods_subreceta_por_nombre(texto, area=area_res)
+    if not cods_nom and frag and frag.lower() != (texto or "").strip().lower():
+        cods_nom = _buscar_cods_subreceta_por_nombre(frag, area=area_res)
+    if len(cods_nom) == 1:
+        return cods_nom, None
+
+    # 3) Varias coincidencias por nombre parcial (ej. «panceta»)
+    opciones = _preferir_opciones_sub_por_tokens(
+        texto, _buscar_opciones_subreceta(texto, area_res)
+    )
+    if len(opciones) > 1:
+        exact = [o for o in opciones if (o[1] or "").strip().lower() == frag_l]
+        if len(exact) == 1:
+            return [exact[0][0]], None
+        return [], opciones
     if len(opciones) == 1:
         return [opciones[0][0]], None
-    if len(opciones) > 1:
-        return [], opciones
+
+    # 4) Varios aliases sin nombre único
+    if len(cods) > 1:
+        opts = [(c.zfill(3), _nombre_sub_display(c)) for c in cods]
+        opts = _ordenar_opciones_sub_relevancia(frag, opts)
+        exact = [o for o in opts if (o[1] or "").strip().lower() == frag_l]
+        if len(exact) == 1:
+            return [exact[0][0]], None
+        return [], opts
+
+    if len(cods_nom) > 1:
+        opts = [(c.zfill(3), _nombre_sub_display(c)) for c in cods_nom]
+        return [], _ordenar_opciones_sub_relevancia(frag, opts)
+
     return [], None
 
 
@@ -948,7 +1020,11 @@ def _filtrar_subs_por_area(
 
 
 def _buscar_cods_subreceta_por_nombre(texto: str, area: str | None = None) -> list[str]:
-    """Resuelve códigos SUB desde nombre parcial (BD_SUBRECETAS)."""
+    """Resuelve códigos SUB desde nombre parcial (BD_SUBRECETAS).
+
+    Si hay varias coincidencias sin un único mejor match, retorna [] para que
+    el caller use desambiguación (_buscar_opciones_subreceta).
+    """
     from codigos_subreceta import cod_sub_sin_prefijo
 
     frag = _fragmento_nombre_sub_en_texto(texto)
@@ -967,9 +1043,17 @@ def _buscar_cods_subreceta_por_nombre(texto: str, area: str | None = None) -> li
             for row in matches
             if all(w in (row[1].get("nombre_subreceta") or "").lower() for w in words)
         ]
-        pick = best if len(best) == 1 else matches
-        if pick:
-            return [cod_sub_sin_prefijo(pick[0][0]).zfill(3)]
+        if len(best) == 1:
+            return [cod_sub_sin_prefijo(best[0][0]).zfill(3)]
+        # Exact name match
+        exact = [
+            row
+            for row in matches
+            if (row[1].get("nombre_subreceta") or "").strip().lower() == q
+        ]
+        if len(exact) == 1:
+            return [cod_sub_sin_prefijo(exact[0][0]).zfill(3)]
+        return []
 
     words = _tokens_sub_nombre(q)
     if not words:
@@ -991,7 +1075,39 @@ def _buscar_cods_subreceta_por_nombre(texto: str, area: str | None = None) -> li
     ]
     if len(best) == 1:
         return [cod_sub_sin_prefijo(best[0][0]).zfill(3)]
+    exact = [
+        row
+        for row in hits.values()
+        if (row[1].get("nombre_subreceta") or "").strip().lower() == q
+    ]
+    if len(exact) == 1:
+        return [cod_sub_sin_prefijo(exact[0][0]).zfill(3)]
     return []
+
+
+def _ordenar_opciones_sub_relevancia(
+    frag: str, opciones: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Prioriza nombres que empiezan por el fragmento o lo contienen como palabra."""
+    if len(opciones) <= 1:
+        return opciones
+    q = re.sub(r"\s+", " ", (frag or "").strip().lower())
+    if not q:
+        return opciones
+
+    def score(item: tuple[str, str]) -> tuple:
+        nom = (item[1] or "").strip().lower()
+        if nom == q:
+            return (0, len(nom), item[0])
+        if nom.startswith(q):
+            return (1, len(nom), item[0])
+        if re.search(rf"\b{re.escape(q)}\b", nom):
+            return (2, len(nom), item[0])
+        if q in nom:
+            return (3, len(nom), item[0])
+        return (4, len(nom), item[0])
+
+    return sorted(opciones, key=score)
 
 
 def _buscar_opciones_subreceta(
@@ -1013,19 +1129,27 @@ def _buscar_opciones_subreceta(
                 continue
             for row in _filtrar_subs_por_area(_buscar_subrecetas(nombre_subreceta=w), area):
                 hits[row[0]] = row
-    out: list[tuple[str, str]] = []
-    for cod_key, info, _ in list(hits.values())[:limit]:
-        cod = cod_sub_sin_prefijo(cod_key).zfill(3)
-        nom = (info.get("nombre_subreceta") or f"SUB-{cod}").strip()
-        out.append((cod, nom))
-    return out
+    ranked = _ordenar_opciones_sub_relevancia(
+        frag or q,
+        [
+            (
+                cod_sub_sin_prefijo(cod_key).zfill(3),
+                (info.get("nombre_subreceta") or f"SUB-{cod_sub_sin_prefijo(cod_key).zfill(3)}").strip(),
+            )
+            for cod_key, info, _ in hits.values()
+        ],
+    )
+    return ranked[:limit]
 
 
 def _msg_elegir_subreceta(opciones: list[tuple[str, str]], area: str) -> str:
-    lines = [f"Encontré varias subrecetas en *{area}*. Elige una:\n"]
+    lines = [
+        f"Encontré varias subrecetas con ese nombre en *{area}*. Elige una:\n"
+    ]
     for i, (cod, nom) in enumerate(opciones[:8], 1):
-        lines.append(f"{i}. {nom} ({cod})")
-    lines.append("\nResponde con el *código* o el *nombre*.")
+        rend_txt, unidad = _rendimiento_sub_display(cod)
+        lines.append(f"{i}. *{nom}* (SUB-{cod}) — lote {rend_txt} {unidad}")
+    lines.append("\nResponde con el *número*, el *código* o el *nombre*.")
     return "\n".join(lines)
 
 
@@ -2181,10 +2305,61 @@ def tool_items_pendientes_factura(args):
 
 
 def _es_mov_compra_factura(r: dict) -> bool:
-    """Misma lógica relajada que reporte_semanal: compras por factura."""
-    t = (r.get("tipo_mov") or "").strip().upper()
-    o = (r.get("origen_documento") or "").strip().upper()
-    return t in ("ENTRADA", "ENTRADA_COMPRA") and (o == "FACTURA" or o == "")
+    """Compat: tipos de compra (misma base que dashboard). Preferir filtrar_compras_wa."""
+    from dashboard_services.compras import es_entrada_compra
+
+    return es_entrada_compra(r)
+
+
+def _contexto_compras_wa(
+    sb,
+    *,
+    nums_factura: list[str] | None = None,
+) -> dict:
+    """Carga Sheets + facturas para aplicar el mismo filtro del dashboard."""
+    from dashboard_services.compras import contexto_filtros_compras
+    from dashboard_services.sheets_data import (
+        leer_bd_mp_sistema as leer_mp_dash,
+        leer_bd_prov as leer_prov_dash,
+    )
+
+    facturas: list[dict] = []
+    nums = [n for n in (nums_factura or []) if n and n != "(sin_num_documento)"]
+    for i in range(0, len(nums), 80):
+        part = nums[i : i + 80]
+        try:
+            res = (
+                sb.table("facturas_procesadas")
+                .select(
+                    "num_factura,ruc_proveedor,meta,estado,items_sin_match,fecha_factura"
+                )
+                .in_("num_factura", part)
+                .execute()
+            )
+            for r in res.data or []:
+                meta = r.get("meta") or {}
+                razon = ""
+                if isinstance(meta, dict):
+                    razon = (
+                        meta.get("razon_social") or meta.get("proveedor") or ""
+                    ).strip()
+                facturas.append({**r, "razon_social": razon})
+        except Exception:
+            pass
+    # Misma fuente Sheets que el dashboard (incluye Tipo / RUC)
+    return contexto_filtros_compras(leer_mp_dash(), leer_prov_dash(), facturas)
+
+
+def _filtrar_compras_wa(rows: list[dict], ctx: dict, *, exigir_proveedor: bool = True) -> list[dict]:
+    from dashboard_services.compras import filtrar_compras_inventario
+
+    return filtrar_compras_inventario(
+        rows,
+        mps_validos=ctx["mps_validos"],
+        prov_inv=ctx["prov_inv"],
+        fact_por_num=ctx["fact_por_num"],
+        exigir_proveedor=exigir_proveedor,
+    )
 
 
 def _solo_digitos_ruc(s: str) -> str:
@@ -2365,19 +2540,25 @@ def _formatear_cantidad_compra(cantidad: float, unidad_base: str) -> dict:
 
 
 def _lineas_compra_factura(sb, num_factura: str) -> list[dict]:
+    from dashboard_services.compras import TIPOS_MOV_COMPRA
+
+    num = num_factura.strip()
     res = (
         sb.table("mov_inventario")
         .select(
-            "fecha,cod_mp_sistema,nombre_mp,cantidad_mov,costo_unitario,costo_total,observaciones,tipo_mov,origen_documento"
+            "fecha,cod_mp_sistema,nombre_mp,cantidad_mov,costo_unitario,costo_total,"
+            "observaciones,tipo_mov,origen_documento,cod_bodega_destino,cod_bodega_origen"
         )
-        .eq("num_documento", num_factura.strip())
+        .eq("num_documento", num)
+        .in_("tipo_mov", list(TIPOS_MOV_COMPRA))
         .execute()
     )
+    ctx = _contexto_compras_wa(sb, nums_factura=[num])
+    # Detalle de factura: no exigir proveedor (la factura ya identifica al proveedor).
+    rows = _filtrar_compras_wa(res.data or [], ctx, exigir_proveedor=False)
     unidades = _mapa_unidad_mp()
     lineas = []
-    for r in res.data or []:
-        if not _es_mov_compra_factura(r):
-            continue
+    for r in rows:
         cod = (r.get("cod_mp_sistema") or "").strip()
         cant = _to_float(r.get("cantidad_mov"), 0.0)
         ct = _to_float(r.get("costo_total"), 0.0)
@@ -2388,11 +2569,13 @@ def _lineas_compra_factura(sb, num_factura: str) -> list[dict]:
         precio_kg = None
         if ub == "GR" and cant > 0 and ct > 0:
             precio_kg = round((ct / cant) * 1000.0, 4)
+        tipo = (r.get("tipo_mov") or "").strip().upper()
         lineas.append(
             {
                 "cod_mp_sistema": cod,
                 "nombre_mp": (r.get("nombre_mp") or cod).strip(),
                 "descripcion_xml": desc_xml,
+                "tipo_mov": tipo,
                 **fmt,
                 "costo_unitario": round(cu, 6),
                 "costo_total_usd": round(ct, 2),
@@ -2458,10 +2641,10 @@ def _texto_whatsapp_compras_rango(
     lines = [
         f"Compras ingresadas a inventario — {periodo_label} ({fecha_desde} al {fecha_hasta}):",
         "",
-        "Que incluye este total:",
-        "- Solo lineas ya registradas en inventario (mov_inventario ENTRADA por factura).",
-        "- Monto = costo_total de cada linea de MP ingresada, no el total del XML si hubo lineas sin match.",
-        "- No incluye servicios, gastos no inventariables ni lineas pendientes sin procesar.",
+        "Que incluye este total (igual que el dashboard Compras):",
+        "- ENTRADA (stock) y ENTRADA_COSTO_HIST (solo costo; cantidad 0).",
+        "- MP en catálogo, bodegas 001/002/003/005; excluye sin catálogo / MP 000.",
+        "- Monto = costo_total de cada linea; no el total del XML si hubo lineas sin match.",
         "",
         f"Total ingresado a inventario: {float(resumen.get('total_compras_usd', 0)):.2f} USD",
         f"{resumen.get('n_facturas_distintas', 0)} facturas / "
@@ -2601,10 +2784,11 @@ def tool_compras_factura_detalle(args):
 
 def tool_compras_facturas_rango(args):
     """
-    Compras desde facturas ya registradas en inventario: mov_inventario
-    (ENTRADA / ENTRADA_COMPRA por factura) entre dos fechas inclusive.
-    Devuelve totales, top facturas, top productos (MP) y agregado por proveedor (RUC).
+    Compras alineadas al dashboard: ENTRADA + ENTRADA_COSTO_HIST con mismos
+    filtros de bodega/catálogo/proveedor. Devuelve totales y texto_whatsapp.
     """
+    from dashboard_services.compras import TIPOS_MOV_COMPRA
+
     args = args or {}
     desde = str(args.get("fecha_desde") or "").strip()
     hasta = str(args.get("fecha_hasta") or "").strip()
@@ -2653,14 +2837,16 @@ def tool_compras_facturas_rango(args):
         return {"ok": False, "error": "Rango maximo 400 dias. Acorta el periodo."}
 
     sb = conectar_supabase()
-    rows: list[dict] = []
+    raw_rows: list[dict] = []
     offset = 0
     while True:
         chunk = (
             sb.table("mov_inventario")
             .select(
-                "fecha,tipo_mov,origen_documento,num_documento,cod_mp_sistema,nombre_mp,cantidad_mov,costo_total"
+                "fecha,tipo_mov,origen_documento,num_documento,cod_mp_sistema,nombre_mp,"
+                "cantidad_mov,costo_total,observaciones,cod_bodega_destino,cod_bodega_origen"
             )
+            .in_("tipo_mov", list(TIPOS_MOV_COMPRA))
             .gte("fecha", f"{desde}T00:00:00")
             .lte("fecha", f"{hasta}T23:59:59")
             .range(offset, offset + 999)
@@ -2668,10 +2854,20 @@ def tool_compras_facturas_rango(args):
             .data
             or []
         )
-        rows.extend(r for r in chunk if _es_mov_compra_factura(r))
+        raw_rows.extend(chunk)
         if len(chunk) < 1000:
             break
         offset += 1000
+
+    nums_previos = sorted(
+        {
+            (r.get("num_documento") or "").strip()
+            for r in raw_rows
+            if (r.get("num_documento") or "").strip()
+        }
+    )
+    ctx = _contexto_compras_wa(sb, nums_factura=nums_previos)
+    rows = _filtrar_compras_wa(raw_rows, ctx, exigir_proveedor=True)
 
     if not rows:
         vacio = {
@@ -2681,8 +2877,11 @@ def tool_compras_facturas_rango(args):
             "n_lineas_movimiento": 0,
             "n_facturas_distintas": 0,
             "n_productos_mp_distintos": 0,
-            "tipo_monto": "solo_lineas_ingresadas_inventario",
-            "nota": "Sin lineas ENTRADA por factura en mov_inventario en ese rango.",
+            "tipo_monto": "compras_dashboard",
+            "nota": (
+                "Sin lineas de compra de inventario (filtros dashboard: ENTRADA/"
+                "ENTRADA_COSTO_HIST, catálogo, bodegas 001/002/003/005) en ese rango."
+            ),
         }
         return {
             "ok": True,
@@ -2692,7 +2891,7 @@ def tool_compras_facturas_rango(args):
             "top_productos": [],
             "texto_whatsapp": (
                 f"Compras ingresadas a inventario ({desde} al {hasta}): "
-                "sin lineas ENTRADA por factura en mov_inventario en ese periodo."
+                "sin lineas que cumplan los filtros del dashboard en ese periodo."
             ),
         }
 
@@ -2918,18 +3117,17 @@ def tool_compras_facturas_rango(args):
         "n_facturas_parciales": n_facturas_parciales,
         "items_sin_match_total": items_sin_match_total,
         "proveedores_sin_nombre": proveedores_sin_nombre,
-        "tipo_monto": "solo_lineas_ingresadas_inventario",
+        "tipo_monto": "compras_dashboard",
         "que_incluye": (
-            "Suma de costo_total en mov_inventario (ENTRADA por factura): materias primas "
-            "ya ingresadas al inventario."
+            "Misma regla que el dashboard Compras: costo_total de ENTRADA y "
+            "ENTRADA_COSTO_HIST con MP en catálogo y bodegas 001/002/003/005."
         ),
         "que_no_incluye": (
-            "Total del XML de la factura si hubo lineas sin match, servicios no inventariables "
-            "o conceptos no procesados a mov_inventario."
+            "Total del XML si hubo lineas sin match, MP 000 / sin catálogo, "
+            "bodegas fuera de inventario operativo, o lineas sin proveedor resoluble."
         ),
         "nota": (
-            "Montos = costo_total por linea en mov_inventario ENTRADA. "
-            "Razon social desde BD_PROV, BD_ITEMS_PENDIENTES o meta de factura. "
+            "Montos alineados al tab Compras del dashboard. "
             "Para lineas de UNA factura usa compras_factura_detalle."
         ),
     }
@@ -6330,8 +6528,8 @@ TOOLS = [
     {"name": "inventario_por_bodega", "description": "Resumen de valor (USD) y stock total por bodega desde BD_MP_SISTEMA.", "input_schema": {"type": "object", "properties": {"incluir_sin_costo": {"type": "boolean"}}, "required": []}},
     {"name": "facturas_parciales", "description": "Facturas con estado PARCIAL en Supabase (facturas_procesadas).", "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
     {"name": "items_pendientes_factura", "description": "Ítems pendientes (BD_ITEMS_PENDIENTES) filtrando por num_factura o ruc_proveedor.", "input_schema": {"type": "object", "properties": {"num_factura": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
-    {"name": "compras_facturas_rango", "description": "Compras/gasto por proveedor: SOLO lineas ya ingresadas al inventario (mov_inventario ENTRADA), no el total XML de la factura si hubo lineas sin match. Devuelve texto_whatsapp: copialo tal cual. Fechas YYYY-MM-DD o mes_nombre+anio (ej. mayo 2026). razon_social desde BD_PROV; si falta nombre indica facturas_ejemplo.", "input_schema": {"type": "object", "properties": {"fecha_desde": {"type": "string"}, "fecha_hasta": {"type": "string"}, "mes_nombre": {"type": "string"}, "anio": {"type": "integer"}, "mes": {"type": "integer"}, "nombre_proveedor": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "top_facturas": {"type": "integer"}, "top_productos": {"type": "integer"}}, "required": []}},
-    {"name": "compras_factura_detalle", "description": "Lineas EXACTAS ingresadas al inventario de UNA factura de compra (mov_inventario). Devuelve texto_whatsapp: copialo tal cual. Para ultima factura de un proveedor: ultima=true con nombre_proveedor (ej. Maramar) o ruc_proveedor. Para una factura concreta: num_factura. NUNCA inventes productos ni cantidades.", "input_schema": {"type": "object", "properties": {"num_factura": {"type": "string"}, "nombre_proveedor": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "ultima": {"type": "boolean"}}, "required": []}},
+    {"name": "compras_facturas_rango", "description": "Compras/gasto por proveedor alineado al dashboard Compras: ENTRADA + ENTRADA_COSTO_HIST, MP en catalogo, bodegas 001/002/003/005. Devuelve texto_whatsapp: copialo tal cual. Fechas YYYY-MM-DD o mes_nombre+anio. Si falta nombre de proveedor indica facturas_ejemplo.", "input_schema": {"type": "object", "properties": {"fecha_desde": {"type": "string"}, "fecha_hasta": {"type": "string"}, "mes_nombre": {"type": "string"}, "anio": {"type": "integer"}, "mes": {"type": "integer"}, "nombre_proveedor": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "top_facturas": {"type": "integer"}, "top_productos": {"type": "integer"}}, "required": []}},
+    {"name": "compras_factura_detalle", "description": "Lineas EXACTAS de compra de inventario de UNA factura (mismos filtros que dashboard: ENTRADA/ENTRADA_COSTO_HIST). Devuelve texto_whatsapp: copialo tal cual. ultima=true + nombre_proveedor, o num_factura. NUNCA inventes productos ni cantidades.", "input_schema": {"type": "object", "properties": {"num_factura": {"type": "string"}, "nombre_proveedor": {"type": "string"}, "ruc_proveedor": {"type": "string"}, "ultima": {"type": "boolean"}}, "required": []}},
     {"name": "mp_incompletas", "description": "MPs con datos incompletos en BD_MP_SISTEMA (sin_costo, sin_par, sin_bodega).", "input_schema": {"type": "object", "properties": {"tipo": {"type": "string", "enum": ["sin_costo","sin_par","sin_bodega"]}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}, "required": []}},
     {"name": "resumen_operativo_hoy", "description": "Resumen compacto: ventas hoy + bajo par + negativos + facturas parciales.", "input_schema": {"type": "object", "properties": {"top": {"type": "integer"}}, "required": []}},
     {"name": "pedidos_hoy", "description": "Pedidos que corresponde hacer hoy segun ventana de cada proveedor.", "input_schema": {"type": "object", "properties": {}, "required": []}},
@@ -6410,7 +6608,7 @@ Si te piden productos bajo par level, usa la tool stock_critico y devuelve el li
 Si te piden valorizacion de inventario, usa inventario_valorizado (y si preguntan por bodegas usa inventario_por_bodega).
 Si piden el valorizado de un producto o materia prima por nombre (ej. camarones, aceite), llama inventario_valorizado con nombre_mp o buscar igual al texto que dio el usuario; no listes solo el top global sin filtrar por nombre.
 Si te piden facturas pendientes/parciales, usa facturas_parciales e items_pendientes_factura.
-Si preguntan compras a proveedores, gasto por proveedor o productos comprados en un periodo, usa compras_facturas_rango (mes_nombre+anio o fecha_desde/fecha_hasta) y copia texto_whatsapp. Esos montos son SOLO lo ingresado al inventario (mov_inventario), no el total de la factura XML si hubo lineas sin match; dilo asi si preguntan que incluye. Si nombran el proveedor (ej. Maramar), pasa nombre_proveedor. Proveedor solo con RUC: usa facturas_ejemplo del JSON para orientar; no inventes nombres.
+Si preguntan compras a proveedores, gasto por proveedor o productos comprados en un periodo, usa compras_facturas_rango (mes_nombre+anio o fecha_desde/fecha_hasta) y copia texto_whatsapp. Esos montos usan la MISMA regla que el dashboard Compras (ENTRADA + costo historico, catalogo, bodegas operativas); dilo asi si preguntan que incluye. Si nombran el proveedor (ej. Maramar), pasa nombre_proveedor. Proveedor solo con RUC: usa facturas_ejemplo del JSON para orientar; no inventes nombres.
 Si piden detalle de UNA factura, lineas ingresadas, cantidades o valores de la ultima factura de un proveedor, usa compras_factura_detalle (ultima=true + nombre_proveedor, o num_factura) y responde copiando literalmente texto_whatsapp.
 La ultima factura de un proveedor es la de mayor fecha_factura en facturas_procesadas, no la de mayor fecha_proceso.
 Si el listado es largo y el usuario pidio TODO el detalle (ej. todos los platos vendidos con cantidades y montos), enumera el listado COMPLETO que devuelve la tool sin acortar a top 10. Si no cabe en un mensaje, continua en mensajes siguientes numerados.
@@ -7264,6 +7462,14 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                             _pending_prod_sub.pop(wa_id, None)
                             print(f"[Meta] {wa_id}: route=produccion_bodega")
                             await _manejar_produccion_sub(wa_id, prod, msg, texto=texto)
+                        elif _es_pregunta_sobre_sub_pendiente(texto):
+                            print(f"[Meta] {wa_id}: route=produccion_bodega_info")
+                            await enviar_mensaje_meta(
+                                wa_id,
+                                _msg_info_sub_pendiente(pending)
+                                + "\n\n"
+                                + _msg_pedir_bodega_produccion(wa_id, pending),
+                            )
                         else:
                             await enviar_mensaje_meta(
                                 wa_id, _msg_pedir_bodega_produccion(wa_id, pending)
