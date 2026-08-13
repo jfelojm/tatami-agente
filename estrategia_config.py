@@ -285,7 +285,7 @@ def autorizado_tool(telefono: str, tool_name: str) -> bool:
                 roles
                 & roles_con_permiso(
                     "perm_conteo_iniciar_roles",
-                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,ADMIN_COMPRAS",
+                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,STAFF_BARRA,ADMIN_COMPRAS",
                 )
             )
         if tool_name == "produccion_subreceta":
@@ -300,7 +300,7 @@ def autorizado_tool(telefono: str, tool_name: str) -> bool:
             & (
                 roles_con_permiso(
                     "perm_conteo_iniciar_roles",
-                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,ADMIN_COMPRAS",
+                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,STAFF_BARRA,ADMIN_COMPRAS",
                 )
                 | roles_con_permiso("perm_conteo_aprobar_roles")
             )
@@ -331,7 +331,7 @@ def autorizado_comando(telefono: str, comando: str) -> bool:
             & (
                 roles_con_permiso(
                     "perm_conteo_iniciar_roles",
-                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,ADMIN_COMPRAS",
+                    "ADMIN,JEFE_BARRA,JEFE_COCINA,STAFF_COCINA,STAFF_BARRA,ADMIN_COMPRAS",
                 )
                 | roles_con_permiso("perm_producir_sub_roles", _DEFAULT_PRODUCIR_SUB_ROLES)
                 | roles_con_permiso("perm_conteo_aprobar_roles")
