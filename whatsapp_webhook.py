@@ -382,16 +382,38 @@ def _msg_pedir_bodega_produccion(wa_id: str, prod_sub: dict) -> str:
             lineas.append(f"*{i}* = {nom} ({bod})")
         opts_txt = "\n".join(lineas)
         ej_corto = " · ".join(str(i) for i in range(1, len(permitidas) + 1))
+        bod_prov = permitidas[0]
     else:
         opts_txt = "BOD-001 / BOD-005"
         ej_corto = "005 · 001"
-    return (
-        f"*{nombre}* (SUB-{cod0}): ¿dónde entra el stock?\n"
-        f"Lote sugerido: *{lote_txt}*\n"
-        f"{opts_txt}\n"
-        f"Responde solo *{ej_corto}* (o 005 / externa / cocina).\n"
-        f"Ej: PRODUCIR SUB {cod0 or '049'} {rend_txt} {unidad} BOD-005"
+        bod_prov = "BOD-002" if area == "barra" else "BOD-001"
+
+    mps_txt = ""
+    try:
+        from subreceta_operaciones import desglose_mps_lote_sugerido
+
+        mps_txt = (desglose_mps_lote_sugerido(
+            cods_list,
+            cantidad=float(cant) if cant is not None else None,
+            bodega=bod_prov,
+        ) or "").strip()
+    except Exception as e:
+        print(f"WARN mps en pedir bodega: {e}")
+
+    partes = [
+        f"*{nombre}* (SUB-{cod0}): ¿dónde entra el stock?",
+        f"Lote sugerido: *{lote_txt}*",
+    ]
+    if mps_txt:
+        partes.append(mps_txt)
+    partes.extend(
+        [
+            opts_txt,
+            f"Responde solo *{ej_corto}* (o 005 / externa / cocina).",
+            f"Ej: PRODUCIR SUB {cod0 or '049'} {rend_txt} {unidad} BOD-005",
+        ]
     )
+    return "\n".join(partes)
 
 
 def _es_pregunta_sobre_sub_pendiente(texto: str) -> bool:

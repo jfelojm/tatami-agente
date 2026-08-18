@@ -7,24 +7,20 @@ Cantidades en botellas / ml según catálogo.
 Variables (.env):
   TATAMI_ALERT_ORDENES_COMPRA_BARRA=1     Activa envío
   ALERTA_WA_ORDENES_BARRA                 Lista separada por comas (prioridad)
-  Si vacío: ALERTA_WA_FELIPE + ALERTA_WA_MOISES + ALERTA_WA_EDUARDO
+  Si vacío: roles alert_pedidos_roles_barra, o Felipe+Moisés+Eduardo
+  ALERTA_WA_ORDENES_BARRA_PREVIEW         Solo prueba (un número); no usa
+                                         TATAMI_ALERTAS_PREVIEW_DESTINO
 """
 
 from __future__ import annotations
 
 import os
-import re
 import time
-from datetime import date, datetime, timedelta
-from pathlib import Path
+from datetime import date
 
-import pytz
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-
-LOG_WEBHOOK = Path(__file__).resolve().parent / "logs" / "webhook_inbound.log"
-TZ_GYE = pytz.timezone("America/Guayaquil")
 
 
 def alertas_ordenes_compra_barra_habilitadas() -> bool:
@@ -42,19 +38,11 @@ def alertas_ordenes_compra_barra_habilitadas() -> bool:
 
 
 def destinatarios_ordenes_compra_barra() -> list[tuple[str, str]]:
-    """(número WA, etiqueta log)."""
+    """(número WA, etiqueta log). Incluye Eduardo (JEFE_BARRA); no redirige al preview global."""
+    # Preview solo de este módulo (no TATAMI_ALERTAS_PREVIEW_DESTINO).
     preview = (os.getenv("ALERTA_WA_ORDENES_BARRA_PREVIEW") or "").strip()
     if preview:
         return [(preview, "preview órdenes barra")]
-
-    try:
-        from estrategia_config import telefonos_alerta
-
-        dest = telefonos_alerta("alert_pedidos_roles_barra")
-        if dest:
-            return [(t, f"pedidos {lab}") for t, lab in dest]
-    except Exception:
-        pass
 
     lista = (os.getenv("ALERTA_WA_ORDENES_BARRA") or "").strip()
     if lista:
@@ -64,6 +52,15 @@ def destinatarios_ordenes_compra_barra() -> list[tuple[str, str]]:
             if n:
                 out.append((n, f"ordenes …{n[-4:]}"))
         return out
+
+    try:
+        from estrategia_config import roles_con_permiso, telefonos_por_roles
+
+        dest = telefonos_por_roles(roles_con_permiso("alert_pedidos_roles_barra"))
+        if dest:
+            return [(t, f"pedidos {lab}") for t, lab in dest]
+    except Exception:
+        pass
 
     out = []
     for var, label in (
@@ -165,10 +162,10 @@ def _formatear_bloque_revision(ordenes: list[dict], hoy: date) -> list[str]:
         for ln in oc["lineas"]:
             desc = (ln.get("descripcion_proveedor") or ln.get("nombre_mp", ""))[:34]
             cant = (ln.get("texto_cantidad") or "").strip()
-            ub = (ln.get("unidad_base") or "").strip()
+            from generar_ordenes_compra import _texto_stock_vs_par
+
             bloques.append(
-                f"• {desc}\n  Pedir: {cant}\n  "
-                f"Stock {ln.get('stock_actual')} / PAR {ln.get('par_level')} {ub}"
+                f"• {desc}\n  Pedir: {cant}\n  {_texto_stock_vs_par(ln)}"
             )
         bloques.append("")
         bloques.append("Msg proveedor:")
@@ -181,65 +178,12 @@ def _solo_digitos(numero: str) -> str:
     return "".join(c for c in (numero or "") if c.isdigit())
 
 
-def usuario_en_ventana_24h(numero: str, *, horas: float = 24.0) -> bool:
-    """
-    True si el usuario escribió al bot en las últimas N horas (log webhook).
-    Fuera de ventana Meta solo entrega plantillas, no texto libre.
-    """
-    digits = _solo_digitos(numero)
-    if not digits or not LOG_WEBHOOK.is_file():
-        return False
-    pat = re.compile(rf"^(\d{{4}}-\d{{2}}-\d{{2}} \d{{2}}:\d{{2}}:\d{{2}}) IN from={re.escape(digits)} ")
-    ultimo: datetime | None = None
-    try:
-        lines = LOG_WEBHOOK.read_text(encoding="utf-8", errors="ignore").splitlines()
-    except OSError:
-        return False
-    for line in lines[-800:]:
-        m = pat.match(line)
-        if m:
-            ultimo = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
-    if not ultimo:
-        return False
-    ahora = datetime.now(TZ_GYE).replace(tzinfo=None)
-    return (ahora - ultimo) < timedelta(hours=horas)
-
-
-def _enviar_plantilla_bienvenida(numero: str) -> tuple[bool, str]:
-    import requests
-
-    pid = (os.getenv("WHATSAPP_PHONE_NUMBER_ID") or "").strip()
-    tok = (os.getenv("WHATSAPP_ACCESS_TOKEN") or "").strip()
-    ver = (os.getenv("WHATSAPP_API_VERSION", "v21.0") or "v21.0").strip()
-    if not pid or not tok:
-        return False, "sin credenciales WA"
-    url = f"https://graph.facebook.com/{ver}/{pid}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": _solo_digitos(numero),
-        "type": "template",
-        "template": {"name": "tatami_bienvenida", "language": {"code": "es_EC"}},
-    }
-    try:
-        r = requests.post(
-            url,
-            json=payload,
-            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
-            timeout=30,
-        )
-        if r.status_code >= 400:
-            return False, r.text[:200]
-        return True, "template tatami_bienvenida"
-    except Exception as e:
-        return False, str(e)
-
-
 def mensajes_ordenes_barra_por_proveedor(
     ordenes: list[dict],
     hoy: date,
 ) -> list[str]:
     """Un mensaje WA por proveedor (texto dentro de ventana 24h)."""
-    from generar_ordenes_compra import formatear_mensaje_whatsapp
+    from generar_ordenes_compra import formatear_mensaje_whatsapp, _texto_stock_vs_par
 
     n = len(ordenes)
     out: list[str] = []
@@ -253,13 +197,10 @@ def mensajes_ordenes_barra_por_proveedor(
         ]
         for ln in lineas:
             desc = (ln.get("descripcion_proveedor") or ln.get("nombre_mp", ""))[:40]
-            ub = (ln.get("unidad_base") or "").strip()
             cant = (ln.get("texto_cantidad") or "").strip()
             bloque.append(f"* {desc}")
             bloque.append(f"  Pedir: {cant}")
-            bloque.append(
-                f"  Stock {ln.get('stock_actual')} / PAR {ln.get('par_level')} {ub}"
-            )
+            bloque.append(f"  {_texto_stock_vs_par(ln)}")
         bloque.append("")
         bloque.append("--- TEXTO PARA PROVEEDOR ---")
         bloque.append(formatear_mensaje_whatsapp(prov, lineas))
@@ -334,7 +275,8 @@ def enviar_alertas_ordenes_compra_barra(
         res["omitido"] = "sin ítems bajo PAR ni MPs en cero en barra/consignación"
         return res
 
-    from alertas_tatami import enviar_alerta, enviar_whatsapp_texto, log_envio_wa
+    from alertas_tatami import enviar_alerta, log_envio_wa
+    from wa_entrega_alertas import enviar_alerta_wa_configurada
 
     msgs_por_prov = mensajes_ordenes_barra_por_proveedor(ordenes, hoy) if ordenes else []
     intro = (
@@ -343,30 +285,21 @@ def enviar_alertas_ordenes_compra_barra(
     )
 
     for numero, etiqueta in destinos:
-        if not usuario_en_ventana_24h(numero):
-            ok_tpl, det_tpl = _enviar_plantilla_bienvenida(numero)
-            log_envio_wa(f"{etiqueta} plantilla (fuera 24h)", numero, ok_tpl, det_tpl)
-            if ok_tpl:
-                res["enviados"] += 1
-            else:
-                res["fallos"] += 1
-            res["omitido"] = "fuera_ventana_24h: responder PEDIDOS BARRA al bot Tatami"
-            print(
-                f"  WA [{etiqueta}] fuera ventana 24h — solo plantilla; "
-                "responder PEDIDOS BARRA al +593 96 279 3109"
-            )
-            continue
-
-        ok0, d0 = enviar_whatsapp_texto(numero, intro)
-        log_envio_wa(f"{etiqueta} intro ordenes", numero, ok0, d0)
+        ok0, d0, ent0 = enviar_alerta_wa_configurada(
+            numero, intro, etiqueta=f"{etiqueta} intro ordenes", origen=origen
+        )
         if ok0:
             res["enviados"] += 1
+            if not ent0 and not res.get("omitido"):
+                res["omitido"] = d0
         else:
             res["fallos"] += 1
 
         for j, cuerpo in enumerate(msgs_por_prov, 1):
             enviar_alerta("Órdenes compra barra", cuerpo, estado="INFO")
-            ok, msg = enviar_whatsapp_texto(numero, cuerpo)
+            ok, msg, _ = enviar_alerta_wa_configurada(
+                numero, cuerpo, etiqueta=f"{etiqueta} orden prov {j}", origen=origen
+            )
             log_envio_wa(f"{etiqueta} orden prov {j}", numero, ok, msg)
             if ok:
                 res["enviados"] += 1
@@ -376,7 +309,9 @@ def enviar_alertas_ordenes_compra_barra(
 
         if stock_cero:
             anexo = "\n".join(_formatear_bloque_stock_cero(stock_cero))[:4096]
-            ok_a, msg_a = enviar_whatsapp_texto(numero, anexo)
+            ok_a, msg_a, _ = enviar_alerta_wa_configurada(
+                numero, anexo, etiqueta=f"{etiqueta} anexo stock cero", origen=origen
+            )
             log_envio_wa(f"{etiqueta} anexo stock cero", numero, ok_a, msg_a)
             if ok_a:
                 res["enviados"] += 1

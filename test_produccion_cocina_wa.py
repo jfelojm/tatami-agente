@@ -106,7 +106,11 @@ class TestMsgPedirBodegaLote(unittest.TestCase):
         "whatsapp_webhook._bodegas_opciones_produccion",
         return_value=["BOD-001", "BOD-005"],
     )
-    def test_ejemplo_usa_rendimiento_sub(self, _bod, _rend, _nom) -> None:
+    @patch(
+        "subreceta_operaciones.desglose_mps_lote_sugerido",
+        return_value="MPs a descontar:\n  • Harina (010): -500 gr",
+    )
+    def test_ejemplo_usa_rendimiento_sub(self, _mps, _bod, _rend, _nom) -> None:
         msg = _msg_pedir_bodega_produccion(
             STAFF_COCINA,
             {"cods": ["072"], "area": "cocina"},
@@ -118,6 +122,9 @@ class TestMsgPedirBodegaLote(unittest.TestCase):
         self.assertNotIn("3800", msg)
         self.assertIn("nachos wonton", msg)
         self.assertIn("SUB-072", msg)
+        self.assertIn("MPs a descontar:", msg)
+        self.assertIn("Harina (010)", msg)
+        self.assertIn("-500 gr", msg)
 
 
 class TestStockNegativoOperaciones(unittest.TestCase):

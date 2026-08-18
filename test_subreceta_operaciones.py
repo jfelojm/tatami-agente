@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import unittest
 
-from subreceta_operaciones import _etiqueta_mp, _etiqueta_sub, _formatear_plan_wa
+from subreceta_operaciones import (
+    _etiqueta_mp,
+    _etiqueta_sub,
+    _formatear_plan_wa,
+    _formatear_salidas_mp_wa,
+)
 
 
 class TestEtiquetasProduccion(unittest.TestCase):
@@ -60,6 +65,30 @@ class TestEtiquetasProduccion(unittest.TestCase):
         self.assertIn("costillas char siu produccion (SUB-056)", txt)
         self.assertNotIn("SUB SUB-056", txt)
         self.assertIn("COSTILLA DE CERDO (103)", txt)
+
+    def test_formatear_salidas_mp_wa(self):
+        plan = {
+            "salidas_mp": [
+                {
+                    "cod_mp_sistema": "517",
+                    "nombre_mp": "Malibu",
+                    "cantidad_mov": 200.0,
+                    "unidad_base": "ml",
+                },
+                {
+                    "cod_mp_sistema": "180",
+                    "nombre_mp": "Ron",
+                    "cantidad_mov": 400.5,
+                    "unidad_base": "ml",
+                },
+            ]
+        }
+        txt = _formatear_salidas_mp_wa(plan)
+        self.assertIn("MPs a descontar:", txt)
+        self.assertIn("Malibu (517)", txt)
+        self.assertIn("-200 ml", txt)
+        self.assertIn("Ron (180)", txt)
+        self.assertIn("-400.5 ml", txt)
 
 
 if __name__ == "__main__":

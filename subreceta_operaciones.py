@@ -85,6 +85,72 @@ def _etiqueta_mp(
     return cod or "?"
 
 
+def _formatear_salidas_mp_wa(
+    plan: dict,
+    *,
+    nombres_mp: dict[str, str] | None = None,
+    subs_meta: dict[str, dict] | None = None,
+    max_lineas: int = 20,
+    titulo: str = "MPs a descontar:",
+) -> str:
+    """Solo desglose de salidas MP (para pedir bodega o resumen corto)."""
+    salidas = plan.get("salidas_mp") or []
+    if not salidas:
+        return ""
+    ctx = {"nombres_mp": nombres_mp, "subs_meta": subs_meta}
+    lines = [titulo]
+    for s in salidas[:max_lineas]:
+        lines.append(
+            f"  • {_etiqueta_mp(s, **ctx)}: -{s['cantidad_mov']:g} {s['unidad_base']}"
+        )
+    if len(salidas) > max_lineas:
+        lines.append(f"  … +{len(salidas) - max_lineas} líneas más")
+    return "\n".join(lines)
+
+
+def desglose_mps_lote_sugerido(
+    codigos: list[str],
+    *,
+    cantidad: float | None = None,
+    bodega: str = "BOD-002",
+) -> str:
+    """
+    Planifica (sin registrar) y devuelve texto con cantidades de MPs del lote.
+    Usado en el mensaje WA que pide bodega antes de simular/aplicar.
+    """
+    if not codigos:
+        return ""
+    try:
+        sh = _abrir_maestro()
+        cab = cargar_bd_subrecetas(sh)
+        por_padre = agrupar_detalle_por_padre(cargar_bd_subrecetas_detalle(sh))
+        costos_mp = cargar_costos_mp(sh)
+        subs_meta = _subs_meta_desde_cab(cab)
+        nombres_mp = _cargar_mapa_nombres_mp(sh)
+        bloques: list[str] = []
+        for raw in codigos:
+            plan = planificar_produccion(
+                raw,
+                cantidad_producida=cantidad,
+                bodega_destino=bodega or "BOD-002",
+                sh=sh,
+                cab=cab,
+                por_padre=por_padre,
+                costos_mp=costos_mp,
+                subs_meta=subs_meta,
+                stock_map=None,
+            )
+            bloque = _formatear_salidas_mp_wa(
+                plan, nombres_mp=nombres_mp, subs_meta=subs_meta
+            )
+            if bloque:
+                bloques.append(bloque)
+        return "\n\n".join(bloques)
+    except Exception as e:
+        print(f"WARN desglose_mps_lote_sugerido: {e}")
+        return ""
+
+
 def _formatear_plan_wa(
     plan: dict,
     *,
