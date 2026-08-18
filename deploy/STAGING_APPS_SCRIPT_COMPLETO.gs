@@ -1807,6 +1807,14 @@ function restaurarListaCompletaTraslado() {
   restaurarListaCompletaTraslado_(true);
 }
 
+function _setListaProductosH_(ing, list) {
+  ing.getRange("H2:H2000").clearContent();
+  if (!list.length) return;
+  // Solo notación A1 (getRange(fila,col,numFilas,numCols) confunde numFilas con fila final).
+  var endRow = 1 + list.length;
+  ing.getRange("H2:H" + endRow).setValues(list);
+}
+
 function restaurarListaCompletaTraslado_(mostrarAlerta) {
   var ui = SpreadsheetApp.getUi();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -1818,7 +1826,7 @@ function restaurarListaCompletaTraslado_(mostrarAlerta) {
   }
   var last = cat.getLastRow();
   if (last < 2) return;
-  var data = cat.getRange(2, 2, last - 1, 1).getValues();
+  var data = cat.getRange("B2:B" + last).getValues();
   var vistos = {};
   var list = [];
   for (var i = 0; i < data.length; i++) {
@@ -1828,8 +1836,7 @@ function restaurarListaCompletaTraslado_(mostrarAlerta) {
       list.push([et]);
     }
   }
-  ing.getRange("H2:H2000").clearContent();
-  if (list.length) ing.getRange(2, 8, list.length, 1).setValues(list);
+  _setListaProductosH_(ing, list);
   if (mostrarAlerta) ui.alert("Lista completa: " + list.length + " productos.");
 }
 
@@ -1862,19 +1869,18 @@ function actualizarListaProductosTraslado_(mostrarAlerta) {
     if (mostrarAlerta) ui.alert("CAT_TRASLADO vacio. Ejecuta setup_ingreso_traslado_masivo.py");
     return;
   }
-  var data = cat.getRange(2, 1, last - 1, 2).getValues();
+  var data = cat.getRange("A2:B" + last).getValues();
   var list = [];
   for (var i = 0; i < data.length; i++) {
     if (String(data[i][0]).trim() === bod && data[i][1]) {
       list.push([String(data[i][1]).trim()]);
     }
   }
-  ing.getRange("H2:H2000").clearContent();
   if (!list.length) {
     if (mostrarAlerta) ui.alert("Sin productos para " + bod + " en CAT_TRASLADO.");
     return;
   }
-  ing.getRange(2, 8, list.length, 1).setValues(list);
+  _setListaProductosH_(ing, list);
   if (mostrarAlerta) ui.alert("Lista actualizada: " + list.length + " productos para " + bod);
 }
 
@@ -1938,7 +1944,43 @@ function aceptarTraslado() {
   aceptarTraslado_(false);
 }
 
+function leerLineasTraslado_(hoja) {
+  var fin = FILA_LINEAS_TRASLADO + MAX_LINEAS_TRASLADO - 1;
+  var datos = hoja.getRange("A" + FILA_LINEAS_TRASLADO + ":B" + fin).getValues();
+  var lineas = [];
+  var problemas = [];
+  for (var i = 0; i < datos.length; i++) {
+    var prod = String(datos[i][0] || "").trim();
+    var cant = datos[i][1];
+    if (!prod && (cant === "" || cant === null)) continue;
+    if (!prod) {
+      problemas.push("Fila " + (FILA_LINEAS_TRASLADO + i) + ": sin producto");
+      continue;
+    }
+    if (!(Number(cant) > 0)) {
+      problemas.push("Fila " + (FILA_LINEAS_TRASLADO + i) + ": cantidad inválida");
+      continue;
+    }
+    lineas.push({ producto: prod, cantidad: Number(cant) });
+  }
+  return { lineas: lineas, problemas: problemas };
+}
+
 function aceptarTraslado_(modoPrueba) {
+  var ui = SpreadsheetApp.getUi();
+  var lock = LockService.getDocumentLock();
+  if (!lock.tryLock(8000)) {
+    ui.alert("Ya hay un traslado en proceso.\n\nEspera a que termine antes de volver a aceptar.");
+    return;
+  }
+  try {
+    aceptarTrasladoCore_(modoPrueba);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function aceptarTrasladoCore_(modoPrueba) {
   var ui = SpreadsheetApp.getUi();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var hoja = ss.getSheetByName(HOJA_TRASLADO);
@@ -1955,29 +1997,56 @@ function aceptarTraslado_(modoPrueba) {
   if (!bodegaDestino) { ui.alert("Falta bodega destino (B3)."); return; }
   if (bodegaOrigen === bodegaDestino) { ui.alert("Origen y destino no pueden ser iguales."); return; }
 
-  var datos = hoja.getRange(FILA_LINEAS_TRASLADO, 1, MAX_LINEAS_TRASLADO, 2).getValues();
-  var lineas = [];
-  var problemas = [];
-  for (var i = 0; i < datos.length; i++) {
-    var prod = String(datos[i][0] || "").trim();
-    var cant = datos[i][1];
-    if (!prod && cant === "") continue;
-    if (!prod) { problemas.push("Fila " + (FILA_LINEAS_TRASLADO + i) + ": sin producto"); continue; }
-    if (!(cant > 0)) { problemas.push("Fila " + (FILA_LINEAS_TRASLADO + i) + ": cantidad inválida"); continue; }
-    lineas.push({ producto: prod, cantidad: Number(cant) });
+  var preview = leerLineasTraslado_(hoja);
+  if (preview.problemas.length) {
+    ui.alert("Corrige antes de aceptar:\n\n" + preview.problemas.join("\n"));
+    return;
   }
-  if (problemas.length) { ui.alert("Corrige antes de aceptar:\n\n" + problemas.join("\n")); return; }
-  if (!lineas.length) { ui.alert("No hay líneas para trasladar."); return; }
+  if (!preview.lineas.length) {
+    ui.alert("No hay líneas para trasladar.");
+    return;
+  }
 
   if (!modoPrueba) {
     var conf = ui.alert(
       "Confirmar traslado",
-      "Origen: " + origenTxt + "\nDestino: " + destinoTxt + "\nLíneas: " + lineas.length +
+      "Origen: " + origenTxt + "\nDestino: " + destinoTxt + "\nLíneas: " + preview.lineas.length +
         "\n\nSe permite stock negativo en origen.\n¿Registrar traslados?",
       ui.ButtonSet.YES_NO
     );
     if (conf !== ui.Button.YES) return;
   }
+
+  // Re-leer DESPUÉS de confirmar: si borraron la hoja con el diálogo abierto, no enviar.
+  SpreadsheetApp.flush();
+  Utilities.sleep(150);
+  var releido = leerLineasTraslado_(hoja);
+  if (releido.problemas.length) {
+    ui.alert(
+      "Traslado cancelado.\n\nTras confirmar, la hoja quedó inconsistente:\n" +
+        releido.problemas.join("\n")
+    );
+    return;
+  }
+  if (!releido.lineas.length) {
+    ui.alert(
+      "Traslado cancelado.\n\n" +
+        "No hay líneas en la hoja (¿borraste los datos mientras confirmabas?).\n" +
+        "No se registró ningún movimiento."
+    );
+    return;
+  }
+  if (!modoPrueba && releido.lineas.length !== preview.lineas.length) {
+    var conf2 = ui.alert(
+      "Cambió el número de líneas",
+      "Antes de confirmar: " + preview.lineas.length + " líneas.\nAhora en la hoja: " +
+        releido.lineas.length + " líneas.\n\n¿Enviar con los datos actuales de la hoja?",
+      ui.ButtonSet.YES_NO
+    );
+    if (conf2 !== ui.Button.YES) return;
+  }
+
+  var lineas = releido.lineas;
 
   var usuario = Session.getActiveUser().getEmail() || "desconocido";
   var payload = {
@@ -2075,7 +2144,7 @@ function registrarHistorialTraslado_(ss, trx, usuario, origen, destino, lineas) 
   }
   if (filas.length) {
     var startRow = reg.getLastRow() + 1;
-    reg.getRange(startRow, 1, startRow + filas.length - 1, filas[0].length).setValues(filas);
+    reg.getRange(startRow, 1, filas.length, filas[0].length).setValues(filas);
   }
 }
 

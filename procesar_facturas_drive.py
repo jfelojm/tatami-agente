@@ -23,6 +23,7 @@ from codigo_factura_match import (
     cod_proveedores_strip_sufijo_desde_bd_prov,
     normalizar_cod_item_para_match,
     normalizar_cod_proveedor_para_match,
+    ruc_normalizado,
 )
 from config_sheets import cfg
 from sheets_formulas_es import (
@@ -1966,13 +1967,20 @@ def _pendientes_load_keys(ws: gspread.Worksheet) -> dict[str, str]:
             .upper()
             or "PENDIENTE"
         )
+        # Indexar clave canónica (RUC 13 dígitos) y la cruda por compatibilidad.
         out[cell] = estado
+        canon = _canonizar_clave_unica(cell)
+        if canon:
+            out[canon] = estado
 
         if estado == "IGNORADO" and idx_cod_item is not None and idx_ruc is not None:
             cod_item = (row[idx_cod_item] if idx_cod_item < len(row) else "").strip()
             ruc = (row[idx_ruc] if idx_ruc < len(row) else "").strip()
             if cod_item and ruc:
                 ignorados[f"{cod_item}|{ruc}"] = "IGNORADO"
+                ruc_n = ruc_normalizado(ruc)
+                if ruc_n:
+                    ignorados[f"{cod_item}|{ruc_n}"] = "IGNORADO"
 
     _items_pendientes_ignorados_por_item = ignorados
     return out
@@ -2098,12 +2106,28 @@ def _ensure_bd_items_pendientes_sheet(sh):
         return ws
 
 
+def _canonizar_clave_unica(clave: str) -> str:
+    """Normaliza el RUC (segmento 2) de clave_unica num|ruc|cod_item."""
+    parts = (clave or "").strip().split("|", 2)
+    if len(parts) < 3:
+        return (clave or "").strip()
+    num, ruc, cod = parts[0].strip(), parts[1].strip(), parts[2].strip()
+    ruc_n = ruc_normalizado(ruc) or ruc
+    return f"{num}|{ruc_n}|{cod}"
+
+
 def _clave_item_pendiente(factura: dict, item: dict) -> str:
+    """
+    Clave estable num_factura|ruc|cod_item.
+    RUC siempre a 13 dígitos: Google Sheets suele guardar RUC como número
+    y pierde el 0 inicial (0190… → 190…), rompiendo el match al reprocesar.
+    """
+    ruc = ruc_normalizado(factura.get("ruc") or "") or (factura.get("ruc") or "").strip()
     return "|".join(
         [
-            factura["num_factura"].strip(),
-            factura["ruc"].strip(),
-            item["cod_item_xml"].strip(),
+            (factura.get("num_factura") or "").strip(),
+            ruc,
+            (item.get("cod_item_xml") or "").strip(),
         ]
     )
 
@@ -2131,7 +2155,8 @@ def registrar_item_pendiente_factura(
     if _items_pendientes_cache_keys is None:
         _items_pendientes_cache_keys = _pendientes_load_keys(ws)
 
-    clave_item = f"{item['cod_item_xml'].strip()}|{factura['ruc'].strip()}"
+    ruc_n = ruc_normalizado(factura.get("ruc") or "") or (factura.get("ruc") or "").strip()
+    clave_item = f"{item['cod_item_xml'].strip()}|{ruc_n}"
     if clave_item in (_items_pendientes_ignorados_por_item or {}):
         return False
 
@@ -2201,7 +2226,8 @@ def registrar_item_pendiente_factura(
         "fecha_registro": fecha_iso,
         "fecha_factura": factura["fecha_factura"],
         "num_factura": factura["num_factura"],
-        "ruc_proveedor": factura["ruc"],
+        # Apostrofe inicial: fuerza texto en Sheets (evita perder el 0 del RUC).
+        "ruc_proveedor": f"'{ruc_n}" if ruc_n else (factura.get("ruc") or ""),
         "razon_social": factura.get("razon_social", ""),
         "cod_proveedor": cod_proveedor,
         "estab": meta_prov["estab"],

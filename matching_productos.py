@@ -48,6 +48,28 @@ def cargar_bd_productos() -> list[dict]:
     return result
 
 
+def _cod_en_lookup(cod_smart_menu: str, lookup: dict) -> str | None:
+    """Resuelve cod POS (p. ej. 01010122) al cod_smart_menu del catálogo."""
+    cod = str(cod_smart_menu).strip()
+    if cod in lookup:
+        return cod
+    if cod.isdigit():
+        alt = cod.lstrip("0") or "0"
+        if alt in lookup:
+            return alt
+    return None
+
+
+def acomp_lomo_kuro(detalle_plato: str | None) -> str | None:
+    """arroz | papas si el POS lo indica (incluye texto tras OBS:)."""
+    u = (detalle_plato or "").upper()
+    if "ARROZ" in u:
+        return "arroz"
+    if "PAPA" in u:
+        return "papas"
+    return None
+
+
 # ── CONSTRUYE TABLA DE LOOKUP ─────────────────────────────────
 def construir_lookup(productos: list[dict]) -> dict:
     """
@@ -75,6 +97,12 @@ def construir_lookup(productos: list[dict]) -> dict:
         variedad = p.get("variedad_smart_menu", "").strip()
         lookup[cod]["variedades"].append(variedad)
         lookup[cod]["filas"].append(p)
+    # Alias sin ceros a la izquierda (POS manda 01010122, catálogo 1010122).
+    for cod in list(lookup.keys()):
+        if cod.isdigit():
+            alt = cod.lstrip("0") or "0"
+            if alt != cod and alt not in lookup:
+                lookup[alt] = lookup[cod]
     return lookup
 
 
@@ -93,10 +121,11 @@ def resolver_match(cod_smart_menu: str, detalle_plato: str, lookup: dict) -> dic
     cod = str(cod_smart_menu).strip()
     detalle = (detalle_plato or "").strip().upper()
 
-    if cod not in lookup:
+    cod_key = _cod_en_lookup(cod, lookup)
+    if not cod_key:
         return _sin_match()
 
-    entrada = lookup[cod]
+    entrada = lookup[cod_key]
     variedades = entrada["variedades"]
     filas = entrada["filas"]
 
@@ -116,10 +145,27 @@ def resolver_match(cod_smart_menu: str, detalle_plato: str, lookup: dict) -> dic
         if variedad and variedad.upper() in detalle:
             return _match_ok(filas[i])
 
-    # Caso 3: sin extra en detalle → clásico (variedad vacía en BD_PRODUCTOS)
+    # Lomo Kuro (sm 12): ARROZ/PAPAS pueden ir en OBS ("OBS: t.m arroz").
+    acomp = acomp_lomo_kuro(detalle_plato)
+    if acomp:
+        for i, variedad in enumerate(variedades):
+            if (variedad or "").strip().lower() == acomp:
+                return _match_ok(filas[i])
+
+    # Caso 3: sin extra en detalle → clásico
+    # (variedad vacía histórica, o "clasico"/"clásico" tras variedades de sabores)
     for i, variedad in enumerate(variedades):
         if not (variedad or "").strip():
             return _match_ok(filas[i])
+    for i, variedad in enumerate(variedades):
+        if (variedad or "").strip().lower() in ("clasico", "clásico", "classic"):
+            return _match_ok(filas[i])
+
+    # Lomo Kuro sin acompañante explícito → papas (comportamiento histórico pre-variedades).
+    if cod_key == "12" and len(filas) > 1:
+        for i, variedad in enumerate(variedades):
+            if (variedad or "").strip().lower() == "papas":
+                return _match_ok(filas[i])
 
     return _sin_match(f"No match variedad para cod={cod} detalle='{detalle_plato}'")
 

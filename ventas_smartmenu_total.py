@@ -53,12 +53,18 @@ def _grid_subtotal_sin_iva_cuadre(row: list[str]) -> float:
     """
     sub = _safe_float(row[13] if len(row) > 13 else "0")
     tot = _safe_float(row[7] if len(row) > 7 else "0")
+    desc_doc = _parse_descuento_valor(row[16] if len(row) > 16 else "")
     tipo = (row[2] if len(row) > 2 else "").strip().upper()
     raw9 = row[9] if len(row) > 9 else ""
     if sub > 0.0001:
         return sub
-    if tot <= 0.0001:
+    if tot <= 0.0001 and desc_doc <= 0.0001:
         return 0.0
+    # Nota con descuento documento (col 16) y col 13 en 0: bruto = neto col 7 + descuento.
+    if desc_doc > 0.0001 and (
+        "NOTA" in tipo or _estado_documento_desde_texto_grid(raw9) == "NO_AUTORIZADO"
+    ):
+        return tot + desc_doc
     # Nota efectivo / sin factura: col 7 suele alinear con suma de líneas (hist subtotal).
     if "NOTA" in tipo or _estado_documento_desde_texto_grid(raw9) == "NO_AUTORIZADO":
         return tot

@@ -24,6 +24,16 @@ $Settings = New-ScheduledTaskSettingsSet `
     -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
+# Horario: StartWhenAvailable para recuperar si el trigger llego tarde (drift tipico ~52 min).
+# La guardia Python (sched_tolerancia_min) evita corridas reales fuera de ventana util.
+$SettingsPuntual = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -WakeToRun `
+    -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+
 Write-Host "Registrando estrategia Tatami desde: $Root"
 Write-Host ""
 
@@ -40,7 +50,8 @@ function Register-TatamiTask {
     param(
         [string]$Name,
         [string]$ScriptPath,
-        [object]$Trigger
+        [object]$Trigger,
+        [object]$TaskSettings = $Settings
     )
     Unregister-ScheduledTask -TaskName $Name -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
     $Args = "-NoProfile -ExecutionPolicy Bypass -File `"$ScriptPath`""
@@ -50,7 +61,7 @@ function Register-TatamiTask {
             -TaskName $Name `
             -Action $Action `
             -Trigger $Trigger `
-            -Settings $Settings `
+            -Settings $TaskSettings `
             -User $cred.UserName `
             -Password $plainPwd `
             -RunLevel Highest `
@@ -93,12 +104,14 @@ $TriggerHorario = New-HourlyDailyTrigger -At "07:00" -IntervalHours 1 -DurationH
 Register-TatamiTask `
     -Name "TatamiPipelineHorario" `
     -ScriptPath (Join-Path $Root "ejecutar_pipeline_horario.ps1") `
-    -Trigger $TriggerHorario
+    -Trigger $TriggerHorario `
+    -TaskSettings $SettingsPuntual
 
 Register-TatamiTask `
     -Name "TatamiDigestMatutino" `
     -ScriptPath (Join-Path $Root "ejecutar_digest_matutino.ps1") `
-    -Trigger (New-ScheduledTaskTrigger -Daily -At "08:00")
+    -Trigger (New-ScheduledTaskTrigger -Daily -At "08:00") `
+    -TaskSettings $SettingsPuntual
 
 Register-TatamiTask `
     -Name "TatamiPARSemanal" `

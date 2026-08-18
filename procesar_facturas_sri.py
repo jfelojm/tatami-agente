@@ -273,6 +273,16 @@ def fase_descarga(
                         print(f"    WARN no se pudo registrar error: {e2}")
                 continue
         else:
+            # Filtrado por RUC: no es error omitir filas fuera del filtro.
+            import re as _re
+
+            ruc_filtro = _re.sub(
+                r"\D", "", (os.getenv("SRI_PORTAL_XML_RUC_FILTRO") or "").strip()
+            )
+            ruc_comp = _re.sub(r"\D", "", comp.ruc_emisor or "")
+            if ruc_filtro and ruc_filtro not in ruc_comp:
+                omitidos += 1
+                continue
             err_portal = (comp.extra or {}).get("xml_error") or "sin XML portal"
             errores += 1
             print(f"    ERROR descarga: {err_portal}")

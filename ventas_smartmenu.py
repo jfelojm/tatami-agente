@@ -342,10 +342,18 @@ def construir_lineas_hist_ventas(header: dict, detalles: list[dict]) -> list[dic
         idplato = det.get("idPlato")
         cantidad = _safe_float(det.get("cantidad", 0))
         precio_u = _safe_float(det.get("precioUnitario", 0))
-        subtotal = cantidad * precio_u
-        total = _safe_float(det.get("total", subtotal))
+        bruto_linea = cantidad * precio_u
+        total = _safe_float(det.get("total", bruto_linea))
         detalle_plato = (det.get("detallePlato") or "").strip()
         descuento = _parse_descuento_valor(det.get("descuentoValor"))
+
+        # Smart Menu a veces deja precioUnitario*cantidad != total (desc. implícito en total).
+        if descuento > 0.001:
+            subtotal = bruto_linea
+        elif total > 0.0001 and abs(total - bruto_linea) > 0.001:
+            subtotal = total
+        else:
+            subtotal = bruto_linea
 
         # Matching
         idplato_str = str(idplato).strip() if idplato is not None else ""

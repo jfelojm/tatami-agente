@@ -28,6 +28,12 @@ def destinatario_inventario_barra() -> tuple[str, str]:
     (numero, etiqueta_log). Preview: ALERTA_WA_INVENTARIO_BARRA; prod: ALERTA_WA_EDUARDO.
     Nunca envía a Moisés/Felipe salvo que los pongas explícitamente en ALERTA_WA_INVENTARIO_BARRA.
     """
+    from alertas_tatami import destino_preview_alertas, preview_alertas_activo
+
+    if preview_alertas_activo():
+        d = destino_preview_alertas()
+        return d, "preview inventario barra"
+
     preview = (os.getenv("ALERTA_WA_INVENTARIO_BARRA") or "").strip()
     if preview:
         return preview, "preview inventario barra"
@@ -222,25 +228,30 @@ def enviar_alertas_inventario_barra(*, origen: str = "pipeline") -> dict:
         res["omitido"] = "sin alertas"
         return res
 
-    from alertas_tatami import enviar_alerta, enviar_whatsapp_texto, log_envio_wa
+    from alertas_tatami import enviar_alerta, log_envio_wa
+    from wa_entrega_alertas import enviar_alerta_wa_configurada
 
-    bloques = [f"📊 Inventario barra ({origen}) — proveedores Tipo=Barra"]
+    bloques = [f"Inventario barra ({origen}) — proveedores Tipo=Barra"]
     if (os.getenv("ALERTA_WA_INVENTARIO_BARRA") or "").strip():
         bloques[0] += " [preview — revisión]"
     if bajo_par:
-        bloques.append(f"\n⚠ Bajo PAR ({len(bajo_par)}):\n" + _formatear_lineas(bajo_par, tipo="par"))
+        bloques.append(f"\nBajo PAR ({len(bajo_par)}):\n" + _formatear_lineas(bajo_par, tipo="par"))
     if negativos:
         bloques.append(
-            f"\n⚠ Stock negativo ({len(negativos)}):\n" + _formatear_lineas(negativos, tipo="neg")
+            f"\nStock negativo ({len(negativos)}):\n" + _formatear_lineas(negativos, tipo="neg")
         )
     cuerpo = "\n".join(bloques).strip()[:4096]
 
     enviar_alerta("Inventario barra", cuerpo, estado="WARN")
-    ok, msg = enviar_whatsapp_texto(numero, cuerpo)
+    ok, msg, entregado = enviar_alerta_wa_configurada(
+        numero, cuerpo, etiqueta=etiqueta, origen=origen
+    )
     log_envio_wa(etiqueta, numero, ok, msg)
-    res["enviado"] = ok
+    res["enviado"] = entregado
     if not ok:
         res["omitido"] = msg
+    elif not entregado:
+        res["omitido"] = "fuera_ventana_24h: plantilla enviada; responde al bot Tatami"
     return res
 
 
@@ -271,7 +282,8 @@ def alerta_wa_descargo_stock_negativo_barra(items: list[dict]) -> None:
         print("  WA [OMITIDO] descargo barra: sin destinatario configurado")
         return
 
-    from alertas_tatami import enviar_alerta, enviar_whatsapp_texto, log_envio_wa
+    from alertas_tatami import enviar_alerta, log_envio_wa
+    from wa_entrega_alertas import enviar_alerta_wa_configurada
 
     lineas = []
     for it in filtrados[:25]:
@@ -286,5 +298,7 @@ def alerta_wa_descargo_stock_negativo_barra(items: list[dict]) -> None:
         titulo += " [preview]"
     cuerpo = titulo + "\n" + "\n".join(lineas) + extra
     enviar_alerta("Descargo stock negativo barra", cuerpo, estado="WARN")
-    ok, msg = enviar_whatsapp_texto(numero, cuerpo)
+    ok, msg, _ = enviar_alerta_wa_configurada(
+        numero, cuerpo, etiqueta=etiqueta + " descargo", origen="descargo"
+    )
     log_envio_wa(etiqueta + " descargo", numero, ok, msg)

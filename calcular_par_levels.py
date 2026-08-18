@@ -138,13 +138,16 @@ def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dic
     if verbose:
         print(f"  {len(mp_sub_unit)} subrecetas con MPs expandidas")
 
-    # Key = (cod_receta normalizado, variedad normalizada) para empatar con hist_ventas,
-    # que suele venir con ceros a la izquierda (ej. "007") mientras BD_RECETAS_DETALLE usa "7".
-    lookup_recetas: dict[tuple[str, str], list[dict]] = defaultdict(list)
-    for ing in recetas:
-        cod_r = norm_cod_receta(ing.get("cod_receta", ""))
-        var = ing.get("variedad_smart_menu", "").strip().upper()
-        lookup_recetas[(cod_r, var)].append(ing)
+    # Misma resolución de variedad que descargo (cache por receta+variedad POS).
+    from descargo_inventario import get_ingredientes
+
+    _ings_cache: dict[tuple[str, str], list[dict]] = {}
+
+    def _ings_venta(cod_r: str, variedad: str) -> list[dict]:
+        key = (cod_r, variedad)
+        if key not in _ings_cache:
+            _ings_cache[key] = get_ingredientes(cod_r, variedad or None)
+        return _ings_cache[key]
 
     consumo_total: dict[str, float] = defaultdict(float)
     fechas_activas: set[str] = set()
@@ -153,7 +156,7 @@ def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dic
         if estado_documento_excluye_neto_operativo(venta.get("estado_documento")):
             continue
         cod_r = norm_cod_receta(venta.get("cod_receta") or "")
-        variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
+        variedad = (venta.get("variedad_smart_menu") or "").strip()
         cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
         fecha = (venta.get("fecha") or "").strip()
 
@@ -162,11 +165,7 @@ def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dic
         if fecha:
             fechas_activas.add(fecha)
 
-        ingredientes = (
-            lookup_recetas.get((cod_r, variedad))
-            or lookup_recetas.get((cod_r, ""))
-            or []
-        )
+        ingredientes = _ings_venta(cod_r, variedad)
 
         for ing in ingredientes:
             if es_linea_mp(ing):
@@ -200,6 +199,11 @@ def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dic
             f"  DEBUG papa(120): consumo_total={papa:.0f}g | "
             f"diario={round(papa/dias_activos,2) if dias_activos else 0}g"
         )
+        tq = consumo_total.get("288", 0)
+        print(
+            f"  DEBUG tanqueray_ten(288): consumo_total={tq:.0f}ml | "
+            f"diario={round(tq/dias_activos,2) if dias_activos else 0}ml"
+        )
 
         print("  DEBUG desglose papa(120) por receta:")
         consumo_por_receta: dict[str, float] = defaultdict(float)
@@ -207,17 +211,12 @@ def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dic
             if estado_documento_excluye_neto_operativo(venta.get("estado_documento")):
                 continue
             cod_r = norm_cod_receta(venta.get("cod_receta") or "")
-            variedad = (venta.get("variedad_smart_menu") or "").strip().upper()
+            variedad = (venta.get("variedad_smart_menu") or "").strip()
             cantidad = _safe_float(venta.get("cantidad_vendida") or 0)
             if not cod_r or cantidad <= 0:
                 continue
 
-            ingredientes = (
-                lookup_recetas.get((cod_r, variedad))
-                or lookup_recetas.get((cod_r, ""))
-                or []
-            )
-            for ing in ingredientes:
+            for ing in _ings_venta(cod_r, variedad):
                 if norm_mp(ing.get("cod_mp_sistema", "")) == "120":
                     gramaje = _safe_float(ing.get("cantidad", 0))
                     if gramaje:
@@ -234,12 +233,59 @@ def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dic
     return {cod_mp: round(total / dias_activos, 4) for cod_mp, total in consumo_total.items()}
 
 
+def _aplicar_buffer_par_batches_barra(
+    par_por_mp: dict[str, float],
+    *,
+    verbose: bool = True,
+) -> dict[str, float]:
+    """
+    Sube el PAR de botellas con el PAR de batches barra (SUB-051..054) explotado a MPs.
+
+    Así el PAR de la botella ya refleja la necesidad de mantener el batch a su PAR;
+    las órdenes solo comparan stock efectivo (botella + equiv. en batch) vs ese PAR.
+    """
+    from descargo_subreceta import pseudo_mp_cod
+    from subreceta_consumo_mp import cargar_mp_por_unidad_subreceta, explotar_subreceta_a_mp
+    from subrecetas_bodegas_stock import SUBRECETAS_BARRA
+
+    mp_por_unidad = cargar_mp_por_unidad_subreceta()
+    buffer_total: dict[str, float] = defaultdict(float)
+
+    for cod_sub in sorted(SUBRECETAS_BARRA):
+        pseudo = pseudo_mp_cod(cod_sub)
+        par_batch = float(par_por_mp.get(pseudo) or par_por_mp.get(cod_sub) or 0)
+        if par_batch <= 0:
+            continue
+        explotado = explotar_subreceta_a_mp(
+            cod_sub, par_batch, mp_por_unidad=mp_por_unidad
+        )
+        if not explotado:
+            continue
+        if verbose:
+            print(
+                f"  Buffer batch {cod_sub} (PAR {par_batch:g}): "
+                + ", ".join(f"{mp}+{cant:g}" for mp, cant in sorted(explotado.items()))
+            )
+        for mp, cant in explotado.items():
+            if cant > 0:
+                buffer_total[mp] += cant
+
+    for mp, extra in buffer_total.items():
+        antes = float(par_por_mp.get(mp) or 0)
+        par_por_mp[mp] = round(antes + extra, 4)
+        if verbose:
+            print(f"  PAR botella {mp}: {antes:g} + buffer {extra:g} → {par_por_mp[mp]:g}")
+
+    return dict(buffer_total)
+
+
 def calcular_par_levels(dry_run: bool = False):
     """
     Actualiza BD_MP_SISTEMA en Sheets:
       - consumo_diario_calculado
       - par_level = consumo_diario_calculado × días cobertura
         (BD_MP_SISTEMA.dias_cobertura_par → frecuencia proveedor → BD_CONFIG; SUB-* config)
+      - + buffer batches barra (PAR del semi explotado a botellas componentes)
 
     Consumo: MPs directas en carta + pseudo-MP SUB-* + MPs de la cadena de subrecetas
     (explotar_subreceta_a_mp / BD_SUBRECETAS_DETALLE anidado).
@@ -254,7 +300,8 @@ def calcular_par_levels(dry_run: bool = False):
     Nota: par_level y consumo_diario_calculado se escriben en todas las filas del MP.
     dias_cobertura_par lo editas tú en BD_MP_SISTEMA (mismo valor lógico por cod_mp).
     Para comparar stock vs PAR (órdenes de compra, alertas), usar inventario_stock_mp:
-    stock_total = suma de stock_actual en todas las bodegas activas del MP.
+    stock_total = suma de stock_actual en todas las bodegas activas del MP
+    (+ equivalente en batches barra para botellas componentes).
     """
     invalidar_cache_dias_cobertura()
     print(f"Dias cobertura default (BD_CONFIG): {dias_cobertura_global_default()}")
@@ -303,6 +350,9 @@ def calcular_par_levels(dry_run: bool = False):
         par_por_mp[cod] = round(cd * dias, 4) if cd > 0 else 0.0
 
     print("[3] Calculando par levels (dias: BD_MP_SISTEMA -> frecuencia_compra -> config)...")
+    print("[3b] Buffer PAR batches barra → botellas componentes...")
+    _aplicar_buffer_par_batches_barra(par_por_mp, verbose=True)
+
     for i, row in enumerate(data_rows):
         if not any(c.strip() for c in row):
             continue

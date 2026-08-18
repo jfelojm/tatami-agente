@@ -12,6 +12,7 @@ from gspread.utils import ValueInputOption, rowcol_to_a1
 from supabase import create_client
 
 from matching_productos import (
+    acomp_lomo_kuro,
     cargar_bd_productos,
     construir_lookup,
     resolver_match,
@@ -70,9 +71,48 @@ def _limpiar_variedad(variedad: str | None) -> str:
     s = (variedad or "").strip().upper()
     for ch in ("\u00a0", "\u2007", "\u2009", "\u202f", "\ufeff"):
         s = s.replace(ch, " ")
-    if "OBS:" in s:
-        s = s.split("OBS:", 1)[0].strip()
+    # Cócteles SM: "DAIQUIRI\nESCOGE TU SABOR:\n  1 x - FRESA" → FRESA
+    if "ESCOGE TU SABOR" in s:
+        m = re.search(r"\d+\s*X\s*-\s*([A-ZÁÉÍÓÚÜÑ]+)", s)
+        if m:
+            return m.group(1).strip()
+    # Smart Menu a veces manda "PRODUCTO\nBASES:\n  1 x - TONICA" o OBS:
+    for sep in ("BASES:", "OBS:"):
+        if sep in s:
+            s = s.split(sep, 1)[0].strip()
     return " ".join(s.split())
+
+
+def _fallback_vaso_botella(candidatas: list[dict], var_pos: str) -> list[dict] | None:
+    """
+    Recetas barra típicas solo con VASO|COPA|SHOT + BOTELLA: el POS suele mandar
+    el nombre del trago + bases (tónica), no la SKU. Default = porción vaso.
+    """
+    vars_hoja = sorted(
+        {
+            _limpiar_variedad(r.get("variedad_smart_menu", ""))
+            for r in candidatas
+            if _limpiar_variedad(r.get("variedad_smart_menu", ""))
+        }
+    )
+    porcion = {"VASO", "COPA", "SHOT", "COPA/VASO"}
+    if len(vars_hoja) != 2:
+        return None
+    a, b = vars_hoja[0], vars_hoja[1]
+    if not (
+        (a in porcion and b == "BOTELLA")
+        or (b in porcion and a == "BOTELLA")
+    ):
+        return None
+    elegida = "BOTELLA" if "BOTELLA" in _limpiar_variedad(var_pos) else (
+        a if a in porcion else b
+    )
+    out = [
+        r
+        for r in candidatas
+        if _limpiar_variedad(r.get("variedad_smart_menu", "")) == elegida
+    ]
+    return out or None
 
 
 def _mismo_cod_receta(a: str, b: str) -> bool:
@@ -232,7 +272,19 @@ def cargar_recetas() -> list[dict]:
 def get_ingredientes(cod_receta: str, variedad: str | None) -> list[dict]:
     recetas = cargar_recetas()
     cod = cod_receta.strip()
+    var_raw = variedad
     var = _limpiar_variedad(variedad)
+    # Lomo Kuro 146: OBS suele ser punto de cocción; acompañante en texto completo o papas.
+    if _mismo_cod_receta(cod, "146"):
+        side = acomp_lomo_kuro(var_raw)
+        if side:
+            var = side.upper()
+        elif var in ("LOMO KURO", "") or "LOMO KURO" in var:
+            var = "PAPAS"
+            print(
+                f"    INFO: receta=146 — default papas "
+                f"(POS {var_raw!r} sin ARROZ/PAPAS explícito)."
+            )
 
     candidatas = [
         r for r in recetas if _mismo_cod_receta(r.get("cod_receta", ""), cod)
@@ -306,9 +358,34 @@ def get_ingredientes(cod_receta: str, variedad: str | None) -> list[dict]:
                 f"'{unica}' (POS '{var}' no coincidía tras normalizar)."
             )
             return filas_exactas(candidatas, unica)
+        # Cócteles con sabores: POS manda "MARGARITA" / "DAIQUIRI" sin sabor → clasico
+        sabor_tokens = ("FRESA", "DURAZNO", "MANGO", "MARACUYA", "MARACUYÁ")
+        if not any(t in var for t in sabor_tokens):
+            for alias in ("CLASICO", "CLÁSICO", "CLASSIC"):
+                clas = filas_exactas(candidatas, alias)
+                if clas:
+                    print(
+                        f"    INFO: receta={cod} — fallback clasico "
+                        f"(POS '{var}' sin sabor explícito)."
+                    )
+                    return clas
         sim = _ingredientes_mejor_variedad_por_similitud(candidatas, var, cod)
         if sim:
             return sim
+        fb = _fallback_vaso_botella(candidatas, var)
+        if fb:
+            elegida = _limpiar_variedad(fb[0].get("variedad_smart_menu", ""))
+            print(
+                f"    INFO: receta={cod} — fallback vaso/botella → '{elegida}' "
+                f"(POS '{var}' no coincidía con {sorted({_limpiar_variedad(r.get('variedad_smart_menu','')) for r in candidatas if _limpiar_variedad(r.get('variedad_smart_menu',''))})})."
+            )
+            return fb
+    else:
+        # variedad POS vacía → clasico si existe
+        for alias in ("CLASICO", "CLÁSICO", "CLASSIC"):
+            clas = filas_exactas(candidatas, alias)
+            if clas:
+                return clas
     if candidatas and var:
         distintos = sorted(
             {
@@ -488,13 +565,11 @@ def _cod_receta_desde_catalogo(venta: dict) -> str | None:
 
 # ── CALCULAR CONSUMO ──────────────────────────────────────────
 def calcular_consumo(ingrediente: dict, cantidad_vendida: float) -> float:
-    try:
-        gramaje = float(ingrediente.get("cantidad", 0))
-        pct_aplicacion = float(ingrediente.get("pct_aplicacion", 1) or 1)
-        merma_pct = float(ingrediente.get("merma_pct", 0) or 0)
-    except ValueError:
+    gramaje = _sheet_float(ingrediente.get("cantidad"))
+    pct_aplicacion = _sheet_float(ingrediente.get("pct_aplicacion")) or 1.0
+    merma_pct = _sheet_float(ingrediente.get("merma_pct"))
+    if gramaje <= 0:
         return 0.0
-
     return cantidad_vendida * gramaje * pct_aplicacion * (1 + merma_pct)
 
 
@@ -713,7 +788,7 @@ def procesar_descargo(fecha: str | None = None, cod_smart_menu: str | None = Non
             except Exception as e:
                 print(f"  WARN: marcar descargado (descarga_inventario=NO) {cod_venta}: {e}")
             continue
-        if cod_venta in ya_en_mov or _linea_venta_key(venta) in lineas_ya_descargadas:
+        if cod_venta in ya_en_mov:
             try:
                 supabase.table("hist_ventas").update(
                     {"descargado": True, "fecha_descargo": datetime.now().isoformat()}

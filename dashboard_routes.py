@@ -201,8 +201,11 @@ def _socios_query_fn(
 
 
 def _cargar_catalogo() -> dict:
-    global _cache_catalogo
-    if _cache_catalogo is not None:
+    global _cache_catalogo, _cache_catalogo_at
+    if (
+        _cache_catalogo is not None
+        and (time.monotonic() - _cache_catalogo_at) < _CATALOGO_TTL_SEC
+    ):
         return _cache_catalogo
 
     by_cod_var: dict[tuple[str, str], dict] = {}
@@ -233,6 +236,7 @@ def _cargar_catalogo() -> dict:
         "by_cod": dict(by_cod),
         "multivariety_cods": multivariety_cods,
     }
+    _cache_catalogo_at = time.monotonic()
     return _cache_catalogo
 
 
@@ -391,7 +395,7 @@ def _parse_meses_query(values: list[str] | None) -> set[str] | None:
     return meses or None
 
 
-TIPOS_MOV_COMPRA = ("ENTRADA", "ENTRADA_COSTO_HIST")
+from dashboard_services.compras import TIPOS_MOV_COMPRA
 
 
 def _leer_sheets_dashboard() -> tuple[list[dict], list[dict]]:

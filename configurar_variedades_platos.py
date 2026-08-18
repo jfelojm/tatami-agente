@@ -38,7 +38,7 @@ VARIEDADES_EXTRA = ("CAMARON", "LOMO", "POLLO", "HONGO")
 
 EXTRAS_MP: dict[str, list[tuple[str, str, str, str, str]]] = {
     "CAMARON": [("067", "CAMARON", "80", "gr", "BOD-001")],
-    "LOMO": [("552", "LOMO FINO DE RES PIGGIS", "100", "gr", "BOD-001")],
+    "LOMO": [("591", "LOMO FINO DE RES", "100", "gr", "BOD-001")],
     "POLLO": [("051", "PECHUGA DE POLLO", "100", "gr", "BOD-001")],
     "HONGO": [
         ("038", "CHAMPIÑONES", "35", "gr", "BOD-001"),

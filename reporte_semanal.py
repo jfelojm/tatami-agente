@@ -119,12 +119,12 @@ def seccion_costos(sb, fecha_ini, fecha_fin, total_ventas):
 
     rows = res.data or []
 
-    # Compras: ENTRADA (facturas) o ENTRADA_COMPRA (si existe en tu esquema)
+    # Compras: misma base que dashboard (ENTRADA + ENTRADA_COSTO_HIST)
+    from dashboard_services.compras import es_entrada_compra
+
     costo_compras = 0.0
     for r in rows:
-        tipo = (r.get("tipo_mov") or "").strip().upper()
-        origen = (r.get("origen_documento") or "").strip().upper()
-        if tipo in ("ENTRADA", "ENTRADA_COMPRA") and (not origen or origen == "FACTURA"):
+        if es_entrada_compra(r):
             costo_compras += _safe_float(r.get("costo_total"))
 
     # Salidas por venta

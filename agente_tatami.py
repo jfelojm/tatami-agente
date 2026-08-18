@@ -73,6 +73,14 @@ def main():
         help="Argumentos para conteo_fisico.py (ej. listar-ciclos)",
     )
 
+    p_stg = sub.add_parser(
+        "staging-sync",
+        help="Maestro -> Masters Sheets: catálogos INGRESO_TRASLADO y INGRESO_FACTURA",
+    )
+    p_stg.add_argument("--dry-run", action="store_true")
+    p_stg.add_argument("--skip-sub-sync", action="store_true")
+    p_stg.add_argument("--full-setup", action="store_true")
+
     a = p.parse_args()
 
     if a.cmd == "ventas":
@@ -108,6 +116,16 @@ def main():
     if a.cmd == "conteo":
         extra = list(a.passthrough or [])
         _run("conteo_fisico.py", extra if extra else ["-h"])
+
+    if a.cmd == "staging-sync":
+        args = []
+        if a.dry_run:
+            args.append("--dry-run")
+        if a.skip_sub_sync:
+            args.append("--skip-sub-sync")
+        if a.full_setup:
+            args.append("--full-setup")
+        _run("staging_sync_desde_maestro.py", args)
 
 
 if __name__ == "__main__":

@@ -125,8 +125,8 @@ def filas_catalogo() -> list[list[str]]:
     etiqueta: kimchi — SUB-036 — 5200 — gr
 
     Fuentes:
-      - BD_MP_SISTEMA: todas las filas por bodega activa (MPs y SUB ya en inventario)
-      - BD_SUBRECETAS: subrecetas activas faltantes en esa bodega (semis traslado)
+      - BD_MP_SISTEMA: MPs/sub por bodega + catálogo completo en cada bodega activa
+      - BD_SUBRECETAS: subrecetas activas faltantes en BD_MP_SISTEMA
     """
     from codigos_subreceta import cod_sub_canonico
 
@@ -158,16 +158,17 @@ def filas_catalogo() -> list[list[str]]:
 
     for row in vals[hi + 1 :]:
         cod = (row[icod] if icod < len(row) else "").strip()
-        bod = (row[ibod] if ibod < len(row) else "").strip().upper()
-        if not cod or not bod or bod not in BODEGAS or not BODEGAS[bod].activa:
+        if not cod:
             continue
+        bod = (row[ibod] if ibod < len(row) else "").strip().upper()
         nombre = (row[inom] if inom is not None and inom < len(row) else cod).strip() or cod
         ub = (row[iub] if iub is not None and iub < len(row) else "gr").strip() or "gr"
         cod_norm = cod_sub_canonico(cod) if str(cod).upper().startswith("SUB") else cod
         meta_mp[cod_norm] = {"nombre_mp": nombre, "unidad_base": ub, "cod_mp": cod_norm}
-        por_bodega[bod].append(
-            {"cod_bodega": bod, "cod_mp": cod_norm, "nombre_mp": nombre, "unidad_base": ub}
-        )
+        if bod and bod in BODEGAS and BODEGAS[bod].activa:
+            por_bodega[bod].append(
+                {"cod_bodega": bod, "cod_mp": cod_norm, "nombre_mp": nombre, "unidad_base": ub}
+            )
 
     # Subrecetas activas en BD_SUBRECETAS → todas las bodegas de traslado físico
     bodegas_sub = [b for b in ("BOD-001", "BOD-002", "BOD-005") if b in bodegas_cat]
@@ -191,6 +192,22 @@ def filas_catalogo() -> list[list[str]]:
                         "unidad_base": meta_mp[cod]["unidad_base"],
                     }
                 )
+
+    # Todo MP/sub del maestro en cada bodega activa (permite traslado aunque stock sea 0 allí)
+    for bod in bodegas_cat:
+        ya = {r["cod_mp"].upper() for r in por_bodega[bod]}
+        for cod in sorted(meta_mp.keys(), key=lambda c: meta_mp[c]["nombre_mp"].lower()):
+            if cod.upper() in ya:
+                continue
+            m = meta_mp[cod]
+            por_bodega[bod].append(
+                {
+                    "cod_bodega": bod,
+                    "cod_mp": cod,
+                    "nombre_mp": m["nombre_mp"],
+                    "unidad_base": m["unidad_base"],
+                }
+            )
 
     par_mp: dict[str, float] = {}
     if "par_level" in h:
@@ -262,6 +279,41 @@ def configurar_cat(sheets, sid: str) -> tuple[int, list[list[str]]]:
     return len(filas), filas
 
 
+def _actualizar_lista_h_traslado(
+    sheets, sid: str, filas_cat: list[list[str]]
+) -> int:
+    """Columna H de INGRESO_TRASLADO: lista completa para dropdown de productos."""
+    vistos_h: set[str] = set()
+    lista_h: list[list[str]] = []
+    for f in filas_cat:
+        et = f[1]
+        if et and et not in vistos_h:
+            vistos_h.add(et)
+            lista_h.append([et])
+    sheets.spreadsheets().values().update(
+        spreadsheetId=sid,
+        range=f"{SHEET_INGRESO}!H2:H2000",
+        valueInputOption="RAW",
+        body={"values": lista_h if lista_h else [[""]]},
+    ).execute()
+    if lista_h:
+        log.info("Lista H: %d productos unicos para dropdown", len(lista_h))
+    return len(lista_h)
+
+
+def actualizar_catalogo_traslado(sheets, sid: str) -> dict:
+    """
+    Regenera CAT_TRASLADO y lista H desde el maestro (BD_MP_SISTEMA + BD_SUBRECETAS).
+    No toca protección ni fórmulas de INGRESO_TRASLADO.
+    """
+    n, filas = configurar_cat(sheets, sid)
+    n_h = _actualizar_lista_h_traslado(sheets, sid, filas)
+    por_bod: dict[str, int] = defaultdict(int)
+    for f in filas:
+        por_bod[f[0]] += 1
+    return {"items": n, "lista_h": n_h, "por_bodega": dict(por_bod)}
+
+
 def configurar_ingreso(sheets, sid: str, n_cat: int, filas_cat: list[list[str]]) -> None:
     sheet_id = crear_hoja_si_no_existe(sheets, sid, SHEET_INGRESO)
     opciones_bod = _opciones_bodega()
@@ -290,22 +342,7 @@ def configurar_ingreso(sheets, sid: str, n_cat: int, filas_cat: list[list[str]])
         body={"values": [['=SI($B$2="";"";REGEXEXTRACT($B$2;"BOD-[0-9]{3}"))']]},
     ).execute()
 
-    # Lista completa en H (dropdown siempre tiene opciones; Apps Script filtra por bodega)
-    vistos_h: set[str] = set()
-    lista_h: list[list[str]] = []
-    for f in filas_cat:
-        et = f[1]
-        if et and et not in vistos_h:
-            vistos_h.add(et)
-            lista_h.append([et])
-    if lista_h:
-        sheets.spreadsheets().values().update(
-            spreadsheetId=sid,
-            range=f"{SHEET_INGRESO}!H2",
-            valueInputOption="RAW",
-            body={"values": lista_h},
-        ).execute()
-        log.info("Lista H: %d productos unicos para dropdown", len(lista_h))
+    _actualizar_lista_h_traslado(sheets, sid, filas_cat)
 
     r0, r1 = FILA_LINEAS_INICIO, fin
     cat_rng = f"{SHEET_CAT}!$B$2:$F${cat_end}"
@@ -544,7 +581,8 @@ def main() -> None:
     print("    TRASLADO_SHEETS_EMAILS=correo1@...,correo2@...")
     print("  BD_CONFIG (opcional): emails_traslado_masivo")
     print()
-    print("  Apps Script: menú 📦 Tatami Traslados en tatami_staging.gs")
+    print("  Apps Script: menu Tatami Traslados en tatami_staging.gs")
+    print("  Tras cambios en maestro: python staging_sync_desde_maestro.py")
     print("    TATAMI_TRASLADO_API_URL / TATAMI_TRASLADO_SECRET")
     print("=" * 70 + "\n")
 

@@ -32,8 +32,16 @@ def _to_float(v: object) -> float:
         return 0.0
 
 
+# Tipos alineados con dashboard_routes.TIPOS_MOV_COMPRA
+TIPOS_MOV_COMPRA = ("ENTRADA", "ENTRADA_COSTO_HIST")
+
+
+def es_entrada_compra(row: dict) -> bool:
+    return (row.get("tipo_mov") or "").strip().upper() in TIPOS_MOV_COMPRA
+
+
 def _es_entrada_compra(row: dict) -> bool:
-    return (row.get("tipo_mov") or "").strip().upper() in ("ENTRADA", "ENTRADA_COSTO_HIST")
+    return es_entrada_compra(row)
 
 
 def _area_bodega(cod_bod: str) -> str:
@@ -68,7 +76,20 @@ def _ruc_claves(ruc: str) -> list[str]:
         keys.append(digits)
         if len(digits) == 10:
             keys.append(digits + "001")
-    return keys
+        # Variantes frecuentes SRI / Sheets (con o sin 0 inicial)
+        if len(digits) == 12 and not digits.startswith("0"):
+            keys.append("0" + digits)
+        if len(digits) == 13 and digits.startswith("0"):
+            keys.append(digits.lstrip("0") or digits)
+            keys.append(digits[1:])
+    # únicos preservando orden
+    seen: set[str] = set()
+    out: list[str] = []
+    for k in keys:
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
 
 
 def _mapa_proveedores_inventario(prov_rows: list[dict]) -> dict[str, str]:
@@ -129,15 +150,15 @@ def _proveedor_dashboard(
     return None
 
 
-def _es_compra_inventario_dashboard(
+def es_compra_inventario_dashboard(
     row: dict,
     *,
     mps_validos: set[str],
-    prov_inv: dict[str, str],
-    fact_por_num: dict[str, dict],
+    fact_por_num: dict[str, dict] | None = None,
+    prov_inv: dict[str, str] | None = None,
 ) -> bool:
     """Solo MPs en BD_MP_SISTEMA. Excluye MP 000 y sin catálogo."""
-    if not _es_entrada_compra(row):
+    if not es_entrada_compra(row):
         return False
     cod = norm_mp(row.get("cod_mp_sistema"))
     if not cod or cod == COD_MP_SIN_CLASIFICAR or cod not in mps_validos:
@@ -151,6 +172,96 @@ def _es_compra_inventario_dashboard(
     if _to_float(row.get("costo_total")) <= 0:
         return False
     return True
+
+
+def _es_compra_inventario_dashboard(
+    row: dict,
+    *,
+    mps_validos: set[str],
+    prov_inv: dict[str, str],
+    fact_por_num: dict[str, dict],
+) -> bool:
+    return es_compra_inventario_dashboard(
+        row, mps_validos=mps_validos, fact_por_num=fact_por_num, prov_inv=prov_inv
+    )
+
+
+def _fact_por_num_desde_facturas(facturas: list[dict] | None) -> dict[str, dict]:
+    """Indexa facturas por número; si hay duplicados, elige la fila más usable."""
+    fact_por_num: dict[str, dict] = {}
+    for f in facturas or []:
+        num = (f.get("num_factura") or "").strip()
+        if not num:
+            continue
+        prev = fact_por_num.get(num)
+        if prev is None:
+            fact_por_num[num] = f
+            continue
+        # Preferir fila con razón social / RUC más usable si hay duplicados
+        prev_razon = (prev.get("razon_social") or "").strip()
+        new_razon = (f.get("razon_social") or "").strip()
+        if not prev_razon:
+            meta = prev.get("meta")
+            if isinstance(meta, dict):
+                prev_razon = (meta.get("razon_social") or meta.get("proveedor") or "").strip()
+        if not new_razon:
+            meta = f.get("meta")
+            if isinstance(meta, dict):
+                new_razon = (meta.get("razon_social") or meta.get("proveedor") or "").strip()
+        prev_ruc = re.sub(r"\D", "", str(prev.get("ruc_proveedor") or ""))
+        new_ruc = re.sub(r"\D", "", str(f.get("ruc_proveedor") or ""))
+        if not prev_razon and new_razon:
+            fact_por_num[num] = f
+        elif len(new_ruc) > len(prev_ruc):
+            fact_por_num[num] = f
+        elif (prev.get("estado") or "").upper() != "COMPLETA" and (
+            f.get("estado") or ""
+        ).upper() == "COMPLETA":
+            fact_por_num[num] = f
+    return fact_por_num
+
+
+def contexto_filtros_compras(
+    rows_mp: list[dict],
+    rows_prov: list[dict],
+    facturas: list[dict] | None = None,
+) -> dict:
+    """Contexto compartido dashboard / WhatsApp / reportes para filtrar compras."""
+    mps_validos = {
+        norm_mp(r.get("cod_mp_sistema"))
+        for r in rows_mp
+        if norm_mp(r.get("cod_mp_sistema"))
+    }
+    return {
+        "mps_validos": mps_validos,
+        "prov_inv": _mapa_proveedores_inventario(rows_prov),
+        "fact_por_num": _fact_por_num_desde_facturas(facturas),
+        "mp_area": _mapa_mp_area(rows_mp),
+    }
+
+
+def filtrar_compras_inventario(
+    rows: list[dict],
+    *,
+    mps_validos: set[str],
+    prov_inv: dict[str, str],
+    fact_por_num: dict[str, dict],
+    exigir_proveedor: bool = True,
+) -> list[dict]:
+    """
+    Misma elegibilidad que el tab Compras del dashboard.
+    Si exigir_proveedor=True, descarta líneas sin nombre de proveedor resoluble.
+    """
+    out: list[dict] = []
+    for r in rows:
+        if not es_compra_inventario_dashboard(
+            r, mps_validos=mps_validos, fact_por_num=fact_por_num, prov_inv=prov_inv
+        ):
+            continue
+        if exigir_proveedor and not _proveedor_dashboard(r, fact_por_num, prov_inv):
+            continue
+        out.append(r)
+    return out
 
 
 def _ruc_desde_mov(row: dict, fact_por_num: dict[str, dict]) -> str:
@@ -209,11 +320,7 @@ def _metricas_compras(
     area_filtro: str | None = None,
     fill_labels: list[str] | None = None,
 ) -> dict:
-    fact_por_num: dict[str, dict] = {}
-    for f in facturas:
-        num = (f.get("num_factura") or "").strip()
-        if num:
-            fact_por_num[num] = f
+    fact_por_num = _fact_por_num_desde_facturas(facturas)
 
     total = 0.0
     por_prov: dict[str, dict] = defaultdict(lambda: {"vta": 0.0, "lineas": 0, "facturas": set()})
@@ -312,11 +419,7 @@ def listar_facturas_inventario_dashboard(
     mps_validos: set[str],
 ) -> list[dict]:
     """Facturas agregadas que califican como compra de inventario en el dashboard."""
-    fact_por_num: dict[str, dict] = {}
-    for f in facturas:
-        num = (f.get("num_factura") or "").strip()
-        if num:
-            fact_por_num[num] = f
+    fact_por_num = _fact_por_num_desde_facturas(facturas)
 
     agg: dict[str, dict] = {}
     for r in rows:

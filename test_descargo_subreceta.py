@@ -24,6 +24,12 @@ class TestDescargoSubreceta(unittest.TestCase):
         ing = {"cantidad": "30", "pct_aplicacion": "1", "merma_pct": "0.1"}
         self.assertAlmostEqual(calcular_consumo_sub(ing, 2.0), 66.0)
 
+    def test_calcular_consumo_coma_decimal(self):
+        ing = {"cantidad": "175,67", "pct_aplicacion": "1", "merma_pct": "0"}
+        self.assertAlmostEqual(calcular_consumo_sub(ing, 1.0), 175.67)
+        ing2 = {"cantidad": "10,00", "pct_aplicacion": "1", "merma_pct": "0"}
+        self.assertAlmostEqual(calcular_consumo_sub(ing2, 2.0), 20.0)
+
     def test_preparar_sin_sub(self):
         lineas = [
             {"cod_mp_sistema": "1", "cod_subreceta": ""},

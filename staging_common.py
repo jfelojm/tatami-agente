@@ -184,9 +184,11 @@ def proximo_cod_subreceta_desde_maestro() -> str:
         cab = cargar_bd_subrecetas()
         mx = 0
         for k in cab:
-            s = (k or "").strip()
+            s = (k or "").strip().upper()
             if s.isdigit():
                 mx = max(mx, int(s))
+            elif s.startswith("SUB-") and s[4:].isdigit():
+                mx = max(mx, int(s[4:]))
         return str(mx + 1).zfill(3)
     except Exception:
         return "051"

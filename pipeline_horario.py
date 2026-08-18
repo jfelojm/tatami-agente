@@ -64,7 +64,75 @@ def _en_ventana_horaria() -> bool:
     return h >= ini or h <= fin
 
 
+def _tolerancia_minutos() -> int:
+    from config_sheets import cfg_int
+
+    # Default 55 min: el trigger del Task Scheduler puede llegar hasta ~52 min tarde
+    # por drift acumulado. Max 59 para no solaparse con el siguiente slot.
+    return max(1, min(cfg_int("sched_tolerancia_min", 55), 59))
+
+
+def _fuera_de_tolerancia_horaria(*, forzar: bool) -> tuple[bool, str]:
+    if forzar:
+        return False, ""
+    from pipeline_run_guard import corrida_fuera_de_tolerancia
+
+    tarde, motivo = corrida_fuera_de_tolerancia(tolerancia_min=_tolerancia_minutos())
+    return tarde, motivo
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser(description="Pipeline horario Tatami")
+    ap.add_argument("--dry-run", action="store_true", help="Solo imprime pasos")
+    ap.add_argument(
+        "--forzar",
+        action="store_true",
+        help="Ignora ventana horaria y deduplicación por franja (misma hora EC)",
+    )
+    args = ap.parse_args()
+
+    hora = _hora_ec()
+    if not args.forzar and not _en_ventana_horaria():
+        print(f"  INFO: hora {hora} fuera de ventana sched (omitido)")
+        return 0
+
+    tarde, motivo_tarde = _fuera_de_tolerancia_horaria(forzar=args.forzar)
+    if tarde:
+        print(
+            f"  INFO: corrida omitida — fuera de ventana de inicio programada ({motivo_tarde}). "
+            "El Task Scheduler no debe usar StartWhenAvailable para recuperar horas pasadas."
+        )
+        return 0
+
+    fecha, progresivo = _fecha_operativa(hora)
+    tag = f"horario_{fecha}_H{hora:02d}"
+    horario_cp = ROOT / "logs" / "pipeline_horario_checkpoint.json"
+    os.environ["PIPELINE_HORARIO_TAG"] = tag
+
+    from pipeline_run_guard import corrida_unica
+
+    with corrida_unica(
+        "pipeline_horario",
+        slot_id=tag,
+        slots_name="pipeline_horario",
+        forzar=args.forzar,
+        lock_ttl_min=90,
+    ) as ejecutar:
+        if not ejecutar:
+            return 0
+        return _ejecutar_pipeline_horario(
+            args, fecha, progresivo, hora, tag, horario_cp
+        )
+
+
+def _ejecutar_pipeline_horario(
+    args,
+    fecha: str,
+    progresivo: bool,
+    hora: int,
+    tag: str,
+    horario_cp: Path,
+) -> int:
     from config_sheets import cfg
     from estrategia_config import horas_pipeline_sri_descarga, pipeline_sri_solo_proceso
     from pipeline_diario import (
@@ -73,21 +141,6 @@ def main() -> int:
         _checkpoint_step_ok,
         run_step,
     )
-
-    ap = argparse.ArgumentParser(description="Pipeline horario Tatami")
-    ap.add_argument("--dry-run", action="store_true", help="Solo imprime pasos")
-    ap.add_argument("--forzar", action="store_true", help="Ignora ventana horaria")
-    args = ap.parse_args()
-
-    hora = _hora_ec()
-    if not args.forzar and not _en_ventana_horaria():
-        print(f"  INFO: hora {hora} fuera de ventana sched (omitido)")
-        return 0
-
-    fecha, progresivo = _fecha_operativa(hora)
-    tag = f"horario_{fecha}_H{hora:02d}"
-    horario_cp = ROOT / "logs" / "pipeline_horario_checkpoint.json"
-    os.environ["PIPELINE_HORARIO_TAG"] = tag
 
     print("=" * 60)
     print(f"PIPELINE HORARIO — {datetime.now(ZONA_EC):%Y-%m-%d %H:%M} EC")
@@ -108,6 +161,7 @@ def main() -> int:
     _checkpoint_start(fecha)
     continuar = str(cfg("sched_si_falla_paso", "continuar_con_warn") or "").strip()
     check = continuar != "continuar_con_warn"
+    pasos_fallidos: list[str] = []
 
     ventas_argv = ["ventas_smartmenu.py", "--fecha", fecha]
     if progresivo:
@@ -115,13 +169,15 @@ def main() -> int:
 
     # 1 Ventas (+ reconciliar si cierre medianoche)
     try:
-        run_step(
+        rc_v = run_step(
             f"1/4 — Ventas Smart Menu ({'hoy progresivo' if progresivo else 'cierre ayer'})",
             ventas_argv,
             check=False,
             step=1,
             fecha_objetivo=fecha,
         )
+        if rc_v != 0:
+            pasos_fallidos.append("ventas")
         if progresivo:
             from ventas_completitud import auditar_fecha_remota, mensaje_completitud
 
@@ -210,16 +266,19 @@ def main() -> int:
 
     # 2 Descargo
     try:
-        run_step(
+        rc_d = run_step(
             "2/4 — Descargo inventario",
             ["descargo_inventario.py", "--fecha", fecha],
             check=check,
             step=2,
             fecha_objetivo=fecha,
         )
+        if rc_d != 0:
+            pasos_fallidos.append("descargo")
     except SystemExit as e:
         if check:
             return int(e.code or 1)
+        pasos_fallidos.append("descargo")
         print("  WARN: descargo con error (continúa)")
 
     # 3 Facturas SRI — descarga en tareas AM/PM; horario solo procesa cola
@@ -227,16 +286,19 @@ def main() -> int:
     if pipeline_sri_solo_proceso() or hora not in horas_pipeline_sri_descarga():
         sri_argv.append("--solo-proceso")
     try:
-        run_step(
+        rc_s = run_step(
             "3/4 — Facturas SRI",
             sri_argv,
             check=check,
             step=3,
             fecha_objetivo=fecha,
         )
+        if rc_s != 0:
+            pasos_fallidos.append("facturas_sri")
     except SystemExit as e:
         if check:
             return int(e.code or 1)
+        pasos_fallidos.append("facturas_sri")
         print("  WARN: SRI con error (continúa)")
 
     # 4 Cierre medianoche: recalcular stock del día cerrado
@@ -264,10 +326,24 @@ def main() -> int:
     _checkpoint_step_ok(fecha, 4, "pipeline horario OK")
     _checkpoint_complete(fecha)
     horario_cp.parent.mkdir(parents=True, exist_ok=True)
+    if pasos_fallidos:
+        horario_cp.write_text(
+            f'{{"tag":"{tag}","status":"PARCIAL","fallos":"{",".join(pasos_fallidos)}","updated":"{datetime.now(ZONA_EC).isoformat()}"}}',
+            encoding="utf-8",
+        )
+        print(
+            f"\n  WARN: pipeline horario con fallos ({', '.join(pasos_fallidos)}) — "
+            f"slot {tag} NO marcado completado (reintento en próxima hora en punto)."
+        )
+        return 1
+
     horario_cp.write_text(
         f'{{"tag":"{tag}","status":"OK","updated":"{datetime.now(ZONA_EC).isoformat()}"}}',
         encoding="utf-8",
     )
+    from pipeline_run_guard import marcar_slot_completado
+
+    marcar_slot_completado("pipeline_horario", tag)
     print("\nPipeline horario completado.")
     return 0
 

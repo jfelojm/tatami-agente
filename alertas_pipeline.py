@@ -23,7 +23,8 @@ def enviar_mensaje_wa(numero_raw: str, texto: str, *, etiqueta: str = "alerta") 
     Envío WhatsApp saliente (mismo canal que alerta_fallo).
     Retorna True si se envió o se omitió por config benigna; False si hubo fallo real.
     """
-    from alertas_tatami import enviar_whatsapp_texto, log_envio_wa
+    from alertas_tatami import log_envio_wa
+    from wa_entrega_alertas import enviar_alerta_wa_configurada
 
     try:
         from wa_chat_guard import chat_activo
@@ -35,8 +36,7 @@ def enviar_mensaje_wa(numero_raw: str, texto: str, *, etiqueta: str = "alerta") 
     except Exception:
         pass
 
-    ok, msg = enviar_whatsapp_texto(numero_raw, texto)
-    log_envio_wa(etiqueta, numero_raw, ok, msg)
+    ok, msg, _ = enviar_alerta_wa_configurada(numero_raw, texto, etiqueta=etiqueta)
     return ok
 
 
@@ -68,7 +68,19 @@ def ping_wa_paso_proceso(paso: str, *, ok: bool = True) -> bool:
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    ts = datetime.now(ZoneInfo("America/Guayaquil")).strftime("%d/%m %H:%M")
+    z = ZoneInfo("America/Guayaquil")
+    tag = (os.getenv("PIPELINE_HORARIO_TAG") or "").strip()
+    if tag.startswith("horario_") and "_H" in tag:
+        # horario_2026-07-01_H12 → 01/07 12:00 (franja programada, no hora real de ejecución)
+        try:
+            fecha_part, h_part = tag.rsplit("_H", 1)
+            fecha_iso = fecha_part.replace("horario_", "")
+            y, m, d = fecha_iso.split("-")
+            ts = f"{d}/{m} {int(h_part):02d}:00"
+        except (ValueError, TypeError):
+            ts = datetime.now(z).strftime("%d/%m %H:%M")
+    else:
+        ts = datetime.now(z).strftime("%d/%m %H:%M")
     icon = "OK" if ok else "FALLO"
     msg = f"Tatami — {paso} [{icon}] {ts}"
     return enviar_mensaje_wa(tel, msg, etiqueta=f"ping {paso[:24]}")

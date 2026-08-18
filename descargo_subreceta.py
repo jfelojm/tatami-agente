@@ -47,11 +47,10 @@ def preparar_ingredientes_descargo(
 
 def calcular_consumo_sub(ingrediente: dict, cantidad_vendida: float) -> float:
     """Misma fórmula que MP en plato: cantidad × ventas × pct × (1+merma)."""
-    try:
-        gramaje = float(ingrediente.get("cantidad", 0))
-        pct = float(ingrediente.get("pct_aplicacion", 1) or 1)
-        merma = float(ingrediente.get("merma_pct", 0) or 0)
-    except (TypeError, ValueError):
+    gramaje = _sheet_float(ingrediente.get("cantidad"), 0.0)
+    pct = _sheet_float(ingrediente.get("pct_aplicacion"), 1.0) or 1.0
+    merma = _sheet_float(ingrediente.get("merma_pct"), 0.0)
+    if gramaje <= 0:
         return 0.0
     return cantidad_vendida * gramaje * pct * (1 + merma)
 
@@ -221,10 +220,18 @@ def procesar_linea_sub_venta(
         return None, None, f"SUB {cod_sub}: sin cod_bodega en receta (cocina/barra)"
 
     # Batches de barra: stock vive en BOD-002 aunque la carta diga otra bodega
-    from subrecetas_bodegas_stock import SUBRECETAS_BARRA
+    from subrecetas_bodegas_stock import SUBRECETAS_BARRA, venta_anterior_a_primera_produccion_batch
 
     if cod_sub in SUBRECETAS_BARRA:
         bodega = "BOD-002"
+        if venta_anterior_a_primera_produccion_batch(cod_sub, fecha_v, hora_raw):
+            fp = (fecha_v or "")[:10]
+            return (
+                None,
+                None,
+                f"SUB {cod_sub}: venta {fp} anterior a primera producción del batch (sin descargo)",
+            )
+
 
     if not bodega_permite_descargo_venta(bodega):
         return None, None, f"SUB {cod_sub}: bodega {bodega} no permitida para venta"

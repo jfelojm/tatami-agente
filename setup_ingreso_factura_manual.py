@@ -101,7 +101,7 @@ def filas_catalogo() -> list[list[str]]:
     return filas
 
 
-def configurar_cat(sheets, sid: str) -> None:
+def configurar_cat(sheets, sid: str) -> tuple[int, dict[str, int]]:
     sheet_id = crear_hoja_si_no_existe(sheets, sid, SHEET_CAT)
     filas = filas_catalogo()
     sheets.spreadsheets().values().clear(spreadsheetId=sid, range=f"{SHEET_CAT}!A:C").execute()
@@ -116,6 +116,13 @@ def configurar_cat(sheets, sid: str) -> None:
     for f in filas:
         por_prov[f[0]] = por_prov.get(f[0], 0) + 1
     log.info("CAT_FM: %d ítems %s", len(filas), por_prov)
+    return len(filas), por_prov
+
+
+def actualizar_catalogo_factura(sheets, sid: str) -> dict:
+    """Regenera CAT_FM desde BD_ITEMS_PROV del maestro (proveedores manuales)."""
+    n, por_prov = configurar_cat(sheets, sid)
+    return {"items": n, "por_proveedor": por_prov}
 
 
 def configurar_ingreso(sheets, sid: str) -> None:
@@ -285,6 +292,7 @@ def main() -> None:
     print("  Activar appsscript.json (ver scripts_apps_script/appsscript.json)")
     print("  y ejecutar solicitarPermisosExternos para autorizar UrlFetchApp.")
     print("  Configurar TATAMI_FACTURA_API_URL y TATAMI_FACTURA_SECRET en Propiedades del script.")
+    print("  Tras cambios en maestro: python staging_sync_desde_maestro.py")
     print("=" * 70 + "\n")
 
 

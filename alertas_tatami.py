@@ -116,6 +116,41 @@ def log_envio_wa(etiqueta: str, numero_raw: str, ok: bool, detalle: str) -> None
     print(f"  WA [{estado}] {etiqueta} destino …{_ultimos_digitos(numero_raw)}: {detalle}")
 
 
+def destino_preview_alertas() -> str:
+    """Modo prueba: redirige alertas WA a un solo número (TATAMI_ALERTAS_PREVIEW_DESTINO)."""
+    return (os.getenv("TATAMI_ALERTAS_PREVIEW_DESTINO") or "").strip()
+
+
+def preview_alertas_activo() -> bool:
+    return bool(destino_preview_alertas())
+
+
+def usuario_en_ventana_24h(numero: str, *, horas: float = 24.0) -> bool:
+    from wa_entrega_alertas import usuario_en_ventana_24h as _ventana
+
+    return _ventana(numero, horas=horas)
+
+
+def enviar_plantilla_bienvenida(numero: str) -> tuple[bool, str]:
+    from wa_entrega_alertas import enviar_plantilla_bienvenida as _tpl
+
+    return _tpl(numero)
+
+
+def enviar_whatsapp_respetando_ventana(
+    numero_raw: str,
+    cuerpo: str,
+    *,
+    etiqueta: str = "alerta",
+    origen: str = "pipeline",
+) -> tuple[bool, str, bool]:
+    from wa_entrega_alertas import enviar_alerta_wa_configurada
+
+    return enviar_alerta_wa_configurada(
+        numero_raw, cuerpo, etiqueta=etiqueta, origen=origen
+    )
+
+
 def resumen_config_wa() -> str:
     if _wa_disabled():
         return "WA desactivado (TATAMI_WA_SKIP=1)"
@@ -350,6 +385,32 @@ def _enviar_a_lista(numeros: list[str], cuerpo: str, *, etiqueta: str = "lista")
         log_envio_wa(etiqueta, n, ok, msg)
 
 
+def _etiqueta_area_descargo_negativo(items: list[dict]) -> str:
+    """cocina | barra | cocina y barra | inventario — según cod_bodega de las líneas."""
+    try:
+        from estrategia_config import area_bodegas_barra, area_bodegas_cocina
+
+        barra = area_bodegas_barra()
+        cocina = area_bodegas_cocina()
+    except Exception:
+        barra, cocina = {"BOD-002", "BOD-003"}, {"BOD-001", "BOD-005"}
+
+    bods = {
+        (it.get("cod_bodega") or "").strip().upper()
+        for it in items
+        if (it.get("cod_bodega") or "").strip()
+    }
+    en_barra = bool(bods & barra)
+    en_cocina = bool(bods & cocina)
+    if en_barra and en_cocina:
+        return "cocina y barra"
+    if en_cocina:
+        return "cocina"
+    if en_barra:
+        return "barra"
+    return "inventario"
+
+
 def alerta_wa_descargo_stock_negativo(items: list[dict]) -> None:
     """
     items: [{cod_mp, nombre_mp, cod_bodega, stock_restante, unidad, cod_venta}, ...]
@@ -380,17 +441,21 @@ def alerta_wa_descargo_stock_negativo(items: list[dict]) -> None:
             f"(venta {it.get('cod_venta', '')})"
         )
     extra = f"\n… y {len(items) - 25} más" if len(items) > 25 else ""
+    area = _etiqueta_area_descargo_negativo(items)
     cuerpo = (
-        "⚠ Descargo inventario — stock negativo (barra)\n"
+        f"⚠ Descargo inventario — stock negativo ({area})\n"
         + "\n".join(lineas)
         + extra
     )
     enviar_alerta("Descargo stock negativo", cuerpo, estado="WARN")
-    nums = []
-    for env_k in ("ALERTA_WA_MOISES", "ALERTA_WA_FELIPE"):
-        n = (os.getenv(env_k) or "").strip()
-        if n:
-            nums.append(n)
+    if preview_alertas_activo():
+        nums = [destino_preview_alertas()]
+    else:
+        nums = []
+        for env_k in ("ALERTA_WA_MOISES", "ALERTA_WA_FELIPE"):
+            n = (os.getenv(env_k) or "").strip()
+            if n:
+                nums.append(n)
     _enviar_a_lista(nums, cuerpo)
 
 

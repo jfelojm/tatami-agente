@@ -13,13 +13,18 @@ _STRIP_ORDEN_TOKENS = ("COLEMUN",)
 _STRIP_ORDEN_RUCS = frozenset({"0992613092001"})
 
 
-def _ruc_normalizado(ruc: str) -> str:
+def ruc_normalizado(ruc: str) -> str:
+    """RUC Ecuador a 13 dígitos (Sheets a menudo pierde el 0 inicial)."""
     digits = re.sub(r"\D+", "", (ruc or "").strip().lstrip("'"))
     if not digits:
         return ""
     if len(digits) < 13:
         digits = digits.zfill(13)
     return digits
+
+
+# Alias legacy
+_ruc_normalizado = ruc_normalizado
 
 
 def aplica_strip_sufijo_orden_factura(razon_social: str = "", ruc: str = "") -> bool:

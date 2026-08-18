@@ -10,11 +10,14 @@ Uso:
   python generar_ordenes_compra.py --tipo barra --produccion    # escribe hoja ORDENES_COMPRA
 
 Criterio:
-  - PAR global por cod_mp (columna par_level en BD_MP_SISTEMA).
-  - Stock para comparar vs PAR = suma de stock_actual en **todas** las bodegas activas del MP.
+  - Solo MPs con activa≠NO en BD_MP_SISTEMA (inactivos no se reponen).
+  - PAR global por cod_mp (columna par_level en BD_MP_SISTEMA), ya incluye
+    buffer de batches barra (PAR del semi explotado a botellas).
+  - Stock para comparar vs PAR = suma bodegas + equivalente de botella
+    contenido en batches barra (SUB-051..054).
   - Ingreso de compra sigue cod_bodega_destino del ítem (ej. BOD-002 barra).
   - Proveedores filtrados por BD_PROV.Tipo y proveedor_inventario=SI.
-  - Cantidad a pedir = PAR - stock_total; unidades compra = ceil(cant_base / factor_conversion).
+  - Cantidad a pedir = PAR - stock_efectivo; unidades = ceil(cant_base / factor).
 """
 
 from __future__ import annotations
@@ -128,7 +131,7 @@ def proveedor_activo_hoy(ventana: str, hoy: date) -> bool:
 
 
 def cargar_stock_por_mp_bodega(tipo: str) -> dict[str, dict]:
-    """cod_mp -> línea con stock_total (todas las bodegas) vs par global."""
+    """cod_mp -> línea con stock efectivo (botella + equiv. batch) vs par global."""
     from inventario_stock_mp import mps_bajo_par
     from whatsapp_webhook import leer_bd_mp_sistema
 
@@ -140,12 +143,165 @@ def cargar_stock_por_mp_bodega(tipo: str) -> dict[str, dict]:
             "nombre_mp": info["nombre_mp"],
             "unidad_base": info["unidad_base"],
             "stock_actual": info["stock_total"],
+            "stock_botella": info.get("stock_botella", info["stock_total"]),
+            "stock_en_batch": info.get("stock_en_batch", 0.0),
             "stock_por_bodega": info["por_bodega"],
             "par_level": info["par_level"],
             "cantidad_base": info["cantidad_faltante"],
+            "cantidad_base_par": info["cantidad_faltante"],
+            "cantidad_base_batch": 0.0,
             "cod_bodega": bodega_pedido or "GLOBAL",
         }
     return out
+
+
+def demanda_mp_por_deficit_batches_barra(
+    rows: list[dict] | None = None,
+) -> tuple[dict[str, float], list[dict]]:
+    """
+    Déficit de batches barra (SUB-051..054) explotado a MPs componentes.
+
+    Si stock_batch < par_batch → explotar (par - stock) con la receta del batch
+    y devolver demanda extra en unidad_base de cada botella/MP.
+
+    Returns:
+      demanda: cod_mp -> cantidad extra
+      detalle: filas por batch con stock/par/déficit y MPs explotados
+    """
+    from descargo_subreceta import pseudo_mp_cod
+    from inventario_stock_mp import agrupar_stock_par_por_mp, norm_mp
+    from subreceta_consumo_mp import explotar_subreceta_a_mp, cargar_mp_por_unidad_subreceta
+    from subrecetas_bodegas_stock import SUBRECETAS_BARRA
+    from whatsapp_webhook import leer_bd_mp_sistema
+
+    agrupado = agrupar_stock_par_por_mp(rows if rows is not None else leer_bd_mp_sistema())
+    mp_por_unidad = cargar_mp_por_unidad_subreceta()
+    demanda: dict[str, float] = defaultdict(float)
+    detalle: list[dict] = []
+
+    for cod_sub in sorted(SUBRECETAS_BARRA):
+        pseudo = pseudo_mp_cod(cod_sub)
+        info = agrupado.get(pseudo) or agrupado.get(norm_mp(pseudo))
+        if not info:
+            continue
+        if not info.get("activa", True):
+            continue
+        par = float(info.get("par_level") or 0)
+        stock = float(info.get("stock_total") or 0)
+        if par <= STOCK_CERO_TOL:
+            continue
+        deficit = max(0.0, par - stock)
+        if deficit <= STOCK_CERO_TOL:
+            continue
+        explotado = explotar_subreceta_a_mp(
+            cod_sub, deficit, mp_por_unidad=mp_por_unidad
+        )
+        if not explotado:
+            continue
+        mps_activos: dict[str, float] = {}
+        for mp, cant in explotado.items():
+            if cant <= 0:
+                continue
+            info_mp = agrupado.get(mp) or agrupado.get(norm_mp(mp))
+            # Sin fila en maestro: se permite; con activa=NO: no pedir.
+            if info_mp is not None and not info_mp.get("activa", True):
+                continue
+            demanda[mp] += cant
+            mps_activos[mp] = cant
+        if not mps_activos:
+            continue
+        detalle.append(
+            {
+                "cod_subreceta": cod_sub,
+                "cod_mp_pseudo": pseudo,
+                "nombre_mp": info.get("nombre_mp") or cod_sub,
+                "unidad_base": info.get("unidad_base") or "",
+                "stock_total": round(stock, 4),
+                "par_level": round(par, 4),
+                "deficit": round(deficit, 4),
+                "mps": {k: round(v, 4) for k, v in sorted(mps_activos.items())},
+            }
+        )
+
+    return {k: round(v, 4) for k, v in demanda.items() if v > 0}, detalle
+
+
+def aplicar_demanda_batch_a_mps_bajo(
+    mps_bajo: dict[str, dict],
+    *,
+    tipo: str,
+    rows: list[dict] | None = None,
+) -> list[dict]:
+    """
+    Incorpora déficit de batches al PAR efectivo de cada botella (solo barra).
+
+    par_efectivo = par_botella + demanda_batch
+    cantidad_a_pedir = max(0, par_efectivo - stock)
+
+    Así, si el stock ya cubre botella + reposición de batch, no se pide.
+    Devuelve el detalle de batches usados (para logs).
+    """
+    if (tipo or "").strip().lower() != "barra":
+        return []
+
+    from inventario_stock_mp import agrupar_stock_par_por_mp
+    from whatsapp_webhook import leer_bd_mp_sistema
+
+    demanda, detalle = demanda_mp_por_deficit_batches_barra(rows)
+    if not demanda:
+        return detalle
+
+    rows_mp = rows if rows is not None else leer_bd_mp_sistema()
+    agrupado = agrupar_stock_par_por_mp(rows_mp)
+    bodega_pedido = TIPO_A_BODEGA.get("BARRA")
+
+    for cod_mp, extra in demanda.items():
+        if extra <= STOCK_CERO_TOL:
+            continue
+
+        if cod_mp in mps_bajo:
+            stock = float(mps_bajo[cod_mp]["stock_actual"])
+            par_botella = float(
+                mps_bajo[cod_mp].get("par_level_botella")
+                or mps_bajo[cod_mp]["par_level"]
+            )
+        else:
+            info = agrupado.get(cod_mp)
+            if not info or not info.get("activa", True):
+                continue
+            stock = float(info["stock_total"])
+            par_botella = float(info["par_level"])
+            mps_bajo[cod_mp] = {
+                "cod_mp_sistema": cod_mp,
+                "nombre_mp": info["nombre_mp"],
+                "unidad_base": info["unidad_base"],
+                "stock_actual": stock,
+                "stock_por_bodega": info["por_bodega"],
+                "par_level": par_botella,
+                "cantidad_base": 0.0,
+                "cantidad_base_par": 0.0,
+                "cantidad_base_batch": 0.0,
+                "cod_bodega": bodega_pedido or "GLOBAL",
+            }
+
+        par_efectivo = par_botella + extra
+        faltante = max(0.0, par_efectivo - stock)
+        base_par = max(0.0, par_botella - stock)
+
+        mps_bajo[cod_mp]["par_level_botella"] = round(par_botella, 4)
+        mps_bajo[cod_mp]["par_level"] = round(par_efectivo, 4)
+        mps_bajo[cod_mp]["cantidad_base_par"] = round(base_par, 4)
+        mps_bajo[cod_mp]["cantidad_base_batch"] = round(extra, 4)
+        mps_bajo[cod_mp]["cantidad_base"] = round(faltante, 4)
+
+    # Quitar MPs que solo entraron por batch y cuyo stock ya cubre par efectivo.
+    for cod in list(mps_bajo.keys()):
+        if float(mps_bajo[cod].get("cantidad_base") or 0) <= STOCK_CERO_TOL:
+            # Conservar si estaba bajo PAR botella (no debería pasar con faltante=0).
+            if float(mps_bajo[cod].get("cantidad_base_batch") or 0) > STOCK_CERO_TOL:
+                del mps_bajo[cod]
+
+    return detalle
 
 
 def cargar_items_prov_por_mp(proveedores: dict[str, dict], bodega: str | None) -> dict[str, list[dict]]:
@@ -347,6 +503,33 @@ def formatear_mensaje_whatsapp(prov: dict, lineas: list[dict]) -> str:
     )
 
 
+def _texto_stock_vs_par(ln: dict) -> str:
+    """
+    Texto legible stock vs PAR.
+    Muestra stock de botella (físico); si hay equiv. en batch, lo detalla aparte.
+    """
+    ub = (ln.get("unidad_base") or "").strip()
+    par = ln.get("par_level")
+    botella = ln.get("stock_botella")
+    en_batch = float(ln.get("stock_en_batch") or 0)
+    efectivo = ln.get("stock_actual")
+    if botella is None:
+        botella = efectivo
+    try:
+        botella_f = float(botella)
+        par_f = float(par)
+        ef_f = float(efectivo) if efectivo is not None else botella_f
+    except (TypeError, ValueError):
+        return f"Stock {efectivo} / PAR {par} {ub}".strip()
+
+    if en_batch > 0.05:
+        return (
+            f"Stock botella {botella_f:g} (+{en_batch:g} en batch → ef. {ef_f:g}) "
+            f"/ PAR {par_f:g} {ub}"
+        ).strip()
+    return f"Stock botella {botella_f:g} / PAR {par_f:g} {ub}".strip()
+
+
 def formatear_orden_texto(prov: dict, lineas: list[dict], *, fecha: date, tipo: str) -> str:
     sep = "=" * 72
     out = [
@@ -392,6 +575,8 @@ def generar_ordenes(
 
     proveedores = cargar_proveedores_por_tipo(tipo_l)
     mps_bajo = cargar_stock_por_mp_bodega(tipo_l)
+    # PAR ya incluye buffer de batches; stock efectivo ya suma equiv. en batch.
+    detalle_batches: list[dict] = []
     items_por_mp = cargar_items_prov_por_mp(proveedores, bodega)
 
     pedidos: dict[str, list[dict]] = defaultdict(list)
@@ -436,6 +621,7 @@ def generar_ordenes(
                 "lineas": lineas,
                 "mensaje_whatsapp": formatear_mensaje_whatsapp(prov, lineas),
                 "texto_orden": formatear_orden_texto(prov, lineas, fecha=hoy, tipo=tipo_l),
+                "batches_deficit": detalle_batches,
             }
         )
     return ordenes
@@ -507,6 +693,8 @@ def listar_mp_stock_cero_para_alertas(
     filas: list[dict] = []
     for cod, info in agrupado.items():
         if not _mp_en_area_barra(info):
+            continue
+        if not info.get("activa", True):
             continue
         stock = float(info["stock_total"])
         if stock > STOCK_CERO_TOL:

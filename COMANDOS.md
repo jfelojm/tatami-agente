@@ -498,7 +498,9 @@ Hay **dos archivos distintos**. Cada uno va en **su libro** de Google Sheets (no
 | Libro | ID (ejemplo) | Archivo a pegar | Menús |
 |-------|----------------|-----------------|--------|
 | **BD datos maestro** (`SPREADSHEET_ID`) | `1rTVMfsOBssx2R-Sbuj1SRx9NZSd_hinEa9IK_ahGqZY` | `scripts_apps_script/tatami_maestro_unificado.gs` | Tatami · Conteo |
-| **Masters Sheets / staging** (`STAGING_SPREADSHEET_ID`) | `1TJu70BNG4i3it4y51Eg3YlDNswLkh1QGRt6v-qAyexU` | `scripts_apps_script/tatami_staging.gs` o `deploy/STAGING_APPS_SCRIPT_COMPLETO.gs` | 🍱 Admin · 🧪 Tests · 🍣 Facturas · 📦 Traslados |
+| **Masters Sheets / staging** (`STAGING_SPREADSHEET_ID`) | `1TJu70BNG4i3it4y51Eg3YlDNswLkh1QGRt6v-qAyexU` | **Un solo archivo:** `scripts_apps_script/tatami_staging.gs` (copia idéntica: `deploy/STAGING_APPS_SCRIPT_COMPLETO.gs`) | 🍱 Admin · 🧪 Tests · 🍣 Facturas (+ OK Barra) · 📦 Traslados |
+
+No peques un script aparte para Barra: recepción `POR_RECIBIR_BARRA` ya va dentro de `tatami_staging.gs`.
 
 ### Instalación común
 

@@ -34,17 +34,32 @@ def _ultimo_cod_mp_desde_master(sheets) -> int:
     """
     res = sheets.spreadsheets().values().get(
         spreadsheetId=MASTER_ID,
-        range="BD_MP_SISTEMA!A:A",
+        range="BD_MP_SISTEMA!A:Z",
     ).execute()
     vals = res.get("values") or []
+    if not vals:
+        return 0
+    header_i = next(
+        (
+            i
+            for i, row in enumerate(vals)
+            if any((c or "").strip() == "cod_mp_sistema" for c in row)
+        ),
+        None,
+    )
+    if header_i is None:
+        return 0
+    headers = [(c or "").strip() for c in vals[header_i]]
+    try:
+        col = headers.index("cod_mp_sistema")
+    except ValueError:
+        return 0
     max_cod = 0
-    for row in vals:
-        if not row:
+    for row in vals[header_i + 1 :]:
+        if col >= len(row):
             continue
-        s = str(row[0] or "").strip()
-        if not s or s.lower() == "cod_mp_sistema":
-            continue
-        if not s.isdigit():
+        s = str(row[col] or "").strip()
+        if not s or not s.isdigit():
             continue
         try:
             n = int(s)
@@ -84,26 +99,38 @@ def configurar_staging_mp(creds: Credentials) -> None:
         spreadsheetId=STAGING_ID,
         range=f"{SHEET_NAME}!1:1"
     ).execute()
-    headers = result.get("values", [[]])[0]
+    headers = [(h or "").strip() for h in result.get("values", [[]])[0]]
     n_cols = len(headers)
     log.info(f"Columnas Form: {n_cols} — {headers}")
 
-    # Columnas de gestión al final
-    col_estado = n_cols
-    col_cod_mp = n_cols + 1
+    # Reutilizar columnas existentes; si faltan, agregar al final
+    col_estado = next((i for i, h in enumerate(headers) if h == "estado"), None)
+    col_cod_mp = next((i for i, h in enumerate(headers) if h == "cod_mp_sistema"), None)
+    if col_estado is None:
+        col_estado = n_cols
+        n_cols += 1
+    if col_cod_mp is None:
+        col_cod_mp = n_cols
+        n_cols += 1
 
     letra_estado = col_letra(col_estado)
     letra_cod_mp = col_letra(col_cod_mp)
     letra_nombre = "C"  # nombre_mp — 3ra columna después de Marca temporal y correo
 
-    log.info(f"estado → {letra_estado} | cod_mp_sistema → {letra_cod_mp}")
+    log.info(f"estado -> {letra_estado} | cod_mp_sistema -> {letra_cod_mp}")
 
     # Encabezados de gestión
     sheets.spreadsheets().values().update(
         spreadsheetId=STAGING_ID,
-        range=f"{SHEET_NAME}!{letra_estado}1:{letra_cod_mp}1",
+        range=f"{SHEET_NAME}!{letra_estado}1",
         valueInputOption="USER_ENTERED",
-        body={"values": [["estado", "cod_mp_sistema"]]}
+        body={"values": [["estado"]]}
+    ).execute()
+    sheets.spreadsheets().values().update(
+        spreadsheetId=STAGING_ID,
+        range=f"{SHEET_NAME}!{letra_cod_mp}1",
+        valueInputOption="USER_ENTERED",
+        body={"values": [["cod_mp_sistema"]]}
     ).execute()
 
     ultimo = _ultimo_cod_mp_desde_master(sheets)
@@ -120,9 +147,9 @@ def configurar_staging_mp(creds: Credentials) -> None:
         valueInputOption="USER_ENTERED",
         body={"values": [[formula_cod]]}
     ).execute()
-    log.info(f"Fórmula cod_mp_sistema aplicada — inicia en {siguiente}")
+    log.info(f"Formula cod_mp_sistema aplicada — inicia en {siguiente}")
 
-    total_cols = n_cols + 2
+    total_cols = max(n_cols, col_estado + 1, col_cod_mp + 1)
     requests_fmt = []
 
     # Freeze fila 1
@@ -243,7 +270,7 @@ def main() -> None:
     print(f"  URL: {url}")
     print()
     print("  cod_mp_sistema inicia en (último Master + 1) (formato 000)")
-    print("  estado → PENDIENTE / APROBADO / RECHAZADO")
+    print("  estado -> PENDIENTE / APROBADO / RECHAZADO")
     print("=" * 65 + "\n")
 
 

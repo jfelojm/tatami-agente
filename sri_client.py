@@ -75,6 +75,7 @@ class SriConfig:
     cert_p12_path: str
     cert_password: str
     ventana_dias: int = 7
+    ventana_excluir_hoy: bool = True
     ambiente: str = "produccion"
     portal_storage_state: str = ""
     portal_headless: bool = True
@@ -85,6 +86,7 @@ class SriConfig:
     recaptcha_enterprise: bool = True
     consulta_retries: int = 3
     descarga_modo: str = "portal"
+    portal_form_timeout_sec: int = 120
 
     @classmethod
     def from_env(cls) -> "SriConfig":
@@ -105,6 +107,11 @@ class SriConfig:
             ventana = int(os.getenv("SRI_VENTANA_DIAS") or "7")
         except ValueError:
             ventana = 7
+        excluir_hoy = (os.getenv("SRI_VENTANA_EXCLUIR_HOY") or "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+        )
         try:
             captcha_to = int(os.getenv("SRI_CAPTCHA_TIMEOUT_SEC") or "90")
         except ValueError:
@@ -130,6 +137,10 @@ class SriConfig:
         descarga = (os.getenv("SRI_DESCARGA_MODO") or "portal").strip().lower()
         if descarga not in ("portal", "soap", "auto"):
             descarga = "portal"
+        try:
+            form_to = int(os.getenv("SRI_PORTAL_FORM_TIMEOUT_SEC") or "120")
+        except ValueError:
+            form_to = 120
         return cls(
             ruc=(os.getenv("SRI_RUC") or "").strip(),
             portal_user=(os.getenv("SRI_PORTAL_USER") or "").strip(),
@@ -137,6 +148,7 @@ class SriConfig:
             cert_p12_path=(os.getenv("SRI_CERT_P12_PATH") or "").strip(),
             cert_password=(os.getenv("SRI_CERT_PASSWORD") or "").strip(),
             ventana_dias=max(1, min(ventana, 30)),
+            ventana_excluir_hoy=excluir_hoy,
             ambiente=amb,
             portal_storage_state=storage,
             portal_headless=headless,
@@ -147,6 +159,7 @@ class SriConfig:
             recaptcha_enterprise=recaptcha_ent,
             consulta_retries=max(1, min(reintentos, 6)),
             descarga_modo=descarga,
+            portal_form_timeout_sec=max(45, min(form_to, 300)),
         )
 
     def sesion_portal_guardada(self) -> bool:
@@ -182,13 +195,24 @@ class ComprobanteRecibido:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def ventana_fechas(dias: int, hasta: date | None = None) -> tuple[date, date]:
+def ventana_fechas(
+    dias: int,
+    hasta: date | None = None,
+    *,
+    excluir_hoy: bool = True,
+) -> tuple[date, date]:
     """
-    Ventana inclusive: hoy + `dias` días calendario previos.
-    Ej. hoy 11-jun y dias=7 -> 4-jun .. 11-jun (7 previos + hoy).
+    Ventana inclusive de `dias` días calendario.
+
+    excluir_hoy=True (default): no consulta el día actual; termina ayer.
+    Ej. hoy 01-jul y dias=3 -> 28-jun .. 30-jun.
+
+    excluir_hoy=False (legacy): hoy + `dias` días previos.
+    Ej. hoy 11-jun y dias=3 -> 8-jun .. 11-jun.
     """
-    fin = hasta or date.today()
-    inicio = fin - timedelta(days=max(1, dias))
+    ref = hasta or date.today()
+    fin = ref - timedelta(days=1) if excluir_hoy else ref
+    inicio = fin - timedelta(days=max(1, dias) - 1)
     return inicio, fin
 
 
@@ -548,7 +572,8 @@ class SriPortalClient:
         if preferred == "msedge":
             channels = ["msedge", "chrome"]
         elif preferred == "chrome":
-            channels = ["chrome", "msedge"]
+            # Sin fallback a Edge: en Windows Edge reusa sesion y rompe el perfil SRI.
+            channels = ["chrome"]
         else:
             channels = [preferred]
         channels = [c for c in channels if c in ("chrome", "msedge")]
@@ -641,28 +666,76 @@ class SriPortalClient:
             ) from e
         return sync_playwright
 
+    def _limpiar_lock_perfil_chrome(self, profile: Path) -> int:
+        """Elimina locks stale del perfil persistente (evita 'perfil en uso' en Windows)."""
+        removed = 0
+        lock_names = (
+            "SingletonLock",
+            "SingletonSocket",
+            "SingletonCookie",
+            "lockfile",
+            "DevToolsActivePort",
+        )
+        for base in (profile, profile / "Default"):
+            if not base.is_dir():
+                continue
+            for name in lock_names:
+                path = base / name
+                if not path.exists():
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
+
     def _launch_persistent(self, p, *, headless: bool):
         """Siempre abre Chrome con perfil persistente (crea carpeta si no existe)."""
         profile = self.config.profile_dir()
-        try:
-            ctx = self._try_launch_persistent_with_channel(p, profile, headless=headless)
-        except Exception as e:
-            err = str(e).lower()
-            if "existing" in err or "has been closed" in err or "user data directory" in err:
-                raise RuntimeError(
-                    "Chrome del SRI ya esta abierto (perfil en uso).\n"
-                    "Cierre TODAS las ventanas de Chrome que abrio --init-portal-session,\n"
-                    "presione ENTER en PowerShell para guardar sesion, y vuelva a lanzar la descarga."
-                ) from e
-            raise
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        if not headless:
+        last_err: Exception | None = None
+        for intento in range(2):
+            if intento:
+                n = self._limpiar_lock_perfil_chrome(profile)
+                if n:
+                    print(f"  Lock perfil SRI liberado ({n} archivo(s)); reintento...")
+                time.sleep(2)
             try:
-                page.bring_to_front()
-            except Exception:
-                pass
-        ctx._tatami_mode = "persistent"  # type: ignore[attr-defined]
-        return ctx, page
+                ctx = self._try_launch_persistent_with_channel(p, profile, headless=headless)
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                if not headless:
+                    try:
+                        page.bring_to_front()
+                    except Exception:
+                        pass
+                ctx._tatami_mode = "persistent"  # type: ignore[attr-defined]
+                return ctx, page
+            except Exception as e:
+                last_err = e
+                err = str(e).lower()
+                retryable = any(
+                    k in err
+                    for k in (
+                        "existing",
+                        "has been closed",
+                        "user data directory",
+                        "explorador existente",
+                        "browser has been closed",
+                        "target page, context or browser",
+                    )
+                )
+                if intento == 0 and retryable:
+                    continue
+                if retryable:
+                    raise RuntimeError(
+                        "Chrome/Edge del SRI ya esta abierto (perfil en uso).\n"
+                        "Cierre TODAS las ventanas de Chrome y Edge, espere 5 s,\n"
+                        "y vuelva a ejecutar la descarga."
+                    ) from e
+                raise
+        if last_err:
+            raise last_err
+        raise RuntimeError("No se pudo abrir navegador SRI")
 
     def _open_context(self, p, *, headless: bool):
         """Corridas automaticas: perfil persistente, o storage state legacy."""
@@ -772,9 +845,47 @@ class SriPortalClient:
             )
         )
 
+    def _navegar_directo_jsf_recibidos(self, page):
+        """URL JSF directa (mas fiable con sesion en perfil Chrome)."""
+        urls = [
+            u
+            for u in SRI_PORTAL_URLS
+            if "comprobantes-electronicos" in u and u != SRI_MENU_URL
+        ]
+        timeout = self.config.portal_form_timeout_sec
+        for url in urls:
+            print(f"  Navegacion directa SRI: {url}")
+            try:
+                page.goto(url, wait_until="commit", timeout=120_000)
+                for _ in range(30):
+                    if self._pagina_en_carga_sri(page):
+                        page.wait_for_timeout(2000)
+                        continue
+                    break
+                page.wait_for_timeout(2000)
+                if self._necesita_login(page):
+                    print("  Login Keycloak (URL directa)...")
+                    self._login_si_necesario(page)
+                work = self._esperar_formulario_consulta(page, timeout_sec=timeout)
+                if work is not None:
+                    print("  OK: formulario via URL directa.")
+                    return work
+            except RuntimeError:
+                raise
+            except Exception as e:
+                print(f"  WARN navegacion directa: {e}")
+        return None
+
     def _navegar_a_formulario_recibidos(self, page):
-        """Tuportal Angular -> menu -> JSF comprobantes (2 logins Keycloak posibles)."""
-        print(f"  Navegando menu SRI: {SRI_MENU_URL}")
+        """Tuportal Angular -> menu -> JSF; fallback URL JSF directa."""
+        timeout = self.config.portal_form_timeout_sec
+
+        # Con perfil persistente, la URL JSF suele ser mas rapida y estable que el menu Angular.
+        work = self._navegar_directo_jsf_recibidos(page)
+        if work is not None:
+            return work
+
+        print(f"  Reintento via menu SRI: {SRI_MENU_URL}")
         page.goto(SRI_MENU_URL, wait_until="commit", timeout=120_000)
         for _ in range(45):
             if self._pagina_en_carga_sri(page):
@@ -788,6 +899,10 @@ class SriPortalClient:
             self._login_si_necesario(page)
 
         if not self._click_menu_comprobantes_recibidos(page):
+            print("  WARN: menu no encontrado; probando URL directa otra vez...")
+            work = self._navegar_directo_jsf_recibidos(page)
+            if work is not None:
+                return work
             raise RuntimeError(
                 "No se encontro el menu 'Comprobantes electronicos recibidos' en SRI en linea."
             )
@@ -797,17 +912,25 @@ class SriPortalClient:
             print("  Login Keycloak (modulo comprobantes)...")
             self._login_si_necesario(page)
 
-        for _ in range(30):
-            work = self._buscar_work_formulario(page) or self._pagina_trabajo(page)
-            if self._en_formulario_consulta(work):
-                return work
-            if self._pagina_en_carga_sri(page):
-                page.wait_for_timeout(2000)
-                continue
-            page.wait_for_timeout(2000)
+        work = self._esperar_formulario_consulta(page, timeout_sec=timeout)
+        if work is not None:
+            return work
 
+        if self._necesita_login(page) or self._pagina_pide_captcha_login(page):
+            self._guardar_debug(page, "formulario_pide_login")
+            raise RuntimeError(
+                "SRI pide login o captcha. Cierre Chrome del SRI y renueve sesion:\n"
+                "  .\\ejecutar_facturas_sri.ps1 --init-portal-session"
+            )
+
+        work = self._navegar_directo_jsf_recibidos(page)
+        if work is not None:
+            return work
+
+        self._guardar_debug(page, "timeout_formulario")
         raise RuntimeError(
-            "Timeout esperando formulario de comprobantes recibidos en portal SRI."
+            "Timeout esperando formulario de comprobantes recibidos en portal SRI.\n"
+            "Revise logs/sri_debug/ y renueve sesion si hace falta."
         )
 
     def _navegar_formulario_manual(self, page):
@@ -2278,6 +2401,7 @@ class SriPortalClient:
         descargar_xml: bool,
     ) -> list[ComprobanteRecibido]:
         out: list[ComprobanteRecibido] = []
+        ruc_filtro = re.sub(r"\D", "", (os.getenv("SRI_PORTAL_XML_RUC_FILTRO") or "").strip())
         for fila in filas:
             clave = str(fila.get("clave") or "").strip()
             if not clave:
@@ -2288,7 +2412,11 @@ class SriPortalClient:
                 ruc_emisor=str(fila.get("ruc_emisor") or "").strip(),
                 razon_social=str(fila.get("razon_social") or "").strip(),
             )
-            if descargar_xml and fila.get("has_xml_link"):
+            ruc_fila = re.sub(r"\D", "", comp.ruc_emisor or "")
+            bajar_xml = bool(descargar_xml and fila.get("has_xml_link"))
+            if bajar_xml and ruc_filtro and ruc_filtro not in ruc_fila:
+                bajar_xml = False
+            if bajar_xml:
                 link_id = str(fila.get("xml_link_id") or "").strip()
                 try:
                     print(f"      XML portal fila {fila.get('idx')}: {clave[:12]}...")
@@ -2373,6 +2501,35 @@ class SriPortalClient:
             raise RuntimeError("No se encontro enlace XML en la fila del portal")
         self._cerrar_dialogo_xml(work)
         link.scroll_into_view_if_needed()
+
+        temp = Path(os.getenv("TEMP", ".")) / f"sri_xml_{int(time.time() * 1000)}.xml"
+        content = ""
+
+        # En el portal actual el click a lnkXml dispara la descarga directa del XML
+        # (sin diálogo "Archivo XML" / botón Descargar).
+        try:
+            with root_page.expect_download(timeout=45_000) as dl_info:
+                try:
+                    link.click(force=True, timeout=10_000)
+                except Exception:
+                    link.click(timeout=10_000)
+            download = dl_info.value
+            download.save_as(str(temp))
+            content = temp.read_text(encoding="utf-8", errors="replace")
+            try:
+                temp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            clave_norm = _normalizar_clave(clave) if clave else ""
+            if not clave_norm:
+                m = CLAVE_ACCESO_RE.search(content)
+                clave_norm = m.group(1) if m else ""
+            if not clave_norm:
+                raise RuntimeError("No se pudo determinar clave de acceso del XML portal")
+            return _normalizar_xml_descargado(clave_norm, content)
+        except Exception as e_direct:
+            print(f"      WARN XML directo falló ({e_direct}); intento dialogo...")
+
         try:
             link.click(force=True, timeout=10_000)
         except Exception:
@@ -2398,12 +2555,38 @@ class SriPortalClient:
         ).first
         if not btn.count():
             raise RuntimeError("Dialogo Archivo XML sin boton Descargar")
-        temp = Path(os.getenv("TEMP", ".")) / f"sri_xml_{int(time.time() * 1000)}.xml"
-        content = ""
+        try:
+            # El dialogo PrimeFaces a veces deja el boton "fuera del viewport"
+            # aunque sea visible → click normal hace timeout.
+            work.evaluate(
+                """() => {
+                    const dlg = [...document.querySelectorAll('.ui-dialog')]
+                        .find(d => (d.innerText || '').includes('Archivo XML'));
+                    if (!dlg) return;
+                    dlg.style.top = '40px';
+                    dlg.style.left = '40px';
+                    dlg.style.zIndex = '2147483647';
+                    const b = dlg.querySelector('input[value=\"Descargar\"], button');
+                    if (b) b.scrollIntoView({block: 'center', inline: 'center'});
+                }"""
+            )
+            btn.scroll_into_view_if_needed(timeout=5_000)
+        except Exception:
+            pass
+
+        def _click_descargar() -> None:
+            try:
+                btn.click(force=True, timeout=8_000)
+            except Exception:
+                try:
+                    btn.evaluate("el => el.click()")
+                except Exception:
+                    btn.click(timeout=8_000)
+
         try:
             try:
                 with root_page.expect_download(timeout=45_000) as dl_info:
-                    btn.click()
+                    _click_descargar()
                 download = dl_info.value
                 download.save_as(str(temp))
                 content = temp.read_text(encoding="utf-8", errors="replace")
@@ -2413,7 +2596,7 @@ class SriPortalClient:
                     or bool(re.search(r"\.xml(\?|$)", r.url, re.I)),
                     timeout=45_000,
                 ) as resp_info:
-                    btn.click()
+                    _click_descargar()
                 resp = resp_info.value
                 content = resp.text()
         finally:
