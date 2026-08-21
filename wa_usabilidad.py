@@ -336,7 +336,11 @@ def parece_nueva_operacion(texto: str) -> bool:
     tl = _normalizar_respuesta_corta(t)
     if es_comando_menu(t):
         return True
-    if re.search(r"\b(ventas?|traslad|transfer|produc|prepar|conteo|stock|inventar)\w*", tl):
+    if re.search(
+        r"\b(ventas?|traslad|transfer|produc|prepar|conteo|stock|inventar|"
+        r"aprobar|rechazar|kardex)\w*",
+        tl,
+    ):
         return True
     if re.search(r"\bde\b.*\ba\b", tl) and re.search(r"\b0?\d{3}\b|cocina|barra|externa", tl):
         return True

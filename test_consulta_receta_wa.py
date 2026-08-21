@@ -52,6 +52,24 @@ class TestConsultaBajoPar(unittest.TestCase):
         prod = _parse_batch_lenguaje_natural(t, "59399")
         self.assertIsNotNone(prod)
 
+    def test_stock_old_par_no_es_bajo_par(self):
+        from whatsapp_webhook import (
+            _es_consulta_stock_producto,
+            _extraer_nombre_stock_producto,
+        )
+
+        for t in ("Stock old par", "stock old parr", "stock de old par"):
+            self.assertFalse(_es_consulta_bajo_par(t), t)
+            self.assertTrue(_es_consulta_stock_producto(t), t)
+            self.assertIn("old par", _extraer_nombre_stock_producto(t) or "")
+
+    def test_stock_bajo_par_sigue_siendo_lista(self):
+        from whatsapp_webhook import _es_consulta_stock_producto
+
+        t = "stock bajo par"
+        self.assertTrue(_es_consulta_bajo_par(t))
+        self.assertFalse(_es_consulta_stock_producto(t))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -945,6 +945,10 @@ def _produccion_pendiente_obsoleta(pending: dict, texto: str, wa_id: str) -> boo
     """True si el usuario pide otra sub distinta a la pending (evita bucle en bodega)."""
     if not pending:
         return False
+    tu = (texto or "").strip().upper()
+    # Aprobar/rechazar conteo (u otros comandos de inventario) ganan sobre pedir bodega
+    if _es_comando_conteo(tu) or tu.startswith("INICIAR CONTEO"):
+        return True
     if not parece_nueva_operacion(texto):
         return False
     # Mientras pedimos bodega, "Producir" / "Subreceta" no reinician el flujo
@@ -6212,6 +6216,9 @@ def _es_consulta_bajo_par(texto: str) -> bool:
     t = re.sub(r"\s+", " ", (texto or "").strip().lower())
     if not t:
         return False
+    # «stock old par» / whisky Old Parr ≠ consulta de par level
+    if _extraer_nombre_stock_producto(texto):
+        return False
     if not re.search(r"\bpar\b", t) and "par level" not in t:
         return False
     if re.search(
@@ -6222,6 +6229,98 @@ def _es_consulta_bajo_par(texto: str) -> bool:
     if re.search(r"\b(producto?s?|insumo?s?|materia?s?\s+prima?s?)\b", t):
         return True
     return False
+
+
+def _extraer_nombre_stock_producto(texto: str) -> str | None:
+    """
+    Nombre del producto en consultas tipo «stock old par», «stock de papa».
+    None si no es esa forma o si es «stock bajo par» (lista crítica).
+    """
+    raw = re.sub(r"\s+", " ", (texto or "").strip())
+    if not raw:
+        return None
+    t = raw.lower()
+    # Lista de bajo PAR — no es stock de un producto
+    if re.search(r"\b(bajo|debajo)\s+par\b", t) or "par level" in t:
+        return None
+    if re.search(r"\bpar\s+level\b", t):
+        return None
+    m = re.match(
+        r"^(?:stock|existencia|inventario)\s+(?:de\s+|del\s+|de\s+la\s+|de\s+los?\s+)?"
+        r"(.+)$",
+        t,
+        re.I,
+    )
+    if m:
+        nom = (m.group(1) or "").strip(" .,?¿¡!")
+        if nom and nom not in ("par", "bajo par", "critico", "crítico"):
+            return nom
+    m = re.match(
+        r"^(?:donde|dónde)\s+(?:esta|está|hay)\s+(?:el\s+|la\s+|los?\s+)?"
+        r"(.+)$",
+        t,
+        re.I,
+    )
+    if m:
+        nom = (m.group(1) or "").strip(" .,?¿¡!")
+        if nom:
+            return nom
+    return None
+
+
+def _es_consulta_stock_producto(texto: str) -> bool:
+    return bool(_extraer_nombre_stock_producto(texto))
+
+
+def _texto_stock_producto_wa(texto: str) -> str:
+    nombre = _extraer_nombre_stock_producto(texto) or (texto or "").strip()
+    r = tool_stock_ingrediente({"nombre_mp": nombre})
+    if not r.get("encontrado"):
+        return r.get("mensaje") or f"No encontré '{nombre}' en el sistema."
+    if r.get("requiere_eleccion"):
+        return (r.get("mensaje") or "Varios productos parecidos.").strip()
+    resultados = r.get("resultados") or []
+    if not resultados:
+        return f"No encontré stock para '{nombre}'."
+    nom = (resultados[0].get("nombre_mp") or nombre).strip()
+    total = resultados[0].get("stock_total_mp")
+    par = resultados[0].get("par_level")
+    uni = (resultados[0].get("unidad_base") or "").strip()
+    lines = [
+        f"*{nom}*",
+        f"Stock total: {total:g} {uni}".strip(),
+    ]
+    if par and float(par) > 0:
+        lines.append(f"PAR: {float(par):g} {uni}".strip())
+        if resultados[0].get("bajo_par_global"):
+            lines.append("Estado: bajo PAR")
+    if len(resultados) > 1 or any(x.get("bodega") for x in resultados):
+        lines.append("")
+        lines.append("Por bodega:")
+        for it in resultados:
+            bod = (it.get("bodega") or "?").strip()
+            lines.append(
+                f"• {bod}: {it.get('stock_actual'):g} {(it.get('unidad_base') or '').strip()}"
+            )
+    return "\n".join(lines)
+
+
+async def _manejar_consulta_stock_producto_wa(
+    wa_id: str,
+    msg: dict | None,
+    texto: str = "",
+) -> None:
+    """Stock de un producto por nombre — directo, sin LLM."""
+    try:
+        await _feedback_procesando(wa_id, msg)
+        out = await asyncio.to_thread(_texto_stock_producto_wa, texto)
+        await _enviar_texto_largo_wa(wa_id, out)
+    except Exception as e:
+        print(f"[Meta] consulta stock producto wa_id={wa_id!r} texto={texto!r}: {e}")
+        await enviar_mensaje_meta(
+            wa_id,
+            "No pude consultar el stock. Intenta de nuevo en un momento.",
+        )
 
 
 def _extraer_top_par(texto: str) -> int:
@@ -6626,7 +6725,9 @@ Si pide ranking de un periodo (semana/mes): `ventas_por_plato` con incluir_produ
 NUNCA inventes productos (ej. TATAMI WINGS, EDAMAME) que no esten en `ranking` o `platos` de la tool.
 Si la lista es larga y no hay texto_whatsapp, continua en mensajes siguientes sin inventar filas.
 Si te piden listados de stock negativo, usa la tool stocks_negativos (no adivines nombres ni cantidades).
-Si te piden productos bajo par level, usa la tool stock_critico y devuelve el listado completo salvo que el usuario pida \"top N\".
+Si te piden productos bajo par level (\"bajo par\", \"insumos bajo par\", \"par level\"), usa la tool stock_critico y devuelve el listado completo salvo que el usuario pida \"top N\".
+IMPORTANTE: \"stock old par\", \"stock de old parr\", \"stock buchanan\" es stock de UN producto (whisky/marca). Usa stock_ingrediente con ese nombre. NUNCA interpretes \"Old Parr\" / \"old par\" como \"bajo par\".
+Si te piden stock / existencia / donde esta un producto concreto, usa stock_ingrediente (no stock_critico).
 Si te piden valorizacion de inventario, usa inventario_valorizado (y si preguntan por bodegas usa inventario_por_bodega).
 Si piden el valorizado de un producto o materia prima por nombre (ej. camarones, aceite), llama inventario_valorizado con nombre_mp o buscar igual al texto que dio el usuario; no listes solo el top global sin filtrar por nombre.
 Si te piden facturas pendientes/parciales, usa facturas_parciales e items_pendientes_factura.
@@ -7447,6 +7548,13 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
                     )
                 return
 
+            # Prioridad: APROBAR TODO / conteo con sesión activa no queda atrapado
+            # en producción pendiente (pedir bodega / confirmar).
+            if get_sesion_activa(wa_id) and _es_comando_conteo(texto_upper):
+                if wa_id in _pending_prod_sub:
+                    _pending_prod_sub.pop(wa_id, None)
+                    print(f"[Meta] {wa_id}: clear produccion_pendiente → priorizar conteo")
+
             # Producción pendiente de confirmación — no caer al LLM con «ai» u otros typos
             if wa_id in _pending_prod_sub:
                 pending = _pending_prod_sub[wa_id]
@@ -7614,6 +7722,16 @@ async def procesar_mensaje(wa_id: str, msg: dict) -> None:
             if _es_consulta_receta_plato(texto):
                 print(f"[Meta] {wa_id}: route=receta_plato")
                 await _manejar_consulta_receta_plato_wa(wa_id, texto, msg)
+                return
+
+            # Stock de un producto (ej. «stock old par») — antes que bajo PAR / LLM
+            if _es_consulta_stock_producto(texto):
+                if not puede_consultar_inventario(wa_id):
+                    await enviar_mensaje_meta(wa_id, MSG_SIN_PERMISO_CONSULTA)
+                    return
+                print(f"[Meta] {wa_id}: route=stock_producto")
+                _limpiar_pick_produccion(wa_id)
+                await _manejar_consulta_stock_producto_wa(wa_id, msg, texto)
                 return
 
             # Insumos bajo par level — sin LLM (antes que producción/batch)

@@ -293,6 +293,23 @@ class TestResolverProduccionNombre(unittest.TestCase):
             _produccion_pendiente_obsoleta(pending, "Subreceta", "593987122959")
         )
 
+    def test_pendiente_obsoleta_aprobar_todo_conteo(self) -> None:
+        pending = {"cods": ["054"], "awaiting_bodega": True, "area": "barra"}
+        self.assertTrue(
+            _produccion_pendiente_obsoleta(pending, "Aprobar todo", "593987122959")
+        )
+        self.assertTrue(
+            _produccion_pendiente_obsoleta(pending, "APROBAR TODO", "593987122959")
+        )
+
+    def test_pendiente_obsoleta_rechazar_conteo(self) -> None:
+        pending = {"cods": ["054"], "awaiting_bodega": True, "area": "barra"}
+        self.assertTrue(
+            _produccion_pendiente_obsoleta(
+                pending, "RECHAZAR Vino Mini Chandon", "593987122959"
+            )
+        )
+
     def test_match_camaron_caramelizado_alias(self) -> None:
         cods = _match_sub_codigos_en_texto("Producir camaron caramelizado en 005")
         self.assertIn("026", cods)
