@@ -664,7 +664,7 @@ function buildConteoPayloadFromActiveSheet_() {
   }
 
   var numRows = lastRow - 7 + 1;
-  var range = sh.getRange(7, 1, numRows, 8);
+  var range = sh.getRange(7, 1, numRows, 9);
   var values = range.getValues();
   var lines = [];
   var errores = [];
@@ -681,8 +681,8 @@ function buildConteoPayloadFromActiveSheet_() {
 
     var lineNo = row[0];
     var codBod = row[2] != null ? String(row[2]).trim() : '';
-    var rawCf = row[6];
-    var notas = row[7] != null ? String(row[7]).trim() : '';
+    var rawCf = row[7];
+    var notas = row[8] != null ? String(row[8]).trim() : '';
 
     if (rawCf === '' || rawCf === null) {
       continue;

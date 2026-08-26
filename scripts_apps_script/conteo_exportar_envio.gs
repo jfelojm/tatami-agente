@@ -11,12 +11,14 @@
  * Uso operativo:
  * 1) Plantilla CONTEO (python plantilla_conteo_sheets.py --produccion …).
  * 2) Pegar este .gs en Extensiones → Apps Script, guardar, recargar el libro.
- * 3) Rellenar columna conteo_fisico (G) en todas las filas con MP.
+ * 3) Rellenar columna conteo_fisico (H) en todas las filas con MP.
  * 4) Menú Conteo → Enviar a Tatami (recomendado) o Exportar JSON (respaldo / soporte).
  *
  * Layout (plantilla_conteo_sheets.py):
  *   B2 = ciclo_id  |  B3 = enviado_por  |  B4 = enviado_por_contacto  |  B5 = observaciones
  *   Fila 6 = cabeceras | datos desde fila 7
+ *   A=line_no B=cod_mp C=bodega D=categoria E=nombre F=unidad G=stock H=conteo_fisico I=notas
+ *   Filas sin cod_mp (separadores de categoría) se omiten al enviar.
  *
  * Requisito columna B (cod_mp_sistema): en Sheets debe ser Texto plano (Formato → Número → Texto sin formato)
  * para conservar ceros a la izquierda (p. ej. "001"). Si la columna es número, la celda pasa a ser 1 y el JSON
@@ -67,7 +69,7 @@ function buildConteoPayloadFromActiveSheet_() {
   }
 
   var numRows = lastRow - 7 + 1;
-  var range = sh.getRange(7, 1, numRows, 8);
+  var range = sh.getRange(7, 1, numRows, 9);
   var values = range.getValues();
   var lines = [];
   var errores = [];
@@ -85,8 +87,8 @@ function buildConteoPayloadFromActiveSheet_() {
 
     var lineNo = row[0];
     var codBod = row[2] != null ? String(row[2]).trim() : '';
-    var rawCf = row[6];
-    var notas = row[7] != null ? String(row[7]).trim() : '';
+    var rawCf = row[7];
+    var notas = row[8] != null ? String(row[8]).trim() : '';
 
     if (rawCf === '' || rawCf === null) {
       continue;

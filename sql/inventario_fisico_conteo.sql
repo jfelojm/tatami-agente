@@ -55,6 +55,7 @@ create table if not exists conteo_linea (
   cod_mp_sistema text not null,
   cod_bodega text not null,
   nombre_mp text,
+  categoria text,
   unidad_base text,
   stock_sistema_snapshot numeric(18, 6),
   costo_unitario_ref_snapshot numeric(18, 8),

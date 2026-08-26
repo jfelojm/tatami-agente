@@ -90,6 +90,29 @@ def _err(code: str, message: str, details: dict | None = None) -> None:
     raise SystemExit(1)
 
 
+CATEGORIA_SIN = "Sin categoría"
+
+
+def normalizar_categoria_conteo(raw: str | None) -> str:
+    """Categoría legible para orden/agrupar; vacío → Sin categoría."""
+    cat = (raw or "").strip()
+    return cat if cat else CATEGORIA_SIN
+
+
+def _clave_orden_categoria(cat: str, nombre: str) -> tuple[str, str]:
+    return (normalizar_categoria_conteo(cat).casefold(), (nombre or "").strip().casefold())
+
+
+def ordenar_mps_por_categoria(mps: list[dict]) -> list[dict]:
+    """Subrecetas quedan en el bloque de su propia categoria (mismo sort)."""
+    return sorted(
+        mps,
+        key=lambda r: _clave_orden_categoria(
+            r.get("categoria"), r.get("nombre_mp") or ""
+        ),
+    )
+
+
 def _load_bd_mp_por_bodega(cod_bodega: str) -> list[dict]:
     cod_bodega = (cod_bodega or "").strip()
     sh = _get_sheet()
@@ -105,7 +128,7 @@ def _load_bd_mp_por_bodega(cod_bodega: str) -> list[dict]:
     headers = [h.strip() for h in values[header_row_idx]]
     rows = values[header_row_idx + 1 :]
     try:
-        i_bod = headers.index("cod_bodega")
+        headers.index("cod_bodega")
     except ValueError:
         _err("SHEET_COLUMN", "Columna cod_bodega no encontrada en BD_MP_SISTEMA")
 
@@ -124,7 +147,78 @@ def _load_bd_mp_por_bodega(cod_bodega: str) -> list[dict]:
             continue
         vistos.add(cod)
         out.append(r)
+    return ordenar_mps_por_categoria(out)
+
+
+def _mapa_categoria_maestro(cod_bodega: str | None = None) -> dict[tuple[str, str], str]:
+    """(cod_mp, cod_bodega) → categoria normalizada desde BD_MP_SISTEMA."""
+    sh = _get_sheet()
+    ws = sh.worksheet("BD_MP_SISTEMA")
+    values = ws.get_all_values()
+    header_row_idx = next(
+        (i for i, r in enumerate(values) if any(c.strip() == "cod_mp_sistema" for c in r)),
+        None,
+    )
+    if header_row_idx is None:
+        return {}
+    headers = [h.strip() for h in values[header_row_idx]]
+    if "cod_mp_sistema" not in headers or "cod_bodega" not in headers:
+        return {}
+    out: dict[tuple[str, str], str] = {}
+    bod_filtro = (cod_bodega or "").strip()
+    for row in values[header_row_idx + 1 :]:
+        if not any((c or "").strip() for c in row):
+            continue
+        r = {headers[j]: row[j].strip() for j in range(min(len(headers), len(row)))}
+        cod = (r.get("cod_mp_sistema") or "").strip()
+        bod = (r.get("cod_bodega") or "").strip()
+        if not cod or not bod:
+            continue
+        if bod_filtro and bod != bod_filtro:
+            continue
+        out[(cod, bod)] = normalizar_categoria_conteo(r.get("categoria"))
     return out
+
+
+def _conteo_linea_soporta_categoria(sb) -> bool:
+    try:
+        sb.table("conteo_linea").select("categoria").limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _armar_lineas_snapshot(
+    ciclo_id: str,
+    cod_bodega: str,
+    mps: list[dict],
+    *,
+    incluir_categoria: bool,
+) -> list[dict]:
+    now = datetime.now(timezone.utc).isoformat()
+    stock_map = build_stock_calculado()
+    lineas: list[dict] = []
+    for i, r in enumerate(mps, start=1):
+        cod_mp = (r.get("cod_mp_sistema") or "").strip()
+        stock_mov = stock_mov_mp_bodega(stock_map, cod_mp, cod_bodega)
+        row = {
+            "ciclo_id": ciclo_id,
+            "line_no": i,
+            "cod_mp_sistema": cod_mp,
+            "cod_bodega": cod_bodega,
+            "nombre_mp": (r.get("nombre_mp") or "").strip() or None,
+            "unidad_base": (r.get("unidad_base") or "").strip() or None,
+            "stock_sistema_snapshot": round(stock_mov, 6),
+            "costo_unitario_ref_snapshot": round(_sheet_float(r.get("costo_unitario_ref")), 8)
+            if r.get("costo_unitario_ref")
+            else None,
+            "snapshot_at": now,
+            "conteo_fisico": None,
+        }
+        if incluir_categoria:
+            row["categoria"] = normalizar_categoria_conteo(r.get("categoria"))
+        lineas.append(row)
+    return lineas
 
 
 def cmd_crear_ciclo(args: argparse.Namespace) -> None:
@@ -192,28 +286,17 @@ def cmd_snapshot(args: argparse.Namespace) -> None:
     if not mps:
         _err("SNAPSHOT_EMPTY", f"Sin filas en BD_MP_SISTEMA para cod_bodega={cod_bodega}")
 
-    now = datetime.now(timezone.utc).isoformat()
-    stock_map = build_stock_calculado()
-    lineas: list[dict] = []
-    for i, r in enumerate(mps, start=1):
-        cod_mp = (r.get("cod_mp_sistema") or "").strip()
-        stock_mov = stock_mov_mp_bodega(stock_map, cod_mp, cod_bodega)
-        lineas.append(
-            {
-                "ciclo_id": ciclo_id,
-                "line_no": i,
-                "cod_mp_sistema": cod_mp,
-                "cod_bodega": cod_bodega,
-                "nombre_mp": (r.get("nombre_mp") or "").strip() or None,
-                "unidad_base": (r.get("unidad_base") or "").strip() or None,
-                "stock_sistema_snapshot": round(stock_mov, 6),
-                "costo_unitario_ref_snapshot": round(_sheet_float(r.get("costo_unitario_ref")), 8)
-                if r.get("costo_unitario_ref")
-                else None,
-                "snapshot_at": now,
-                "conteo_fisico": None,
-            }
+    con_cat = _conteo_linea_soporta_categoria(sb)
+    if not con_cat:
+        print(
+            "WARN: conteo_linea.categoria no existe aún. "
+            "Ejecute sql/add_conteo_linea_categoria.sql en Supabase. "
+            "Snapshot sin persistir categoría (la plantilla igual agrupa desde el maestro)."
         )
+    lineas = _armar_lineas_snapshot(
+        ciclo_id, cod_bodega, mps, incluir_categoria=con_cat
+    )
+    now = lineas[0]["snapshot_at"] if lineas else datetime.now(timezone.utc).isoformat()
 
     if not args.produccion:
         print(f"[DRY RUN] eliminaría {n_exist} líneas previas" if n_exist else "[DRY RUN] sin líneas previas")
@@ -911,30 +994,11 @@ def snapshot_ciclo_api(ciclo_id: str, *, reemplazar: bool = False) -> dict:
             "SNAPSHOT_EMPTY", f"Sin MPs en BD_MP_SISTEMA para {cod_bodega}"
         )
 
-    now = datetime.now(timezone.utc).isoformat()
-    stock_map = build_stock_calculado()
-    lineas: list[dict] = []
-    for i, r in enumerate(mps, start=1):
-        cod_mp = (r.get("cod_mp_sistema") or "").strip()
-        stock_mov = stock_mov_mp_bodega(stock_map, cod_mp, cod_bodega)
-        lineas.append(
-            {
-                "ciclo_id": ciclo_id,
-                "line_no": i,
-                "cod_mp_sistema": cod_mp,
-                "cod_bodega": cod_bodega,
-                "nombre_mp": (r.get("nombre_mp") or "").strip() or None,
-                "unidad_base": (r.get("unidad_base") or "").strip() or None,
-                "stock_sistema_snapshot": round(stock_mov, 6),
-                "costo_unitario_ref_snapshot": round(
-                    _sheet_float(r.get("costo_unitario_ref")), 8
-                )
-                if r.get("costo_unitario_ref")
-                else None,
-                "snapshot_at": now,
-                "conteo_fisico": None,
-            }
-        )
+    con_cat = _conteo_linea_soporta_categoria(sb)
+    lineas = _armar_lineas_snapshot(
+        ciclo_id, cod_bodega, mps, incluir_categoria=con_cat
+    )
+    now = lineas[0]["snapshot_at"] if lineas else datetime.now(timezone.utc).isoformat()
 
     if n_exist:
         sb.table("conteo_linea").delete().eq("ciclo_id", ciclo_id).execute()
@@ -953,6 +1017,7 @@ def snapshot_ciclo_api(ciclo_id: str, *, reemplazar: bool = False) -> dict:
         "lineas_insertadas": len(lineas),
         "estado": "BORRADOR_CONTEO",
         "reemplazo": bool(n_exist and reemplazar),
+        "categoria_persistida": con_cat,
     }
 
 
