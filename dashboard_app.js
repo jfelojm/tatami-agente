@@ -276,15 +276,15 @@
       const metrics = fmt === 'pct'
         ? [
           card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), d.nota_costo || ''),
+          card('Costo de Venta', pctCompras + '%', 'Cuánto compré $' + compras.toLocaleString('es-EC')),
+          card('Food cost (piloto A)', pctFood + '%', '$' + s.costo_real.toLocaleString('es-EC') + ' · recetas'),
           card('Margen bruto', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
-          card('Food cost vendido', pctFood + '%', '$' + s.costo_real.toLocaleString('es-EC')),
-          card('Compras inventario', pctCompras + '%', '$' + compras.toLocaleString('es-EC')),
         ]
         : [
           card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), d.nota_costo || ''),
+          card('Cuánto compré', '$' + compras.toLocaleString('es-EC'), 'Costo de Venta ' + pctCompras + '%'),
+          card('Food cost (piloto A)', '$' + s.costo_real.toLocaleString('es-EC'), pctFood + '% · recetas · decidir A/B'),
           card('Margen bruto', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
-          card('Food cost vendido', '$' + s.costo_real.toLocaleString('es-EC'), pctFood + '% ventas · recetas'),
-          card('Compras inventario', '$' + compras.toLocaleString('es-EC'), pctCompras + '% ventas · tab Compras'),
         ];
       document.getElementById('rent-socios-metrics').innerHTML = metrics.join('');
 
@@ -336,15 +336,15 @@
     document.getElementById('rent-metrics').innerHTML = fmtOp === 'pct'
       ? [
         card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
+        card('Costo de Venta', pctComprasOp + '%', 'Cuánto compré $' + comprasOp.toLocaleString('es-EC')),
+        card('Food cost (piloto A)', pctFoodOp + '%', '$' + s.costo_real.toLocaleString('es-EC') + ' · recetas'),
         card('Margen bruto', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
-        card('Food cost vendido', pctFoodOp + '%', '$' + s.costo_real.toLocaleString('es-EC')),
-        card('Compras inventario', pctComprasOp + '%', '$' + comprasOp.toLocaleString('es-EC')),
       ].join('')
       : [
         card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
+        card('Cuánto compré', '$' + comprasOp.toLocaleString('es-EC'), 'Costo de Venta ' + pctComprasOp + '%'),
+        card('Food cost (piloto A)', '$' + s.costo_real.toLocaleString('es-EC'), pctFoodOp + '% · recetas · decidir A/B'),
         card('Margen bruto', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
-        card('Food cost vendido', '$' + s.costo_real.toLocaleString('es-EC'), pctFoodOp + '% ventas · recetas'),
-        card('Compras inventario', '$' + comprasOp.toLocaleString('es-EC'), pctComprasOp + '% ventas · tab Compras'),
       ].join('');
 
     const slicedOp = window.sliceRentSeries(d, window._periodFilter);
