@@ -329,7 +329,8 @@ def build_rentabilidad_from_catalog(
         },
         "platos": out_platos[:50],
         "nota_costo": (
-            "Margen bruto = ventas − food cost (recetas de lo vendido). "
-            "Compras inventario = Σ ENTRADA del período (tab Compras); incluye stock no vendido."
+            "Costo Real de Venta = consumo MP por recetas (opcion A). "
+            "Margen bruto = ventas − costo real. "
+            "Cuanto compre = compras inventario (tab Compras); no es consumo."
         ),
     }
