@@ -52,6 +52,7 @@ def agrupar_stock_par_por_mp(
     }
     """
     par_por_mp: dict[str, float] = {}
+    minimo_botellas_por_mp: dict[str, float] = {}
     meta: dict[str, dict[str, str]] = {}
     stock_por_bodega: dict[str, dict[str, float]] = defaultdict(dict)
     # Si alguna fila marca activa=NO, el MP queda inactivo para reposición.
@@ -66,6 +67,7 @@ def agrupar_stock_par_por_mp(
             continue
         stock = _to_float(r.get("stock_actual"))
         par = _to_float(r.get("par_level"))
+        minimo_botellas = _to_float(r.get("stock_minimo_botellas"))
         nombre = (r.get("nombre_mp") or "").strip()
         unidad = (r.get("unidad_base") or "").strip()
         if cod not in meta:
@@ -81,6 +83,8 @@ def agrupar_stock_par_por_mp(
             activa_por_mp.setdefault(cod, True)
         if par > 0:
             par_por_mp[cod] = par
+        if minimo_botellas > 0:
+            minimo_botellas_por_mp[cod] = minimo_botellas
         if bod:
             stock_por_bodega[cod][bod] = stock_por_bodega[cod].get(bod, 0.0) + stock
 
@@ -97,6 +101,9 @@ def agrupar_stock_par_por_mp(
             "unidad_base": m["unidad_base"],
             "stock_total": stock_total,
             "par_level": round(par, 4),
+            "stock_minimo_botellas": round(
+                minimo_botellas_por_mp.get(cod, 0.0), 4
+            ),
             "por_bodega": {k: round(v, 4) for k, v in sorted(por_bod.items())},
             "activa": activa,
             "bajo_par": par > 0 and stock_total < par,

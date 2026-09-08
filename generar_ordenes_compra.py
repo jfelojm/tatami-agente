@@ -13,6 +13,8 @@ Criterio:
   - Solo MPs con activa≠NO en BD_MP_SISTEMA (inactivos no se reponen).
   - PAR global por cod_mp (columna par_level en BD_MP_SISTEMA), ya incluye
     buffer de batches barra (PAR del semi explotado a botellas).
+  - En barra, stock_minimo_botellas define un piso físico de compra independiente
+    del PAR (p. ej. 2: una botella para copeo y otra para venta).
   - Stock para comparar vs PAR = suma bodegas + equivalente de botella
     contenido en batches barra (SUB-051..054).
   - Ingreso de compra sigue cod_bodega_destino del ítem (ej. BOD-002 barra).
@@ -46,6 +48,10 @@ BODEGAS_STOCK_ALERTA_BARRA = frozenset({"BOD-002", "BOD-003"})
 STOCK_CERO_TOL = 0.001
 
 DIA_MAP = {"LUN": 0, "MAR": 1, "MIE": 2, "JUE": 3, "VIE": 4, "SAB": 5, "DOM": 6}
+
+# Botran, Finest Call y Santero (MP 320) → Colemun si hay ítem en catálogo.
+_MARCAS_RUTA_COLEMUN = ("BOTRAN", "FINEST CALL", "FINESTCALL", "SANTERO")
+_MPS_RUTA_COLEMUN = frozenset({"320"})
 
 
 def _norm_cod_mp(cod: object) -> str:
@@ -131,13 +137,27 @@ def proveedor_activo_hoy(ventana: str, hoy: date) -> bool:
 
 
 def cargar_stock_por_mp_bodega(tipo: str) -> dict[str, dict]:
-    """cod_mp -> línea con stock efectivo (botella + equiv. batch) vs par global."""
-    from inventario_stock_mp import mps_bajo_par
+    """MPs bajo PAR o con mínimo de botellas configurado para el área."""
+    from inventario_stock_mp import (
+        agrupar_stock_par_por_mp,
+        aplicar_equiv_batches_barra_a_stock,
+    )
     from whatsapp_webhook import leer_bd_mp_sistema
 
+    tipo_l = (tipo or "").strip().lower()
     bodega_pedido = TIPO_A_BODEGA.get(tipo.upper()) if tipo.upper() in TIPO_A_BODEGA else None
+    agrupado = aplicar_equiv_batches_barra_a_stock(
+        agrupar_stock_par_por_mp(leer_bd_mp_sistema())
+    )
     out: dict[str, dict] = {}
-    for cod, info in mps_bajo_par(leer_bd_mp_sistema()).items():
+    for cod, info in agrupado.items():
+        if not info.get("activa", True):
+            continue
+        minimo_botellas = float(info.get("stock_minimo_botellas") or 0)
+        if not info.get("bajo_par") and not (
+            tipo_l == "barra" and minimo_botellas > 0
+        ):
+            continue
         out[cod] = {
             "cod_mp_sistema": cod,
             "nombre_mp": info["nombre_mp"],
@@ -149,7 +169,9 @@ def cargar_stock_por_mp_bodega(tipo: str) -> dict[str, dict]:
             "par_level": info["par_level"],
             "cantidad_base": info["cantidad_faltante"],
             "cantidad_base_par": info["cantidad_faltante"],
+            "cantidad_base_minimo": 0.0,
             "cantidad_base_batch": 0.0,
+            "stock_minimo_botellas": minimo_botellas,
             "cod_bodega": bodega_pedido or "GLOBAL",
         }
     return out
@@ -342,6 +364,98 @@ def cargar_items_prov_por_mp(proveedores: dict[str, dict], bodega: str | None) -
     return mp_items
 
 
+def _cod_proveedor_colemun(proveedores: dict[str, dict]) -> str | None:
+    for cod, prov in proveedores.items():
+        if "COLEMUN" in (prov.get("razon_social") or "").upper():
+            return _norm_cod_prov(cod)
+    return None
+
+
+def _es_producto_ruta_colemun(cod_mp: str, *textos: str) -> bool:
+    cod = _norm_cod_mp(cod_mp).lstrip("0") or "0"
+    if cod in {c.lstrip("0") for c in _MPS_RUTA_COLEMUN}:
+        return True
+    u = " ".join((t or "").strip() for t in textos if (t or "").strip()).upper()
+    return any(m in u for m in _MARCAS_RUTA_COLEMUN)
+
+
+def _elegir_item_colemun(nombre: str, items: list[dict], cp_colemun: str) -> dict | None:
+    cands = [it for it in items if _norm_cod_prov(it.get("cod_proveedor")) == cp_colemun]
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    nom_u = (nombre or "").upper()
+    tokens = [t for t in nom_u.replace("-", " ").split() if len(t) > 3]
+    best = cands[0]
+    best_score = -1
+    for it in cands:
+        desc = (it.get("descripcion_proveedor") or "").upper()
+        score = sum(1 for t in tokens if t in desc)
+        if score > best_score:
+            best_score = score
+            best = it
+    return best
+
+
+def elegir_item_proveedor_mp(
+    mp: dict,
+    items: list[dict],
+    *,
+    proveedores: dict[str, dict] | None = None,
+) -> dict | None:
+    """
+    Ítem de BD_ITEMS_PROV para armar la línea de pedido.
+    Botran / Finest Call / Santero → Colemun cuando exista en catálogo.
+    """
+    if not items:
+        return None
+    cod_mp = _norm_cod_mp(mp.get("cod_mp_sistema"))
+    nombre = (mp.get("nombre_mp") or "").strip()
+    descs = " ".join((it.get("descripcion_proveedor") or "") for it in items)
+    if _es_producto_ruta_colemun(cod_mp, nombre, descs) and proveedores:
+        cp_colemun = _cod_proveedor_colemun(proveedores)
+        if cp_colemun:
+            elegido = _elegir_item_colemun(nombre, items, cp_colemun)
+            if elegido:
+                return elegido
+    return items[0]
+
+
+def aplicar_stock_minimo_botellas(
+    mp: dict,
+    item: dict,
+    *,
+    tipo: str,
+) -> dict:
+    """
+    Aplica el piso físico de botellas a una línea candidata de compra.
+
+    El PAR compara contra stock efectivo (incluye equivalente en batches).
+    El mínimo compara únicamente contra stock físico de la MP, porque el contenido
+    de un batch no reemplaza una botella disponible para copeo/venta.
+    """
+    out = dict(mp)
+    minimo_botellas = _to_float(out.get("stock_minimo_botellas"))
+    if (tipo or "").strip().lower() != "barra" or minimo_botellas <= 0:
+        return out
+
+    factor = _to_float(item.get("factor_conversion"), 1.0) or 1.0
+    minimo_base = minimo_botellas * factor
+    stock_fisico = _to_float(out.get("stock_botella", out.get("stock_actual")))
+    faltante_minimo = max(0.0, minimo_base - stock_fisico)
+    faltante_par = max(
+        0.0,
+        _to_float(out.get("cantidad_base_par", out.get("cantidad_base"))),
+    )
+
+    out["stock_minimo_base"] = round(minimo_base, 4)
+    out["cantidad_base_minimo"] = round(faltante_minimo, 4)
+    out["cantidad_base"] = round(max(faltante_par, faltante_minimo), 4)
+    out["motivo_stock_minimo"] = faltante_minimo > faltante_par + STOCK_CERO_TOL
+    return out
+
+
 def _texto_item_barra(ln: dict, item: dict) -> str:
     nombre = (ln.get("nombre_mp") or "").strip()
     desc = (ln.get("descripcion_proveedor") or item.get("descripcion_proveedor") or "").strip()
@@ -350,6 +464,10 @@ def _texto_item_barra(ln: dict, item: dict) -> str:
 
 def _pedir_en_unidades_barra(ln: dict, item: dict) -> bool:
     """Hielo, pulpas, bolsas, etc. — no son botellas."""
+    # Una política explícita de botellas prevalece sobre palabras ambiguas como
+    # "ICE" (p. ej. JP Chenet Ice Edition sigue siendo una botella de vino).
+    if _to_float(ln.get("stock_minimo_botellas")) > 0:
+        return False
     t = _texto_item_barra(ln, item)
     for kw in (
         "HIELO",
@@ -584,8 +702,17 @@ def generar_ordenes(
     for cod_mp, mp in mps_bajo.items():
         items = items_por_mp.get(cod_mp)
         if not items:
+            if _to_float(mp.get("stock_minimo_botellas")) > 0:
+                print(
+                    f"  WARN: MP {cod_mp} {mp.get('nombre_mp')}: "
+                    "tiene stock_minimo_botellas pero no ítem de compra activo "
+                    f"para {bodega or tipo_l}; no se puede generar pedido."
+                )
             continue
-        item = items[0]
+        item = elegir_item_proveedor_mp(mp, items, proveedores=proveedores)
+        if not item:
+            continue
+        mp = aplicar_stock_minimo_botellas(mp, item, tipo=tipo_l)
         cp = item["cod_proveedor"]
         if cp not in proveedores:
             continue
@@ -639,6 +766,7 @@ def _linea_pedido_propuesta(
     tipo: str,
 ) -> dict:
     """Misma lógica que generar_ordenes para texto de cantidad sugerida."""
+    mp = aplicar_stock_minimo_botellas(mp, item, tipo=tipo)
     cant_base = float(mp.get("cantidad_base") or 0)
     factor = _to_float(item.get("factor_conversion"), 1.0) or 1.0
     linea = {
@@ -731,7 +859,11 @@ def listar_mp_stock_cero_para_alertas(
                 "Sin fila en BD_ITEMS_PROV para proveedor Barra con destino BOD-002"
             )
         else:
-            item = items_por_mp[cod][0]
+            item = elegir_item_proveedor_mp(mps_bajo[cod], items_por_mp[cod], proveedores=proveedores)
+            if not item:
+                fila["motivo_sin_pedido"] = "Sin ítem de catálogo para el MP"
+                filas.append(fila)
+                continue
             fila["descripcion_proveedor"] = (item.get("descripcion_proveedor") or "").strip()
             cp = item["cod_proveedor"]
             if cp not in proveedores:

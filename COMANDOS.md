@@ -274,6 +274,13 @@ python auditar_costos_subrecetas.py --cod 007 012 020
 
 **Compras:** `BD_ITEMS_PROV.cod_bodega_destino` (obligatorio por ítem). Regla operativa (jun-2026):
 
+**Mínimo operativo de botellas (barra):** `BD_MP_SISTEMA.stock_minimo_botellas`
+es un piso de compra independiente del `par_level`. Para vinos con copeo y venta
+por botella se usa `2` (una para copeo y otra para venta). La orden pide contra
+el mayor déficit entre PAR y mínimo físico, convirtiendo botellas mediante
+`BD_ITEMS_PROV.factor_conversion`; el stock contenido en batches no cuenta como
+botella física para este mínimo.
+
 | Área | Bodega ingreso |
 |------|----------------|
 | Proveedor **Barra** (`BD_PROV.Tipo`) | **BOD-002** |
