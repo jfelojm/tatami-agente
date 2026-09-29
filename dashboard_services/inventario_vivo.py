@@ -7,7 +7,7 @@ from typing import Any
 
 from bodegas_config import BODEGAS, normalizar_cod_bodega
 from inventario_stock_mp import norm_mp
-from recalcular_stock_sheets import _clave_stock, build_stock_calculado
+from recalcular_stock_sheets import _clave_stock, build_stock_calculado, normalizar_stock_visible
 
 
 # Dashboard: solo bodegas operativas con nombre visible
@@ -58,6 +58,7 @@ def clasificar_fila(
     dias_compra: float,
     costo_unit: float,
 ) -> dict[str, Any]:
+    stock = normalizar_stock_visible(stock)
     ratio = stock / par if par > 0 else (1.0 if stock > 0 else 0.0)
     dias_cob = stock / consumo_diario if consumo_diario > 0 else (999.0 if stock > 0 else 0.0)
     exceso = max(0.0, stock - par) if par > 0 else 0.0
@@ -136,7 +137,7 @@ def build_inventario_vivo(
     perdida_total = 0.0
 
     for (_cod, bod), meta in meta_mp.items():
-        stock = float(stock_map.get(_clave_stock(_cod, bod), 0.0))
+        stock = normalizar_stock_visible(float(stock_map.get(_clave_stock(_cod, bod), 0.0)))
         info = clasificar_fila(
             stock=stock,
             par=meta["par_level"],

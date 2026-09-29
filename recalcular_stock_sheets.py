@@ -45,6 +45,17 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 TIPOS_SUMA_DESTINO = {"AJUSTE_POSITIVO", "ENTRADA", "TRASLADO_ENTRADA"}
 TIPOS_RESTA_ORIGEN = {"SALIDA_VENTA", "AJUSTE_NEGATIVO", "TRASLADO_SALIDA"}
 
+# La hoja y el dashboard muestran 4 decimales. Por debajo de eso es residuo
+# de suma en float (p.ej. -1e-11), no stock real.
+_STOCK_CERO = 5e-5
+
+
+def normalizar_stock_visible(qty: float) -> float:
+    q = float(qty or 0)
+    if abs(q) < _STOCK_CERO:
+        return 0.0
+    return q
+
 # Si una bodega no tiene costo en catálogo/mov, heredar de otra fila del mismo MP.
 _BODEGA_PRIO_COSTO_HERMANO = ("BOD-001", "BOD-002", "BOD-005", "BOD-003")
 
@@ -137,7 +148,7 @@ def build_stock_calculado(movs: list[dict] | None = None) -> dict[tuple[str, str
             stock_calculado[k] += cantidad
         elif tipo in TIPOS_RESTA_ORIGEN:
             stock_calculado[k] -= cantidad
-    return dict(stock_calculado)
+    return {k: normalizar_stock_visible(v) for k, v in stock_calculado.items()}
 
 
 def _resolver_cod_mp_por_nombre_mp(
