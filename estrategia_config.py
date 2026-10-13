@@ -208,8 +208,12 @@ _TOOLS_INVENTARIO_VALOR = frozenset({"inventario_valorizado", "inventario_por_bo
 
 
 def tools_consulta_inventario() -> set[str]:
-    """Lectura de inventario, incluido valorizado y en qué bodega está."""
-    return set(_tools_inventario_consulta()) | set(_TOOLS_INVENTARIO_VALOR) | {"buscar_bodega"}
+    """Lectura de inventario, incluido valorizado y en qué bodega está.
+
+    BD_CONFIG guarda los tools en mayúsculas; las llamadas del webhook van en minúsculas.
+    """
+    base = {str(t).strip().lower() for t in _tools_inventario_consulta()}
+    return base | {t.lower() for t in _TOOLS_INVENTARIO_VALOR} | {"buscar_bodega"}
 
 
 def es_solo_consulta_inventario(telefono: str) -> bool:
@@ -246,7 +250,7 @@ def autorizado_tool(telefono: str, tool_name: str) -> bool:
         return True
 
     if roles == {"CONSULTA_INVENTARIO"}:
-        return tool_name in tools_consulta_inventario()
+        return (tool_name or "").strip().lower() in tools_consulta_inventario()
 
     if roles & ROLES_COCINA:
         if tool_name == "trasladar_mp":

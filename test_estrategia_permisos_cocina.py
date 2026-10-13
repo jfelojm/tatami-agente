@@ -125,7 +125,13 @@ class TestPermisosCocina(unittest.TestCase):
 class TestConsultaInventario(unittest.TestCase):
     def test_david_solo_modulos_inventario(self) -> None:
         tel = "593995781417"
-        with patch("config_sheets.cfg", return_value=None), patch.dict(
+
+        def _cfg(key, default=None):
+            if key == "perm_inventario_consulta_tools":
+                return "STOCK_CRITICO,STOCKS_NEGATIVOS,STOCK_INGREDIENTE,BODEGA_PRODUCTO,MP_INCOMPLETAS,KARDEX"
+            return None
+
+        with patch("config_sheets.cfg", side_effect=_cfg), patch.dict(
             "os.environ",
             {"ALLOWLIST_CONSULTA_INVENTARIO": tel},
             clear=False,
