@@ -6,6 +6,7 @@ import re
 import time
 
 from estrategia_config import (
+    es_solo_consulta_inventario,
     operador_recibe_aviso_stock_negativo,
     phone_roles,
     primary_role,
@@ -75,6 +76,8 @@ def parse_seleccion_menu(texto: str) -> int | None:
 
 def opciones_menu(telefono: str) -> list[tuple[int, str, int]]:
     """(número mostrado, etiqueta, id submenú legacy 1-5)."""
+    if es_solo_consulta_inventario(telefono):
+        return [(1, "Buscar stock de un producto", 5)]
     opts: list[tuple[int, str, int]] = [
         (1, "Trasladar insumo o semi", 1),
         (2, "Producir subreceta", 2),
@@ -117,6 +120,10 @@ def msg_menu_principal(telefono: str) -> str:
         lines.append("• *ventas de hoy*")
     if puede_consultar_inventario(telefono):
         lines.append("• *stock de papa*")
+        if es_solo_consulta_inventario(telefono):
+            lines.append("• *bajo par*")
+            lines.append("• *stocks negativos*")
+            lines.append("• *valorizado de inventario*")
     if operativo:
         lines.append("")
         lines.append("_Tip: en traslados y producción responde SÍ o NO para confirmar._")

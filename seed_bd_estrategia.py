@@ -72,7 +72,7 @@ BD_CONFIG_ROWS: list[list[str]] = [
     # --- C Roles (.env refs; teléfonos en BD_ESTRATEGIA o .env) ---
     [
         "rol_catalogo",
-        "ADMIN,SOCIO,ADMIN_COMPRAS,JEFE_BARRA,JEFE_COCINA,STAFF_BARRA,STAFF_COCINA,OPS_ALERTAS",
+        "ADMIN,SOCIO,ADMIN_COMPRAS,JEFE_BARRA,JEFE_COCINA,STAFF_BARRA,STAFF_COCINA,CONSULTA_INVENTARIO,OPS_ALERTAS",
         "Roles válidos",
         "csv",
     ],
@@ -85,6 +85,7 @@ BD_CONFIG_ROWS: list[list[str]] = [
     ["rol_JEFE_COCINA_env_wa", "ALERTA_WA_JACKY", "Jacky jefe cocina", "string"],
     ["rol_JEFE_COCINA_env_allowlist", "ALLOWLIST_JEFE_COCINA", "Jacky chat", "string"],
     ["rol_STAFF_BARRA_env_allowlist", "ALLOWLIST_STAFF_BARRA", "Personal barra sin costos", "string"],
+    ["rol_CONSULTA_INVENTARIO_env_allowlist", "ALLOWLIST_CONSULTA_INVENTARIO", "David consultas inventario", "string"],
     ["rol_STAFF_COCINA_env_allowlist", "ALLOWLIST_STAFF_COCINA", "Personal cocina sin costos", "string"],
     ["rol_OPS_ALERTAS_env_wa_moises", "ALERTA_WA_MOISES", "Moisés alertas ops", "string"],
     ["rol_OPS_ALERTAS_env_wa_israel", "ALERTA_WA_ISRAEL", "Israel alertas ops", "string"],
@@ -309,6 +310,7 @@ def _build_estrategia_matrix() -> list[list[str]]:
         ["Moisés", "SOCIO", "OPS_ALERTAS", "ALLOWLIST_SOCIO", "ALERTA_WA_MOISES", "", "SI", "Socio + alertas ops 8am"],
         ["Israel", "SOCIO", "OPS_ALERTAS", "ALLOWLIST_SOCIO", "ALERTA_WA_ISRAEL", "", "SI", "Socio + alertas ops 8am"],
         ["Socios (otros)", "SOCIO", "", "ALLOWLIST_SOCIO", "", "", "SI", "Agregar teléfonos en .env ALLOWLIST_SOCIO"],
+        ["David", "CONSULTA_INVENTARIO", "", "ALLOWLIST_CONSULTA_INVENTARIO", "ALERTA_WA_DAVID", "593995781417", "SI", "Solo consultas de inventario"],
         ["Staff barra", "STAFF_BARRA", "", "ALLOWLIST_STAFF_BARRA", "", "", "SI", "Sin costos; completar teléfonos"],
         ["Staff cocina", "STAFF_COCINA", "", "ALLOWLIST_STAFF_COCINA", "", "", "SI", "Sin costos; completar teléfonos"],
     ]

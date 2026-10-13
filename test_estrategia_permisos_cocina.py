@@ -122,6 +122,42 @@ class TestPermisosCocina(unittest.TestCase):
             self.assertTrue(ec.puede_trasladar(STAFF_COCINA))
 
 
+class TestConsultaInventario(unittest.TestCase):
+    def test_david_solo_modulos_inventario(self) -> None:
+        tel = "593995781417"
+        with patch("config_sheets.cfg", return_value=None), patch.dict(
+            "os.environ",
+            {"ALLOWLIST_CONSULTA_INVENTARIO": tel},
+            clear=False,
+        ):
+            ec._phone_to_roles.cache_clear()
+            self.assertTrue(ec.puede_consultar_inventario(tel))
+            for tool in (
+                "stock_ingrediente",
+                "stock_critico",
+                "stocks_negativos",
+                "mp_incompletas",
+                "kardex",
+                "buscar_bodega",
+                "inventario_valorizado",
+                "inventario_por_bodega",
+            ):
+                self.assertTrue(ec.autorizado_tool(tel, tool), tool)
+            for tool in (
+                "ventas_dia",
+                "trasladar_mp",
+                "conteo_iniciar",
+                "produccion_subreceta",
+                "compras_facturas_rango",
+                "ordenes_compra_barra",
+            ):
+                self.assertFalse(ec.autorizado_tool(tel, tool), tool)
+            self.assertTrue(ec.autorizado_comando(tel, "KARDEX papa"))
+            self.assertFalse(ec.autorizado_comando(tel, "INICIAR CONTEO BOD-002"))
+            opts = wu.opciones_menu(tel)
+            self.assertEqual(opts, [(1, "Buscar stock de un producto", 5)])
+
+
 class TestMenuCocina(unittest.TestCase):
     def test_menu_cocina_sin_ventas_ni_stock(self) -> None:
         with patch("wa_usabilidad.phone_roles", return_value={"STAFF_COCINA"}), patch(

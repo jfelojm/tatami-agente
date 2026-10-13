@@ -24,6 +24,7 @@ ROLE_PRIORITY: tuple[str, ...] = (
     "JEFE_COCINA",
     "STAFF_BARRA",
     "STAFF_COCINA",
+    "CONSULTA_INVENTARIO",
     "OPS_ALERTAS",
 )
 
@@ -39,6 +40,7 @@ ROLE_ALLOWLIST_ENV: dict[str, str] = {
     "JEFE_COCINA": "ALLOWLIST_JEFE_COCINA",
     "STAFF_BARRA": "ALLOWLIST_STAFF_BARRA",
     "STAFF_COCINA": "ALLOWLIST_STAFF_COCINA",
+    "CONSULTA_INVENTARIO": "ALLOWLIST_CONSULTA_INVENTARIO",
 }
 
 # Rol → variable .env WA individual (alertas)
@@ -202,6 +204,18 @@ def _tools_inventario_consulta() -> set[str]:
     )
 
 
+_TOOLS_INVENTARIO_VALOR = frozenset({"inventario_valorizado", "inventario_por_bodega"})
+
+
+def tools_consulta_inventario() -> set[str]:
+    """Lectura de inventario, incluido valorizado y en qué bodega está."""
+    return set(_tools_inventario_consulta()) | set(_TOOLS_INVENTARIO_VALOR) | {"buscar_bodega"}
+
+
+def es_solo_consulta_inventario(telefono: str) -> bool:
+    return phone_roles(telefono) == {"CONSULTA_INVENTARIO"}
+
+
 _TOOLS_VENTAS_COMPRAS = frozenset({
     "compras_facturas_rango",
     "compras_factura_detalle",
@@ -230,6 +244,9 @@ def autorizado_tool(telefono: str, tool_name: str) -> bool:
 
     if "ADMIN" in roles:
         return True
+
+    if roles == {"CONSULTA_INVENTARIO"}:
+        return tool_name in tools_consulta_inventario()
 
     if roles & ROLES_COCINA:
         if tool_name == "trasladar_mp":
@@ -322,6 +339,9 @@ def autorizado_comando(telefono: str, comando: str) -> bool:
         return False
     if "ADMIN" in roles:
         return True
+    if roles == {"CONSULTA_INVENTARIO"}:
+        cmd_inv = (comando or "").upper()
+        return cmd_inv.startswith("KARDEX") or cmd_inv.startswith("CSV")
     cmd = (comando or "").upper()
     if cmd.startswith("APROBAR") or cmd.startswith("RECHAZAR"):
         return bool(roles & roles_con_permiso("perm_conteo_aprobar_roles"))
