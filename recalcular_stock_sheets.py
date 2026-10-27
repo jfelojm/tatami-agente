@@ -105,11 +105,19 @@ def _fecha_dentro_ventana(fecha: str, cutoff: datetime | None) -> bool:
     return dt >= cutoff
 
 
-def paginar_todo(tabla, select):
+def paginar_todo(tabla, select, order: str = "cod_mov"):
+    # Sin orden estable, Postgres puede repetir u omitir filas entre páginas.
     rows = []
     offset = 0
     while True:
-        chunk = supabase.table(tabla).select(select).range(offset, offset + 999).execute().data
+        chunk = (
+            supabase.table(tabla)
+            .select(select)
+            .order(order)
+            .range(offset, offset + 999)
+            .execute()
+            .data
+        )
         rows.extend(chunk)
         if len(chunk) < 1000:
             break
