@@ -40,6 +40,7 @@ def main():
         res = (
             sb.table("hist_ventas")
             .select("fecha,num_documento,total")
+            .order("cod_venta")
             .range(offset, offset + page - 1)
             .execute()
         )

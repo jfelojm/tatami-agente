@@ -5,6 +5,8 @@ from supabase import create_client
 
 load_dotenv(override=True)
 
+from supabase_orden import orden_estable
+
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 
@@ -16,7 +18,7 @@ def paginar_todo(tabla, select, filters=None):
         if filters:
             for method, *args in filters:
                 q = getattr(q, method)(*args)
-        chunk = q.range(offset, offset + 999).execute().data
+        chunk = q.order(orden_estable(tabla)).range(offset, offset + 999).execute().data
         rows.extend(chunk)
         if len(chunk) < 1000:
             break

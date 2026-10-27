@@ -121,6 +121,7 @@ def calcular_consumo_diario(recetas: list[dict], *, verbose: bool = True) -> dic
             supabase.table("hist_ventas")
             .select(sel)
             .eq("estado_match", "PROCESADO")
+            .order("cod_venta")
             .range(offset, offset + 999)
             .execute()
         )

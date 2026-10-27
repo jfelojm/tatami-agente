@@ -658,6 +658,7 @@ def auditar_hist_ventas_dia(fecha: str) -> dict:
             supabase.table("hist_ventas")
             .select(sel)
             .eq("fecha", fecha)
+            .order("cod_venta")
             .range(offset, offset + 999)
             .execute()
         )

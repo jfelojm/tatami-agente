@@ -21,6 +21,8 @@ from collections import defaultdict
 from dotenv import load_dotenv
 from supabase import create_client
 
+from supabase_orden import orden_estable
+
 load_dotenv(override=True)
 
 TIPOS_SUMA = {"AJUSTE_POSITIVO", "ENTRADA", "TRASLADO_ENTRADA"}
@@ -32,7 +34,7 @@ def paginar(tabla: str, select: str) -> list:
     rows = []
     offset = 0
     while True:
-        chunk = sb.table(tabla).select(select).range(offset, offset + 999).execute().data
+        chunk = sb.table(tabla).select(select).order(orden_estable(tabla)).range(offset, offset + 999).execute().data
         rows.extend(chunk)
         if len(chunk) < 1000:
             break

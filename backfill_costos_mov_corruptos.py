@@ -61,6 +61,7 @@ def main() -> int:
                 .gte("fecha", f"{args.desde}T00:00:00")
                 .gt("costo_unitario", 0)
                 .lt("costo_unitario", umbral)
+                .order("cod_mov")
                 .range(offset, offset + 999)
                 .execute()
             )
@@ -109,6 +110,7 @@ def main() -> int:
                     ["AJUSTE_POSITIVO", "AJUSTE_NEGATIVO", "TRASLADO_ENTRADA", "TRASLADO_SALIDA"],
                 )
                 .lte("costo_unitario", 0)
+                .order("cod_mov")
                 .range(offset, offset + 999)
                 .execute()
             )

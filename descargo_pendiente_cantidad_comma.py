@@ -88,7 +88,7 @@ def _ventas_a_revisar(sb, desde: str, hasta: str | None) -> list[dict]:
         )
         if hasta:
             q = q.lte("fecha", hasta)
-        chunk = q.range(offset, offset + 999).execute().data or []
+        chunk = q.order("cod_venta").range(offset, offset + 999).execute().data or []
         out.extend(chunk)
         if len(chunk) < 1000:
             break

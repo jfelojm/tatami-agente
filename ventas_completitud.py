@@ -37,6 +37,7 @@ def id_documentos_hist(sb: Client, fecha: str) -> set[str]:
             sb.table("hist_ventas")
             .select("cod_venta")
             .eq("fecha", fecha)
+            .order("cod_venta")
             .range(offset, offset + 999)
             .execute()
             .data

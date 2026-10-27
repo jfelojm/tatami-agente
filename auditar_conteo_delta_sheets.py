@@ -22,6 +22,8 @@ from recalcular_stock_sheets import (
     _clave_stock,
 )
 
+from supabase_orden import orden_estable
+
 load_dotenv(override=True)
 
 
@@ -29,7 +31,10 @@ def paginar(sb, tabla: str, select: str) -> list[dict]:
     rows: list[dict] = []
     offset = 0
     while True:
-        chunk = sb.table(tabla).select(select).range(offset, offset + 999).execute().data or []
+        chunk = (
+            sb.table(tabla).select(select).order(orden_estable(tabla)).range(offset, offset + 999).execute().data
+            or []
+        )
         rows.extend(chunk)
         if len(chunk) < 1000:
             break

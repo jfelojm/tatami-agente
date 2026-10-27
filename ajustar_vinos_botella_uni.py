@@ -245,6 +245,7 @@ def ajustar_movimientos(sb, *, produccion: bool) -> dict[str, int]:
                 sb.table("mov_inventario")
                 .select("cod_mov,cantidad_mov,unidad_base,costo_unitario,costo_total")
                 .eq("cod_mp_sistema", cod)
+                .order("cod_mov")
                 .range(offset, offset + 999)
                 .execute()
                 .data
@@ -312,6 +313,7 @@ def saldo_ledger(sb, cod: str) -> float:
             sb.table("mov_inventario")
             .select("tipo_mov,cantidad_mov")
             .eq("cod_mp_sistema", cod)
+            .order("cod_mov")
             .range(offset, offset + 999)
             .execute()
             .data

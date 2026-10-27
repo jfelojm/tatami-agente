@@ -643,6 +643,7 @@ def _cargar_lineas_ya_descargadas(
                 supabase.table("hist_ventas")
                 .select("cod_venta,fecha,num_documento,idplato_sm")
                 .eq("fecha", f)
+                .order("cod_venta")
                 .range(offset, offset + 999)
                 .execute()
                 .data
@@ -740,6 +741,7 @@ def procesar_descargo(fecha: str | None = None, cod_smart_menu: str | None = Non
                     )
                     .eq("estado_match", "PROCESADO")
                     .eq("fecha", f)
+                    .order("cod_venta")
                     .range(offset, offset + 999)
                     .execute()
                     .data

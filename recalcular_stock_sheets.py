@@ -32,6 +32,7 @@ from gspread.utils import ValueInputOption, rowcol_to_a1
 
 from bodegas_config import normalizar_cod_bodega
 from google_credentials import google_credentials
+from supabase_orden import orden_estable
 
 load_dotenv(override=True)
 
@@ -105,24 +106,44 @@ def _fecha_dentro_ventana(fecha: str, cutoff: datetime | None) -> bool:
     return dt >= cutoff
 
 
-def paginar_todo(tabla, select, order: str = "cod_mov"):
-    # Sin orden estable, Postgres puede repetir u omitir filas entre páginas.
+def paginar_todo(tabla, select, order: str | None = None):
+    """Lee la tabla completa. Falla si hay filas repetidas u omitidas entre páginas."""
+    pk = order or orden_estable(tabla)
+    cols = [c.strip() for c in select.split(",")]
+    if pk not in cols and "*" not in cols:
+        select = f"{select},{pk}"
+    total_esperado: int | None = None
     rows = []
     offset = 0
     while True:
-        chunk = (
+        resp = (
             supabase.table(tabla)
-            .select(select)
-            .order(order)
+            .select(select, count="exact" if offset == 0 else None)
+            .order(pk)
             .range(offset, offset + 999)
             .execute()
-            .data
         )
+        if offset == 0:
+            total_esperado = resp.count
+        chunk = resp.data or []
         rows.extend(chunk)
         if len(chunk) < 1000:
             break
         offset += 1000
+    _validar_paginacion(tabla, pk, rows, total_esperado)
     return rows
+
+
+def _validar_paginacion(tabla: str, pk: str, rows: list[dict], total_esperado: int | None) -> None:
+    # Filas insertadas durante la lectura pueden sumar de más; faltar o repetir nunca es válido.
+    claves = [r.get(pk) for r in rows]
+    repetidas = len(claves) - len(set(claves))
+    if repetidas:
+        raise RuntimeError(f"paginar_todo({tabla}): {repetidas} filas repetidas por {pk}")
+    if total_esperado is not None and len(rows) < total_esperado:
+        raise RuntimeError(
+            f"paginar_todo({tabla}): se leyeron {len(rows)} de {total_esperado} filas"
+        )
 
 
 def _bodega_mov(m: dict, tipo: str) -> str:

@@ -49,6 +49,7 @@ def _entradas_qty_por_factura(sb) -> dict[str, Counter]:
             .select("num_documento,cantidad_mov")
             .eq("cod_mp_sistema", COD_MP)
             .eq("tipo_mov", "ENTRADA")
+            .order("cod_mov")
             .range(offset, offset + 999)
             .execute()
             .data
@@ -90,6 +91,7 @@ def main() -> int:
             sb.table("sri_comprobantes_recibidos")
             .select("num_factura,fecha_emision,xml_autorizado")
             .eq("ruc_emisor", RUC)
+            .order("clave_acceso")
             .range(offset, offset + 100)
             .execute()
             .data

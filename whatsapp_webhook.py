@@ -14,6 +14,7 @@ from datetime import date, timedelta, datetime
 from pathlib import Path
 from dotenv import load_dotenv
 from supabase import create_client
+from supabase_orden import orden_estable
 import gspread
 import anthropic
 import pytz
@@ -2121,6 +2122,7 @@ def _hist_ventas_para_consumo(fecha_ini: str, fecha_fin: str) -> list[dict]:
             .select(sel)
             .gte("fecha", fecha_ini)
             .lte("fecha", fecha_fin)
+            .order("cod_venta")
             .range(offset, offset + 999)
             .execute()
             .data
@@ -2256,7 +2258,7 @@ def supabase_query_all(sb, table, select, filters=None):
         if filters:
             for method, *args in filters:
                 q = getattr(q, method)(*args)
-        chunk = q.range(offset, offset + 999).execute().data
+        chunk = q.order(orden_estable(table)).range(offset, offset + 999).execute().data
         rows.extend(chunk)
         if len(chunk) < 1000:
             break
@@ -2875,6 +2877,7 @@ def tool_compras_facturas_rango(args):
             .in_("tipo_mov", list(TIPOS_MOV_COMPRA))
             .gte("fecha", f"{desde}T00:00:00")
             .lte("fecha", f"{hasta}T23:59:59")
+            .order("cod_mov")
             .range(offset, offset + 999)
             .execute()
             .data

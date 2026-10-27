@@ -26,6 +26,7 @@ from supabase import create_client
 
 from config_sheets import delta_abs_tol_conteo
 from recalcular_stock_sheets import _clave_stock, build_stock_calculado
+from supabase_orden import orden_estable
 from google_credentials import google_credentials
 
 load_dotenv(override=True)
@@ -76,7 +77,7 @@ def _paginar(sb, tabla: str, select: str, filtros: list[tuple] | None = None) ->
         q = sb.table(tabla).select(select)
         for op, col, val in filtros:
             q = getattr(q, op)(col, val)
-        chunk = q.range(offset, offset + 999).execute().data or []
+        chunk = q.order(orden_estable(tabla)).range(offset, offset + 999).execute().data or []
         rows.extend(chunk)
         if len(chunk) < 1000:
             break

@@ -74,6 +74,7 @@ def frescura_ventas_hoy(sb) -> dict:
                     "estado_documento,creado_en"
                 )
                 .eq("fecha", hoy)
+                .order("cod_venta")
                 .range(offset, offset + 999)
                 .execute()
                 .data
