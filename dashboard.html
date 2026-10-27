@@ -443,6 +443,20 @@ tr:hover td{background:#f5f4f0}
     { v: 1, n: 'Lun' }, { v: 2, n: 'Mar' }, { v: 3, n: 'Mié' },
     { v: 4, n: 'Jue' }, { v: 5, n: 'Vie' }, { v: 6, n: 'Sáb' }, { v: 7, n: 'Dom' },
   ];
+  const DIA_ABR = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'];
+
+  /** '2026-10-14' → 'Mié 14/10' (con anio: 'Mié 14/10/2026'). Otros formatos se devuelven igual. */
+  w.fmtDiaFecha = function (iso, conAnio) {
+    const s = String(iso || '');
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+    if (!m) return s;
+    const dt = new Date(+m[1], +m[2] - 1, +m[3]);
+    return `${DIA_ABR[dt.getDay()]} ${m[3]}/${m[2]}${conAnio ? '/' + m[1] : ''}`;
+  };
+
+  w.fmtRangoFechas = function (desde, hasta) {
+    return `${w.fmtDiaFecha(desde, true)} → ${w.fmtDiaFecha(hasta, true)}`;
+  };
 
   w.monthEnd = function (year, monthStr) {
     const y = parseInt(year, 10);
@@ -739,7 +753,7 @@ tr:hover td{background:#f5f4f0}
   w.syncDiasFromData = function (labels, containerId, labelId, onChange, selectedValues) {
     const c = document.getElementById(containerId);
     if (!c || !labels || !labels.length) return;
-    const items = labels.map(l => ({ v: l, n: l.slice(8) + '/' + l.slice(5, 7) }));
+    const items = labels.map(l => ({ v: l, n: w.fmtDiaFecha(l) }));
     const sel = selectedValues;
     const allDefault = sel == null;
     w.buildCheckboxPanel(c, items, { allByDefault: allDefault, labelId, prefix: 'Días', onChange });
@@ -872,6 +886,7 @@ tr:hover td{background:#f5f4f0}
     const el = document.getElementById(canvasId);
     if (!el) return chartRef;
     if (chartRef && chartRef.destroy) chartRef.destroy();
+    labels = (labels || []).map(l => w.fmtDiaFecha(l));
     const datasets = [...barDatasets];
     barDatasets.forEach((ds, i) => {
       datasets[i] = { ...ds, type: ds.type || 'bar', order: ds.order != null ? ds.order : 2 };
@@ -925,7 +940,7 @@ tr:hover td{background:#f5f4f0}
     if (chartRef && chartRef.destroy) chartRef.destroy();
     if (!filtroTrend || !filtroTrend.series || !filtroTrend.series.length) return null;
     const pal = ['#378ADD', '#1D9E75', '#BA7517', '#85B7EB', '#5DCAA5', '#a32d2d', '#0c447c', '#888780'];
-    const labels = filtroTrend.labels || [];
+    const labels = (filtroTrend.labels || []).map(l => w.fmtDiaFecha(l));
     const datasets = filtroTrend.series.map((s, i) => ({
       type: 'line',
       label: s.nombre,
@@ -1307,13 +1322,13 @@ tr:hover td{background:#f5f4f0}
     const comprasOp = s.costo_compras_periodo || 0;
     document.getElementById('rent-metrics').innerHTML = fmtOp === 'pct'
       ? [
-        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
+        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), fmtRangoFechas(d.periodo.desde, d.periodo.hasta)),
         card('Costo Real de Venta', pctFoodOp + '%', 'Consumo MP (recetas) $' + s.costo_real.toLocaleString('es-EC')),
         card('Cuánto compré', pctComprasOp + '%', '$' + comprasOp.toLocaleString('es-EC') + ' · compras'),
         card('Margen bruto', s.margen_real_pct + '%', '$' + s.margen_real.toLocaleString('es-EC')),
       ].join('')
       : [
-        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), `${d.periodo.desde} → ${d.periodo.hasta}`),
+        card('Ventas netas', '$' + s.vta.toLocaleString('es-EC'), fmtRangoFechas(d.periodo.desde, d.periodo.hasta)),
         card('Costo Real de Venta', '$' + s.costo_real.toLocaleString('es-EC'), pctFoodOp + '% · recetas (A)'),
         card('Cuánto compré', '$' + comprasOp.toLocaleString('es-EC'), pctComprasOp + '% ventas · compras'),
         card('Margen bruto', '$' + s.margen_real.toLocaleString('es-EC'), s.margen_real_pct + '% del neto'),
@@ -1387,7 +1402,11 @@ tr:hover td{background:#f5f4f0}
     const d = await res.json();
     const cons = d.consolidado || {};
     const resumen = d.resumen || {};
+    const val = d.valorizado || {};
+    const valBod = (val.por_bodega || []).map(b => `${esc(b.nombre)} ${money(b.valor)}`).join(' · ');
+    const sinCosto = val.items_con_stock_sin_costo ? ` · ${val.items_con_stock_sin_costo} sin costo ref.` : '';
     document.getElementById('inv-metrics').innerHTML = [
+      card('Inventario valorizado', money(val.total), (valBod || 'Stock × costo ref.') + sinCosto),
       card('Items', String(d.total_items), `${dias} días consolidados`),
       card('Costo oportunidad', '$' + (cons.costo_oportunidad || 0).toLocaleString('es-EC'), 'Stock sobre PAR × costo'),
       card('Pérdida venta est.', '$' + (cons.perdida_venta || 0).toLocaleString('es-EC'), 'Quiebre / bajo PAR × consumo'),
@@ -1400,14 +1419,15 @@ tr:hover td{background:#f5f4f0}
   function renderInvTree(arbol) {
     if (!arbol.length) return '<div style="padding:12px;color:#888780">Sin items para los filtros seleccionados</div>';
     let html = '';
+    const valTag = n => ` <span style="float:right;font-weight:400;color:#888780">${money(n.valor_stock)}</span>`;
     arbol.forEach(resp => {
-      html += `<div class="collapse-head" onclick="toggleCollapse(this)">${esc(resp.nombre)}</div><div class="collapse-body">`;
+      html += `<div class="collapse-head" onclick="toggleCollapse(this)">${esc(resp.nombre)}${valTag(resp)}</div><div class="collapse-body">`;
       (resp.bodegas || []).forEach(bod => {
-        html += `<div class="collapse-head" onclick="toggleCollapse(this)" style="margin-left:8px">${esc(bod.nombre)}</div><div class="collapse-body">`;
+        html += `<div class="collapse-head" onclick="toggleCollapse(this)" style="margin-left:8px">${esc(bod.nombre)}${valTag(bod)}</div><div class="collapse-body">`;
         (bod.categorias || []).forEach(cat => {
-          html += `<div class="collapse-head" onclick="toggleCollapse(this)" style="margin-left:16px">${esc(cat.nombre)}</div><div class="collapse-body"><table><thead><tr><th>MP</th><th class="r">Stock</th><th class="r">PAR</th><th class="r">Estado</th><th class="r">Oport. $</th><th class="r">Pérdida $</th></tr></thead><tbody>`;
+          html += `<div class="collapse-head" onclick="toggleCollapse(this)" style="margin-left:16px">${esc(cat.nombre)}${valTag(cat)}</div><div class="collapse-body"><table><thead><tr><th>MP</th><th class="r">Stock</th><th class="r">PAR</th><th class="r">Estado</th><th class="r">Valor $</th><th class="r">Oport. $</th><th class="r">Pérdida $</th></tr></thead><tbody>`;
           (cat.items || []).forEach(it => {
-            html += `<tr><td>${esc(it.nombre_mp)}</td><td class="r">${it.stock}</td><td class="r">${it.par_level}</td><td class="r"><span class="badge">${it.estado}</span></td><td class="r">$${(it.oportunidad_periodo || 0).toLocaleString('es-EC')}</td><td class="r">$${(it.perdida_periodo || 0).toLocaleString('es-EC')}</td></tr>`;
+            html += `<tr><td>${esc(it.nombre_mp)}</td><td class="r">${it.stock}</td><td class="r">${it.par_level}</td><td class="r"><span class="badge">${it.estado}</span></td><td class="r">${money(it.valor_stock)}</td><td class="r">$${(it.oportunidad_periodo || 0).toLocaleString('es-EC')}</td><td class="r">$${(it.perdida_periodo || 0).toLocaleString('es-EC')}</td></tr>`;
           });
           html += '</tbody></table></div>';
         });
@@ -1426,7 +1446,7 @@ tr:hover td{background:#f5f4f0}
     const d = await res.json();
     document.getElementById('rot-metrics').innerHTML = [
       card('Rotura contable', '$' + d.total_rotura.toLocaleString('es-EC'), d.lineas_ajuste + ' ajustes'),
-      card('Período', d.periodo.desde + ' → ' + d.periodo.hasta, d.nota || ''),
+      card('Período', fmtRangoFechas(d.periodo.desde, d.periodo.hasta), d.nota || ''),
     ].join('');
     let tb = '';
     (d.top_mps || []).forEach(m => {
@@ -1451,6 +1471,10 @@ tr:hover td{background:#f5f4f0}
 
   function esc(s) {
     return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function money(v) {
+    return '$' + (Number(v) || 0).toLocaleString('es-EC', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
 })();
 
@@ -1486,7 +1510,7 @@ function formatChartLabel(lbl) {
     const meses = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
     return meses[parseInt(m[2], 10)] + ' ' + m[1].slice(2);
   }
-  return s;
+  return fmtDiaFecha(s);
 }
 
 function periodFilterMatchesLabels(pf, labels) {
@@ -1658,7 +1682,7 @@ function renderSocios() {
   const pvSel = getSelectedPuntosVenta();
   const pvLbl = pvSel ? ' · ' + pvSel.map(k => ({BARRA:'Barra',COCINA:'Cocina',OTRO:'Otro'}[k] || k)).join(', ') : '';
   document.getElementById('socios-title').textContent =
-    `Resumen ${desde} → ${hasta}${pvLbl}`;
+    `Resumen ${fmtRangoFechas(desde, hasta)}${pvLbl}`;
 
   document.getElementById('socios-metrics').innerHTML = [
     cardSocios('Ventas netas', '$' + a.vta.toLocaleString('es-EC', {minimumFractionDigits:2}), `vs ant. ${deltaHtml(cmp.vta.delta_pct)} · vs año ${deltaHtml(cya.vta.delta_pct)}`),
@@ -2265,13 +2289,9 @@ function getTitle() {
   const meses = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
   const platoTxt = filtroLabelSuffix();
   if (mode === 'p') {
-    const dd = document.getElementById('pd-d').value;
-    const dm = meses[parseInt(document.getElementById('pd-m').value)];
-    const da = document.getElementById('pd-a').value;
-    const hd = document.getElementById('ph-d').value;
-    const hm = meses[parseInt(document.getElementById('ph-m').value)];
-    const ha = document.getElementById('ph-a').value;
-    return `${dd} ${dm} ${da} → ${hd} ${hm} ${ha}${platoTxt}`;
+    const v = id => document.getElementById(id).value;
+    const iso = (a, m, d) => `${a}-${m}-${String(Math.min(+d, +monthEnd(a, m))).padStart(2, '0')}`;
+    return fmtRangoFechas(iso(v('pd-a'), v('pd-m'), v('pd-d')), iso(v('ph-a'), v('ph-m'), v('ph-d'))) + platoTxt;
   }
   const anio = document.getElementById('ra').value;
   const mes = meses[parseInt(document.getElementById('rm').value)];

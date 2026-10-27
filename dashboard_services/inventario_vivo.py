@@ -135,6 +135,9 @@ def build_inventario_vivo(
     resumen_estados: dict[str, int] = defaultdict(int)
     costo_oportunidad = 0.0
     perdida_total = 0.0
+    valor_total = 0.0
+    valor_por_bodega: dict[str, float] = defaultdict(float)
+    con_stock_sin_costo = 0
 
     for (_cod, bod), meta in meta_mp.items():
         stock = normalizar_stock_visible(float(stock_map.get(_clave_stock(_cod, bod), 0.0)))
@@ -149,16 +152,23 @@ def build_inventario_vivo(
             continue
         perdida_periodo = round(info["perdida_venta_est"] * dias_periodo, 2)
         oportunidad_periodo = round(info["costo_oportunidad"] * dias_periodo, 2)
+        # Igual que inventario_valorizado (WA): stock negativo no valoriza.
+        valor_stock = round(max(stock, 0.0) * meta["costo_unitario_ref"], 2)
         row = {
             **meta,
             **info,
             "perdida_periodo": perdida_periodo,
             "oportunidad_periodo": oportunidad_periodo,
+            "valor_stock": valor_stock,
         }
         items.append(row)
         resumen_estados[info["estado"]] += 1
         costo_oportunidad += oportunidad_periodo
         perdida_total += perdida_periodo
+        valor_total += valor_stock
+        valor_por_bodega[bod] += valor_stock
+        if stock > 0 and meta["costo_unitario_ref"] <= 0:
+            con_stock_sin_costo += 1
 
     orden = {
         "NEGATIVO": 0, "QUIEBRE": 1, "CRITICO": 2, "BAJO_PAR": 3,
@@ -184,6 +194,15 @@ def build_inventario_vivo(
             "perdida_venta": round(perdida_total, 2),
             "dias_periodo": dias_periodo,
         },
+        "valorizado": {
+            "total": round(valor_total, 2),
+            "por_bodega": [
+                {"cod": b, "nombre": BODEGAS[b].nombre, "valor": round(valor_por_bodega[b], 2)}
+                for b in BODEGAS_INV
+                if valor_por_bodega.get(b)
+            ],
+            "items_con_stock_sin_costo": con_stock_sin_costo,
+        },
         "total_items": len(items),
         "bodegas": [
             {"cod": b, "nombre": BODEGAS[b].nombre, "responsabilidad": RESPONSABILIDAD.get(b, "")}
@@ -198,17 +217,32 @@ def _build_arbol(items: list[dict]) -> list[dict]:
     for it in items:
         tree[it["responsabilidad"]][it["nombre_bodega"]][it["categoria"]].append(it)
 
+    def _valor(nodes: list[dict]) -> float:
+        return round(sum(n["valor_stock"] for n in nodes), 2)
+
     out = []
     for resp in sorted(tree.keys()):
         bod_nodes = []
         for bod_n in sorted(tree[resp].keys()):
             cat_nodes = []
             for cat in sorted(tree[resp][bod_n].keys()):
+                cat_items = tree[resp][bod_n][cat]
                 cat_nodes.append({
                     "tipo": "categoria",
                     "nombre": cat,
-                    "items": tree[resp][bod_n][cat],
+                    "items": cat_items,
+                    "valor_stock": _valor(cat_items),
                 })
-            bod_nodes.append({"tipo": "bodega", "nombre": bod_n, "categorias": cat_nodes})
-        out.append({"tipo": "responsabilidad", "nombre": resp, "bodegas": bod_nodes})
+            bod_nodes.append({
+                "tipo": "bodega",
+                "nombre": bod_n,
+                "categorias": cat_nodes,
+                "valor_stock": _valor(cat_nodes),
+            })
+        out.append({
+            "tipo": "responsabilidad",
+            "nombre": resp,
+            "bodegas": bod_nodes,
+            "valor_stock": _valor(bod_nodes),
+        })
     return out
