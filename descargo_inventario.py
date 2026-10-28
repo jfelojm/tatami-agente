@@ -941,6 +941,7 @@ def procesar_descargo(fecha: str | None = None, cod_smart_menu: str | None = Non
                 "registrado_por": "AGENTE",
                 "observaciones": (
                     f"Descargo automático receta {cod_receta} var={variedad} bod={bodega}"
+                    + (f" via {ing['via_subreceta']}" if ing.get("via_subreceta") else "")
                 ),
             }
             movs.append(mov)

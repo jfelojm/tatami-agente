@@ -5,13 +5,17 @@ from __future__ import annotations
 import os
 import unittest
 
+from bodegas_config import resolver_bodega_receta
 from descargo_subreceta import (
     calcular_consumo_sub,
     descargo_subrecetas_habilitado,
+    expandir_subrecetas_directas,
     preparar_ingredientes_descargo,
     pseudo_mp_cod,
     resolver_costo_unitario_sub,
 )
+
+os.environ["DESCARGO_SUB_DIRECTO"] = "0"
 
 
 class TestDescargoSubreceta(unittest.TestCase):
@@ -47,6 +51,42 @@ class TestDescargoSubreceta(unittest.TestCase):
         mp, sub = preparar_ingredientes_descargo(lineas, incluir_sub=True)
         self.assertEqual(len(mp), 1)
         self.assertEqual(len(sub), 1)
+
+    def test_expandir_directa_a_mp_e_hija(self):
+        directas = {
+            "SUB-037": {
+                "rend": 600.0,
+                "lineas": [
+                    {"cod_subreceta_hijo": "SUB-036", "nombre_subreceta_hijo": "kimchi",
+                     "cod_mp_sistema": "", "cantidad": "600", "cod_bodega": "BOD-001"},
+                    {"cod_mp_sistema": "7", "nombre_mp": "AZUCAR MORENA", "cantidad": "120",
+                     "merma_pct": "0", "cod_bodega": "BOD-001", "unidad_base": "gr"},
+                ],
+            }
+        }
+        plato = [{"cod_subreceta": "SUB-037", "cantidad": "80", "cod_bodega": "BOD-001",
+                  "cod_mp_sistema": ""}]
+        mp, sub = expandir_subrecetas_directas(plato, directas)
+        self.assertEqual(len(mp), 1)
+        self.assertEqual(mp[0]["cod_mp_sistema"], "007")
+        self.assertAlmostEqual(mp[0]["cantidad"], 16.0)
+        self.assertEqual(mp[0]["via_subreceta"], "SUB-037")
+        self.assertEqual(len(sub), 1)
+        self.assertEqual(sub[0]["cod_subreceta"], "SUB-036")
+        self.assertAlmostEqual(sub[0]["cantidad"], 80.0)
+
+    def test_expandir_sin_directas_no_cambia(self):
+        plato = [{"cod_subreceta": "SUB-006", "cantidad": "1", "cod_mp_sistema": ""}]
+        mp, sub = expandir_subrecetas_directas(plato, {})
+        self.assertEqual(mp, [])
+        self.assertEqual(sub, plato)
+
+    def test_bodega_externa_solo_via_subreceta(self):
+        self.assertEqual(resolver_bodega_receta({"cod_bodega": "BOD-005"})[1], "BODEGA_NO_DESCARGO")
+        self.assertEqual(
+            resolver_bodega_receta({"cod_bodega": "BOD-005", "via_subreceta": "SUB-008"}),
+            ("BOD-005", None),
+        )
 
     def test_resolver_costo_prioridad_sub(self):
         subs = {

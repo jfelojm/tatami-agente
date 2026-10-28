@@ -197,11 +197,32 @@ def planificar_produccion(
             from codigos_subreceta import cod_sub_canonico
 
             hijo_c = cod_sub_canonico(hijo_raw)
-            hijo_nom = (subs_meta.get(hijo_c) or {}).get("nombre_subreceta") or hijo_raw
-            padre_nom = (meta.get("nombre_subreceta") or info.get("nombre_subreceta") or cod)
-            avisos.append(
-                f"{padre_nom} ({cod}) requiere hijo {hijo_nom} ({hijo_c}): "
-                "producir hijo antes o usar lote estándar completo"
+            hijo_meta = subs_meta.get(hijo_c) or {}
+            hijo_nom = hijo_meta.get("nombre_subreceta") or hijo_raw
+            consumo = round(
+                _safe_float(ln.get("cantidad")) * factor * (1 + _safe_float(ln.get("merma_pct"))), 4
+            )
+            if consumo <= 0:
+                continue
+            cod_hijo_mp = pseudo_mp_cod(hijo_c)
+            bod = normalizar_cod_bodega(ln.get("cod_bodega")) or normalizar_cod_bodega(bodega_destino)
+            stk = (stock_map or {}).get((cod_hijo_mp, bod))
+            if stk is not None and stk < consumo:
+                avisos.append(
+                    f"{hijo_nom} ({cod_hijo_mp})@{bod}: stock {stk} < consumo {consumo} "
+                    f"(lote factor {factor:.4f})"
+                )
+            salidas_mp.append(
+                {
+                    "cod_mp_sistema": cod_hijo_mp,
+                    "nombre_mp": hijo_nom,
+                    "cod_bodega": bod,
+                    "cantidad_mov": consumo,
+                    "unidad_base": (hijo_meta.get("unidad") or ln.get("unidad_base") or "gr").strip(),
+                    "costo_unitario": round(_safe_float(hijo_meta.get("costo_unitario_estandar")), 6),
+                    "cantidad_std": _safe_float(ln.get("cantidad")),
+                    "merma_pct": _safe_float(ln.get("merma_pct")),
+                }
             )
             continue
         if not es_linea_mp_detalle(ln):

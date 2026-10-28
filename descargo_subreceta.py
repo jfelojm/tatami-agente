@@ -8,6 +8,7 @@ Activar con DESCARGO_SUBRECETAS=1 en .env.
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from typing import Any
 
@@ -39,10 +40,135 @@ def norm_cod_sub(cod: str) -> str:
 def preparar_ingredientes_descargo(
     ingredientes: list[dict], *, incluir_sub: bool
 ) -> tuple[list[dict], list[dict]]:
-    """Separa líneas MP y SUB según flag de descargo."""
+    """
+    Separa líneas MP y SUB según flag de descargo.
+    Las SUB con descargo_directo=SI (BD_SUBRECETAS) se convierten en sus líneas MP.
+    """
     lineas_mp = filtrar_solo_mp(ingredientes)
     lineas_sub = filtrar_solo_subreceta(ingredientes) if incluir_sub else []
+    if lineas_sub:
+        extra_mp, lineas_sub = expandir_subrecetas_directas(lineas_sub)
+        lineas_mp = lineas_mp + extra_mp
     return lineas_mp, lineas_sub
+
+
+_SI = ("SI", "SÍ", "S", "YES", "1", "TRUE")
+_TTL_DIRECTAS_S = 600
+_cache_directas: dict[str, Any] = {"ts": 0.0, "data": None}
+
+
+def cargar_subrecetas_directas(forzar: bool = False) -> dict[str, dict]:
+    """
+    cod_sub → {"rend", "lineas"} de subrecetas activas con descargo_directo=SI.
+    Caché en proceso (TTL) para no leer Sheets en cada venta.
+    """
+    if (os.getenv("DESCARGO_SUB_DIRECTO") or "1").strip().lower() in ("0", "false", "no"):
+        return {}
+    now = time.monotonic()
+    if not forzar and _cache_directas["data"] is not None and now - _cache_directas["ts"] < _TTL_DIRECTAS_S:
+        return _cache_directas["data"]
+
+    from subrecetas_detalle import (
+        agrupar_detalle_por_padre,
+        cargar_bd_subrecetas,
+        cargar_bd_subrecetas_detalle,
+    )
+
+    data: dict[str, dict] = {}
+    try:
+        cab = cargar_bd_subrecetas()
+        directas = {
+            norm_cod_sub(c)
+            for c, info in cab.items()
+            if (info.get("descargo_directo") or "").strip().upper() in _SI
+            and (info.get("activa") or "SI").strip().upper() in _SI
+        }
+        if directas:
+            por_padre = agrupar_detalle_por_padre(cargar_bd_subrecetas_detalle())
+            for c in directas:
+                rend = _sheet_float((cab.get(c) or {}).get("rendimiento_estandar"))
+                if rend > 0 and por_padre.get(c):
+                    data[c] = {"rend": rend, "lineas": por_padre[c]}
+    except Exception as e:
+        print(f"  WARN: no se pudo cargar subrecetas con descargo_directo: {e}")
+        if _cache_directas["data"] is not None:
+            return _cache_directas["data"]
+    _cache_directas.update(ts=now, data=data)
+    return data
+
+
+def _cod_mp_canonico(cod: str) -> str:
+    c = (cod or "").strip()
+    return c.zfill(3) if c.isdigit() else c
+
+
+def expandir_subrecetas_directas(
+    lineas_sub: list[dict],
+    directas: dict[str, dict] | None = None,
+    _prof: int = 0,
+) -> tuple[list[dict], list[dict]]:
+    """
+    Líneas SUB de plato con descargo directo → (líneas MP, líneas SUB restantes).
+    Cantidad MP = gramaje plato × cant_detalle / rendimiento × (1 + merma_detalle).
+    Hijas sin descargo directo quedan como SUB (se descuenta su stock de producción).
+    """
+    from subrecetas_detalle import es_linea_mp_detalle, es_linea_subreceta_hijo
+
+    directas = cargar_subrecetas_directas() if directas is None else directas
+    if not directas:
+        return [], lineas_sub
+
+    mp_out: list[dict] = []
+    sub_out: list[dict] = []
+    for ing in lineas_sub:
+        cod = norm_cod_sub(ing.get("cod_subreceta") or "")
+        d = directas.get(cod)
+        if not d or _prof > 5:
+            sub_out.append(ing)
+            continue
+        gramaje = _sheet_float(ing.get("cantidad"))
+        if gramaje <= 0:
+            continue
+        hijas: list[dict] = []
+        for ln in d["lineas"]:
+            cant = _sheet_float(ln.get("cantidad"))
+            if cant <= 0:
+                continue
+            q = gramaje * cant / d["rend"] * (1 + _sheet_float(ln.get("merma_pct")))
+            base = {
+                "cod_receta": ing.get("cod_receta", ""),
+                "variedad_smart_menu": ing.get("variedad_smart_menu", ""),
+                "cantidad": round(q, 6),
+                "pct_aplicacion": ing.get("pct_aplicacion") or "1",
+                "merma_pct": ing.get("merma_pct") or "0",
+                "es_opcional": ing.get("es_opcional", ""),
+                "via_subreceta": cod,
+            }
+            if es_linea_mp_detalle(ln):
+                mp_out.append(
+                    {
+                        **base,
+                        "nombre_mp": ln.get("nombre_mp", ""),
+                        "cod_mp_sistema": _cod_mp_canonico(ln.get("cod_mp_sistema")),
+                        "cod_subreceta": "",
+                        "unidad_base": ln.get("unidad_base", ""),
+                        "cod_bodega": ln.get("cod_bodega") or ing.get("cod_bodega", ""),
+                    }
+                )
+            elif es_linea_subreceta_hijo(ln):
+                hijas.append(
+                    {
+                        **base,
+                        "nombre_subreceta": ln.get("nombre_subreceta_hijo", ""),
+                        "cod_subreceta": ln.get("cod_subreceta_hijo", ""),
+                        "cod_mp_sistema": "",
+                        "cod_bodega": ing.get("cod_bodega", ""),
+                    }
+                )
+        m2, s2 = expandir_subrecetas_directas(hijas, directas, _prof + 1)
+        mp_out.extend(m2)
+        sub_out.extend(s2)
+    return mp_out, sub_out
 
 
 def calcular_consumo_sub(ingrediente: dict, cantidad_vendida: float) -> float:

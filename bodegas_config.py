@@ -30,6 +30,8 @@ BODEGAS: dict[str, BodegaInfo] = {
 
 # Descargo de ventas: solo cocina y barra
 BODEGAS_DESCARGO_VENTA = frozenset({"BOD-001", "BOD-002"})
+# Líneas MP de subrecetas con descargo_directo: se descuentan donde se produce la subreceta
+BODEGAS_DESCARGO_VIA_SUBRECETA = BODEGAS_DESCARGO_VENTA | {"BOD-005"}
 
 # Pares origen → destino (se aceptan ambos sentidos)
 _TRASLADOS_DIRIGIDOS: frozenset[tuple[str, str]] = frozenset(
@@ -200,6 +202,9 @@ def resolver_bodega_receta(ingrediente: dict, mp_fallback: dict | None = None) -
         bod = normalizar_cod_bodega(mp_fallback.get("cod_bodega"))
     if not bod:
         return None, "RECETA_SIN_BODEGA"
-    if not bodega_permite_descargo_venta(bod):
+    permitidas = (
+        BODEGAS_DESCARGO_VIA_SUBRECETA if ingrediente.get("via_subreceta") else BODEGAS_DESCARGO_VENTA
+    )
+    if bod not in permitidas:
         return None, "BODEGA_NO_DESCARGO"
     return bod, None
