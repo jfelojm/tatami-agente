@@ -322,6 +322,20 @@ def _procesar_factura_manual(payload: dict):
 
     registrar_factura_procesada(factura, {"id": ""}, ok_count, err_count, dry_run=False)
 
+    try:
+        from cuentas_por_pagar import registrar_factura_manual
+
+        subtotal = sum(
+            float(r.get("cantidad") or 0) * float(r.get("costo_unitario") or 0)
+            for r in resultados
+            if r.get("estado") in ("OK", "YA_INGRESADA")
+        )
+        registrar_factura_manual(
+            num_factura, ruc, fecha_factura, subtotal, cod_proveedor, usuario
+        )
+    except Exception as e:
+        print(f"WARN factura_manual: cuentas por pagar no registrada: {e}")
+
     return {
         "ok": err_count == 0,
         "trx": trx,

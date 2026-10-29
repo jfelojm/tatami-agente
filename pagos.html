@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tatami · Control de pagos</title>
+<style>
+  :root { --bg:#f5f5f2; --card:#fff; --ink:#1d1d1b; --muted:#6b6b66; --line:#e3e2dc;
+          --red:#c0392b; --amber:#d68910; --green:#1e8449; --blue:#1f4e79; --gray:#7f8c8d; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); font-size:14px; }
+  header { background:var(--ink); color:#fff; padding:12px 16px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; flex:1; }
+  header button { background:transparent; color:#fff; border:1px solid #fff6; }
+  main { padding:16px; max-width:1200px; margin:0 auto; }
+  button, select, input { font:inherit; padding:7px 10px; border-radius:6px; border:1px solid var(--line); background:#fff; }
+  button { cursor:pointer; }
+  button.prim { background:var(--blue); color:#fff; border-color:var(--blue); }
+  button.prim:disabled { opacity:.45; cursor:default; }
+  button.danger { color:var(--red); border-color:var(--red); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-bottom:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; cursor:pointer; }
+  .card .lbl { color:var(--muted); font-size:12px; }
+  .card .val { font-size:22px; font-weight:600; margin-top:4px; }
+  .card .sub { color:var(--muted); font-size:12px; }
+  .card.red .val { color:var(--red); } .card.amber .val { color:var(--amber); }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+  .bar .grow { flex:1; min-width:180px; }
+  .tabs button.on { background:var(--ink); color:#fff; border-color:var(--ink); }
+  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  th, td { padding:8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+  th { background:#fafaf7; font-size:12px; color:var(--muted); font-weight:600; position:sticky; top:0; }
+  td.num, th.num { text-align:right; white-space:nowrap; }
+  tr.row:hover { background:#fafaf7; cursor:pointer; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; color:#fff; white-space:nowrap; }
+  .b-VENCIDA { background:var(--red); } .b-POR_VENCER { background:var(--amber); } .b-PENDIENTE { background:var(--blue); }
+  .b-PAGADA { background:var(--green); } .b-ANULADA { background:var(--gray); }
+  .muted { color:var(--muted); font-size:12px; }
+  .prov-list { background:var(--card); border:1px solid var(--line); border-radius:8px; margin-bottom:14px; max-height:260px; overflow:auto; }
+  .prov-list div { display:flex; justify-content:space-between; padding:6px 10px; border-bottom:1px solid var(--line); cursor:pointer; gap:8px; }
+  .prov-list div:hover { background:#fafaf7; }
+  .sticky-pay { position:sticky; bottom:0; background:var(--ink); color:#fff; padding:10px 16px; display:none; align-items:center; gap:12px; justify-content:space-between; }
+  .modal-bg { position:fixed; inset:0; background:#0007; display:none; align-items:center; justify-content:center; padding:12px; z-index:10; }
+  .modal { background:#fff; border-radius:10px; padding:18px; width:100%; max-width:480px; max-height:90vh; overflow:auto; }
+  .modal h2 { margin:0 0 12px; font-size:17px; }
+  .modal label { display:block; margin:10px 0 4px; font-size:12px; color:var(--muted); }
+  .modal input, .modal select, .modal textarea { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  .modal .acts { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; flex-wrap:wrap; }
+  .kv { display:grid; grid-template-columns:130px 1fr; gap:4px 10px; font-size:13px; }
+  .kv b { color:var(--muted); font-weight:500; }
+  .hist { margin-top:12px; font-size:12px; border-top:1px solid var(--line); padding-top:8px; }
+  .hist div { padding:4px 0; border-bottom:1px dashed var(--line); }
+  #login { max-width:340px; margin:80px auto; background:#fff; padding:24px; border-radius:10px; border:1px solid var(--line); }
+  #login input { width:100%; margin:6px 0 12px; }
+  #login button { width:100%; }
+  .err { color:var(--red); font-size:13px; min-height:18px; }
+  .toast { position:fixed; bottom:70px; left:50%; transform:translateX(-50%); background:var(--ink); color:#fff; padding:10px 16px; border-radius:8px; display:none; z-index:20; }
+  @media (max-width:700px) {
+    .hide-m { display:none; }
+    th, td { padding:6px 4px; font-size:13px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h2 style="margin-top:0">Control de pagos</h2>
+  <label class="muted">Usuario</label>
+  <input id="lg-user" autocomplete="username" placeholder="moises / mary">
+  <label class="muted">PIN</label>
+  <input id="lg-pin" type="password" inputmode="numeric" autocomplete="current-password">
+  <div class="err" id="lg-err"></div>
+  <button class="prim" id="lg-btn">Entrar</button>
+</div>
+
+<div id="app" style="display:none">
+  <header>
+    <h1>Tatami · Control de pagos</h1>
+    <span id="hdr-user" class="muted" style="color:#ccc"></span>
+    <button id="btn-sync" title="Traer facturas nuevas del SRI">Actualizar facturas</button>
+    <button id="btn-out">Salir</button>
+  </header>
+  <main>
+    <div class="cards">
+      <div class="card red" data-filtro="VENCIDA"><div class="lbl">Vencido</div><div class="val" id="c-venc">—</div><div class="sub" id="c-venc-n"></div></div>
+      <div class="card amber" data-filtro="POR_VENCER"><div class="lbl">Vence en 7 días</div><div class="val" id="c-prox">—</div><div class="sub" id="c-prox-n"></div></div>
+      <div class="card" data-filtro="PENDIENTE"><div class="lbl">Total pendiente</div><div class="val" id="c-pend">—</div><div class="sub" id="c-pend-n"></div></div>
+    </div>
+
+    <details id="prov-det">
+      <summary style="cursor:pointer;margin-bottom:8px"><b>Deuda por proveedor</b> <span class="muted">(clic para filtrar)</span></summary>
+      <div class="prov-list" id="prov-list"></div>
+    </details>
+
+    <div class="bar">
+      <div class="tabs" id="tabs">
+        <button data-e="PENDIENTE" class="on">Pendientes</button>
+        <button data-e="PAGADA">Pagadas</button>
+        <button data-e="ANULADA">Anuladas</button>
+        <button data-e="TODAS">Todas</button>
+      </div>
+      <select id="f-vis">
+        <option value="">Todos los vencimientos</option>
+        <option value="VENCIDA">Solo vencidas</option>
+        <option value="POR_VENCER">Vencen en 7 días</option>
+        <option value="PENDIENTE">Más adelante</option>
+      </select>
+      <span id="rango" style="display:none">
+        <input type="date" id="f-desde"> a <input type="date" id="f-hasta">
+      </span>
+      <input class="grow" id="f-q" placeholder="Buscar proveedor, RUC o factura">
+      <button id="btn-xls">Excel</button>
+    </div>
+    <div class="muted" id="prov-filtro" style="margin-bottom:8px"></div>
+
+    <table>
+      <thead><tr>
+        <th style="width:28px"><input type="checkbox" id="chk-all"></th>
+        <th>Proveedor</th><th class="hide-m">Factura</th><th class="hide-m">Emisión</th>
+        <th>Vence</th><th class="num">Total</th><th>Estado</th>
+      </tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="muted" id="tbl-info" style="margin:8px 0 60px"></div>
+  </main>
+  <div class="sticky-pay" id="paybar">
+    <span id="pay-info"></span>
+    <button class="prim" id="btn-pay">Marcar como pagadas</button>
+  </div>
+</div>
+
+<div class="modal-bg" id="m-pay"><div class="modal">
+  <h2>Registrar pago</h2>
+  <div id="mp-res" class="muted"></div>
+  <label>Fecha de pago</label><input type="date" id="mp-fecha">
+  <label>Medio de pago</label><select id="mp-medio"></select>
+  <label>Referencia (n.º transferencia / cheque)</label><input id="mp-ref">
+  <label>Link del comprobante (opcional)</label><input id="mp-url" placeholder="https://...">
+  <label>Notas (opcional)</label><input id="mp-notas">
+  <div class="err" id="mp-err"></div>
+  <div class="acts"><button data-close>Cancelar</button><button class="prim" id="mp-ok">Confirmar pago</button></div>
+</div></div>
+
+<div class="modal-bg" id="m-det"><div class="modal">
+  <h2 id="md-tit"></h2>
+  <div class="kv" id="md-kv"></div>
+  <div id="md-edit">
+    <label>Días de crédito</label><input type="number" min="0" max="365" id="md-dias">
+    <label>Total a pagar</label><input type="number" step="0.01" id="md-total">
+    <label>Notas</label><input id="md-notas">
+  </div>
+  <div class="err" id="md-err"></div>
+  <div class="acts" id="md-acts"></div>
+  <div class="hist" id="md-hist"></div>
+</div></div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const fmt = (n) => n == null ? "—" : "$" + Number(n).toLocaleString("es-EC", {minimumFractionDigits:2, maximumFractionDigits:2});
+const ETQ = {VENCIDA:"Vencida", POR_VENCER:"Por vencer", PENDIENTE:"Pendiente", PAGADA:"Pagada", ANULADA:"Anulada"};
+let S = { token: localStorage.getItem("pagos_token"), usuario: localStorage.getItem("pagos_user"),
+          medios: JSON.parse(localStorage.getItem("pagos_medios") || "[]"),
+          estado: "PENDIENTE", facturas: [], sel: new Set(), ruc: null, provNombre: "" };
+
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.display = "block"; setTimeout(() => t.style.display = "none", 3500); }
+function isoLocal(d) { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0,10); }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Pagos-Token": S.token || "", ...(opts.headers || {}) } });
+  if (r.status === 401) { salir(); throw new Error("Sesión vencida, vuelve a entrar"); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.detail || ("Error " + r.status));
+  return j;
+}
+
+async function login() {
+  $("#lg-err").textContent = "";
+  try {
+    const r = await fetch("/api/pagos/login", { method: "POST", headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({ usuario: $("#lg-user").value, pin: $("#lg-pin").value }) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.detail || "Error");
+    S.token = j.token; S.usuario = j.usuario; S.medios = j.medios_pago;
+    localStorage.setItem("pagos_token", j.token); localStorage.setItem("pagos_user", j.usuario);
+    localStorage.setItem("pagos_medios", JSON.stringify(j.medios_pago));
+    iniciar();
+  } catch (e) { $("#lg-err").textContent = e.message; }
+}
+function salir() { localStorage.removeItem("pagos_token"); S.token = null; $("#app").style.display = "none"; $("#login").style.display = "block"; }
+
+function iniciar() {
+  $("#login").style.display = "none"; $("#app").style.display = "block";
+  $("#hdr-user").textContent = S.usuario;
+  $("#mp-medio").innerHTML = S.medios.map(m => `<option>${m}</option>`).join("");
+  const h = new Date(); const d = new Date(h); d.setDate(d.getDate() - 60);
+  $("#f-hasta").value = isoLocal(h); $("#f-desde").value = isoLocal(d);
+  cargar();
+}
+
+async function cargar() {
+  const p = new URLSearchParams({ estado: S.estado });
+  if (S.estado !== "PENDIENTE") { p.set("desde", $("#f-desde").value); p.set("hasta", $("#f-hasta").value); }
+  if (S.ruc) p.set("ruc", S.ruc);
+  $("#tbody").innerHTML = `<tr><td colspan="7" class="muted">Cargando…</td></tr>`;
+  try {
+    const j = await api("/api/pagos/facturas?" + p);
+    S.facturas = j.facturas; S.sel.clear();
+    const r = j.resumen;
+    $("#c-venc").textContent = fmt(r.vencido); $("#c-venc-n").textContent = r.n_vencidas + " facturas";
+    $("#c-prox").textContent = fmt(r.por_vencer_7d); $("#c-prox-n").textContent = r.n_por_vencer + " facturas";
+    $("#c-pend").textContent = fmt(r.pendiente); $("#c-pend-n").textContent = r.n_pendientes + " facturas";
+    $("#prov-list").innerHTML = j.proveedores.map(p =>
+      `<div data-ruc="${esc(p.ruc)}" data-nom="${esc(p.razon_social)}"><span>${esc(p.razon_social)} <span class="muted">(${p.n})</span></span>
+       <span>${fmt(p.total)}${p.vencido ? ` <span class="muted" style="color:var(--red)">venc. ${fmt(p.vencido)}</span>` : ""}</span></div>`).join("");
+    pintar();
+  } catch (e) { $("#tbody").innerHTML = `<tr><td colspan="7" class="err">${esc(e.message)}</td></tr>`; }
+}
+
+function filtradas() {
+  const q = $("#f-q").value.trim().toLowerCase(); const vis = $("#f-vis").value;
+  return S.facturas.filter(f => (!vis || f.estado_visible === vis) &&
+    (!q || [f.razon_social, f.ruc_proveedor, f.num_factura].some(x => String(x || "").toLowerCase().includes(q))));
+}
+
+function pintar() {
+  const rows = filtradas();
+  const pend = S.estado === "PENDIENTE";
+  $("#chk-all").style.visibility = pend ? "visible" : "hidden";
+  $("#tbody").innerHTML = rows.map(f => {
+    const venc = f.fecha_vencimiento || "—";
+    const dias = f.estado_pago === "PENDIENTE" && f.dias_para_vencer != null
+      ? `<div class="muted">${f.dias_para_vencer < 0 ? (-f.dias_para_vencer) + " días vencida" : f.dias_para_vencer === 0 ? "vence hoy" : "en " + f.dias_para_vencer + " días"}</div>` : "";
+    const extra = f.estado_pago === "PAGADA" ? `<div class="muted">${esc(f.fecha_pago || "")} ${esc(f.medio_pago || "")}</div>` : "";
+    return `<tr class="row" data-id="${f.id}">
+      <td onclick="event.stopPropagation()">${f.estado_pago === "PENDIENTE" ? `<input type="checkbox" class="chk" data-id="${f.id}" ${S.sel.has(f.id) ? "checked" : ""}>` : ""}</td>
+      <td>${esc(f.razon_social || f.ruc_proveedor)}<div class="muted">${esc(f.num_factura)}${f.total_estimado ? " · total estimado" : ""}</div></td>
+      <td class="hide-m">${esc(f.num_factura)}</td><td class="hide-m">${esc(f.fecha_emision || "")}</td>
+      <td>${esc(venc)}${dias}</td><td class="num">${fmt(f.total)}</td>
+      <td><span class="badge b-${f.estado_visible}">${ETQ[f.estado_visible] || f.estado_visible}</span>${extra}</td></tr>`;
+  }).join("") || `<tr><td colspan="7" class="muted">Sin facturas para este filtro</td></tr>`;
+  const tot = rows.reduce((a, f) => a + Number(f.total || 0), 0);
+  $("#tbl-info").textContent = `${rows.length} facturas · ${fmt(tot)}`;
+  actualizarPaybar();
+}
+
+function actualizarPaybar() {
+  const sel = S.facturas.filter(f => S.sel.has(f.id));
+  const tot = sel.reduce((a, f) => a + Number(f.total || 0), 0);
+  $("#paybar").style.display = sel.length ? "flex" : "none";
+  $("#pay-info").textContent = `${sel.length} seleccionadas · ${fmt(tot)}`;
+}
+
+function abrirPago() {
+  const sel = S.facturas.filter(f => S.sel.has(f.id));
+  const provs = [...new Set(sel.map(f => f.razon_social))];
+  $("#mp-res").innerHTML = `${sel.length} factura(s) · <b>${fmt(sel.reduce((a, f) => a + Number(f.total || 0), 0))}</b><br>${provs.map(esc).join(", ")}`;
+  $("#mp-fecha").value = isoLocal(new Date());
+  $("#mp-ref").value = ""; $("#mp-url").value = ""; $("#mp-notas").value = ""; $("#mp-err").textContent = "";
+  $("#m-pay").style.display = "flex";
+}
+
+async function confirmarPago() {
+  $("#mp-ok").disabled = true; $("#mp-err").textContent = "";
+  try {
+    const j = await api("/api/pagos/marcar_pagadas", { method: "POST", body: JSON.stringify({
+      ids: [...S.sel], fecha_pago: $("#mp-fecha").value, medio_pago: $("#mp-medio").value,
+      referencia_pago: $("#mp-ref").value, comprobante_url: $("#mp-url").value, notas: $("#mp-notas").value }) });
+    $("#m-pay").style.display = "none";
+    toast(`${j.marcadas} factura(s) pagadas · ${fmt(j.total)}`);
+    cargar();
+  } catch (e) { $("#mp-err").textContent = e.message; }
+  $("#mp-ok").disabled = false;
+}
+
+async function abrirDetalle(id) {
+  const f = S.facturas.find(x => x.id === id); if (!f) return;
+  $("#md-tit").textContent = `${f.razon_social || f.ruc_proveedor} · ${f.num_factura}`;
+  const filas = [
+    ["Estado", `<span class="badge b-${f.estado_visible}">${ETQ[f.estado_visible] || f.estado_visible}</span>`],
+    ["RUC", esc(f.ruc_proveedor)], ["Emisión", esc(f.fecha_emision || "—")],
+    ["Subtotal / IVA", `${fmt(f.subtotal)} / ${fmt(f.iva)}`], ["Total", `<b>${fmt(f.total)}</b>${f.total_estimado ? " <span class='muted'>(estimado, sin IVA)</span>" : ""}`],
+    ["Crédito", `${f.dias_credito} días <span class="muted">(${esc(f.fuente_credito)})</span>`], ["Vence", esc(f.fecha_vencimiento || "—")],
+    ["Origen", esc(f.origen)],
+  ];
+  if (f.estado_pago === "PAGADA") filas.push(
+    ["Pagada el", esc(f.fecha_pago || "—")], ["Medio", esc(f.medio_pago || "—")], ["Referencia", esc(f.referencia_pago || "—")],
+    ["Comprobante", f.comprobante_url ? `<a href="${esc(f.comprobante_url)}" target="_blank" rel="noopener">ver</a>` : "—"],
+    ["Registró", esc(f.pagado_por || "—")]);
+  if (f.notas) filas.push(["Notas", esc(f.notas)]);
+  $("#md-kv").innerHTML = filas.map(([k, v]) => `<b>${k}</b><span>${v}</span>`).join("");
+  const pend = f.estado_pago === "PENDIENTE";
+  $("#md-edit").style.display = pend ? "block" : "none";
+  $("#md-dias").value = f.dias_credito; $("#md-total").value = f.total ?? ""; $("#md-notas").value = f.notas || "";
+  $("#md-err").textContent = "";
+  $("#md-acts").innerHTML = `<button data-close>Cerrar</button>` + (pend
+    ? `<button class="danger" id="md-anular">Anular</button><button class="prim" id="md-guardar">Guardar cambios</button>`
+    : `<button class="danger" id="md-revertir">Volver a pendiente</button>`);
+  $("#md-hist").innerHTML = "<span class='muted'>Cargando historial…</span>";
+  $("#m-det").style.display = "flex";
+  const err = (e) => $("#md-err").textContent = e.message;
+  if (pend) {
+    $("#md-guardar").onclick = async () => {
+      try { await api("/api/pagos/editar", { method: "POST", body: JSON.stringify({ id, dias_credito: $("#md-dias").value, total: $("#md-total").value, notas: $("#md-notas").value }) });
+        $("#m-det").style.display = "none"; toast("Cambios guardados"); cargar(); } catch (e) { err(e); } };
+    $("#md-anular").onclick = async () => {
+      const motivo = prompt("Motivo de la anulación (ej. nota de crédito, factura duplicada):"); if (!motivo) return;
+      try { await api("/api/pagos/editar", { method: "POST", body: JSON.stringify({ id, anular: true, notas: motivo }) });
+        $("#m-det").style.display = "none"; toast("Factura anulada"); cargar(); } catch (e) { err(e); } };
+  } else {
+    $("#md-revertir").onclick = async () => {
+      const motivo = prompt("¿Por qué vuelve a pendiente?"); if (!motivo) return;
+      try { await api("/api/pagos/revertir", { method: "POST", body: JSON.stringify({ id, motivo }) });
+        $("#m-det").style.display = "none"; toast("Factura vuelve a pendiente"); cargar(); } catch (e) { err(e); } };
+  }
+  try {
+    const h = await api("/api/pagos/historial/" + id);
+    $("#md-hist").innerHTML = "<b>Historial</b>" + (h.historial.map(x =>
+      `<div>${esc((x.creado_at || "").slice(0,16).replace("T"," "))} · <b>${esc(x.accion)}</b> · ${esc(x.usuario)}
+       <span class="muted">${esc(x.detalle?.motivo || x.detalle?.referencia_pago || "")}</span></div>`).join("") || "<div class='muted'>Sin cambios registrados</div>");
+  } catch (e) { $("#md-hist").textContent = ""; }
+}
+
+document.addEventListener("click", (e) => {
+  if (e.target.matches("[data-close]")) e.target.closest(".modal-bg").style.display = "none";
+  const tab = e.target.closest("#tabs button");
+  if (tab) { document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b === tab));
+    S.estado = tab.dataset.e; $("#rango").style.display = S.estado === "PENDIENTE" ? "none" : "inline";
+    $("#f-vis").style.display = S.estado === "PENDIENTE" ? "" : "none"; cargar(); }
+  const card = e.target.closest(".card[data-filtro]");
+  if (card) { document.querySelector('#tabs button[data-e="PENDIENTE"]').click(); $("#f-vis").value = card.dataset.filtro === "PENDIENTE" ? "" : card.dataset.filtro; }
+  const prov = e.target.closest("#prov-list div[data-ruc]");
+  if (prov) { S.ruc = prov.dataset.ruc; S.provNombre = prov.dataset.nom;
+    $("#prov-filtro").innerHTML = `Proveedor: <b>${esc(S.provNombre)}</b> <a href="#" id="quitar-prov">quitar filtro</a>`; cargar(); }
+  if (e.target.id === "quitar-prov") { e.preventDefault(); S.ruc = null; $("#prov-filtro").innerHTML = ""; cargar(); }
+  const row = e.target.closest("tr.row");
+  if (row && !e.target.matches("input")) abrirDetalle(row.dataset.id);
+});
+document.addEventListener("change", (e) => {
+  if (e.target.matches(".chk")) { e.target.checked ? S.sel.add(e.target.dataset.id) : S.sel.delete(e.target.dataset.id); actualizarPaybar(); }
+  if (e.target.id === "chk-all") { filtradas().filter(f => f.estado_pago === "PENDIENTE").forEach(f => e.target.checked ? S.sel.add(f.id) : S.sel.delete(f.id)); pintar(); }
+  if (["f-vis"].includes(e.target.id)) pintar();
+  if (["f-desde", "f-hasta"].includes(e.target.id)) cargar();
+});
+$("#f-q").addEventListener("input", pintar);
+$("#lg-btn").onclick = login;
+$("#lg-pin").addEventListener("keydown", (e) => e.key === "Enter" && login());
+$("#btn-out").onclick = salir;
+$("#btn-pay").onclick = abrirPago;
+$("#mp-ok").onclick = confirmarPago;
+$("#btn-xls").onclick = () => {
+  const p = new URLSearchParams({ token: S.token, estado: S.estado === "TODAS" ? "TODAS" : S.estado });
+  if (S.estado !== "PENDIENTE") { p.set("desde", $("#f-desde").value); p.set("hasta", $("#f-hasta").value); }
+  if (S.ruc) p.set("ruc", S.ruc);
+  window.location = "/api/pagos/export.xlsx?" + p;
+};
+$("#btn-sync").onclick = async () => {
+  $("#btn-sync").disabled = true; toast("Buscando facturas nuevas…");
+  try { const j = await api("/api/pagos/sincronizar", { method: "POST" }); toast(`${j.nuevas} factura(s) nuevas`); cargar(); }
+  catch (e) { toast(e.message); }
+  $("#btn-sync").disabled = false;
+};
+if (S.token) iniciar();
+</script>
+</body>
+</html>

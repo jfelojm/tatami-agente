@@ -1619,6 +1619,9 @@ app.include_router(traslado_masivo_router, prefix="/api/traslado_masivo")
 from dashboard_routes import router as dashboard_router
 app.include_router(dashboard_router)
 
+from pagos_routes import router as pagos_router
+app.include_router(pagos_router)
+
 # ── Helpers ──────────────────────────────────────────────────
 def _to_float(v, default=0.0):
     from sheet_numbers import parse_sheet_number
