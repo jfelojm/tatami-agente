@@ -27,6 +27,7 @@ load_dotenv(override=True)
 
 FECHA_CORTE = os.getenv("CXP_FECHA_CORTE", "2026-10-01")
 DESDE_DEFAULT = "2026-01-01"
+PLAZO_XML_MAX = 120
 TABLA = "cxp_facturas"
 TABLA_HIST = "cxp_historial"
 
@@ -151,7 +152,7 @@ def resolver_credito(ruc: str, plazo_xml: int | None, proveedores: dict) -> tupl
             return max(prov["dias_credito"], 0), "BD_PROV"
         if prov["condicion_pago"] == "contado":
             return 0, "BD_PROV"
-    if plazo_xml and plazo_xml > 0:
+    if plazo_xml and 0 < plazo_xml <= PLAZO_XML_MAX:
         return plazo_xml, "XML"
     return 0, "SIN_DATO"
 
