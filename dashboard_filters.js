@@ -503,6 +503,7 @@
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        layout: opts.layout || {},
         plugins: {
           legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
           tooltip: {
@@ -512,7 +513,7 @@
           },
         },
         scales: {
-          x: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+          x: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: (opts.xTicks || { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 }) },
           y: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: { callback: v => '$' + Number(v).toLocaleString() } },
         },
       },

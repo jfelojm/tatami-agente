@@ -199,7 +199,10 @@ tr:hover td{background:#f5f4f0}
       <button class="mb" onclick="setAg('semana',this)">Semana</button>
       <button class="mb" onclick="setAg('dia',this)">Día</button>
     </div>
-    <select id="ra" onchange="onYearChange();cargar()"><option>2024</option><option>2025</option><option selected>2026</option></select>
+    <div class="dd-wrap" id="dd-anios-wrap">
+      <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-anios-wrap')"><span id="dd-anios-label">Años: 2025, 2026</span></button>
+      <div class="dd-menu" id="chk-anios"></div>
+    </div>
     <div class="dd-wrap" id="dd-meses-wrap">
       <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-meses-wrap')"><span id="dd-meses-label">Meses: todos</span></button>
       <div class="dd-menu" id="chk-meses"></div>
@@ -208,12 +211,7 @@ tr:hover td{background:#f5f4f0}
       <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-semanas-wrap')"><span id="dd-semanas-label">Semanas: todas</span></button>
       <div class="dd-menu" id="chk-semanas"></div>
     </div>
-    <select id="rm" class="hid" onchange="onRmChange()">
-      <option value="01">Ene</option><option value="02">Feb</option><option value="03">Mar</option>
-      <option value="04">Abr</option><option value="05">May</option><option value="06" selected>Jun</option>
-      <option value="07">Jul</option><option value="08">Ago</option><option value="09">Sep</option>
-      <option value="10">Oct</option><option value="11">Nov</option><option value="12">Dic</option>
-    </select>
+    <select id="rm" class="hid" onchange="onRmChange()"></select>
     <div class="dd-wrap hid" id="dd-dias-wrap">
       <button type="button" class="dd-btn" onclick="toggleDropdownMenu('dd-dias-wrap')"><span id="dd-dias-label">Días: todos</span></button>
       <div class="dd-menu" id="chk-dias"></div>
@@ -612,17 +610,42 @@ tr:hover td{background:#f5f4f0}
     if (opts.labelId) w.updateDropdownLabel(cid, opts.labelId, pre, items, { emptyLabel: opts.emptyLabel });
   };
 
-  w.initMesesPanel = function (year, containerId, labelId, onChange, selectedValues) {
+  w.initAniosPanel = function (containerId, labelId, onChange, selectedValues) {
     const c = document.getElementById(containerId);
     if (!c) return;
+    const items = ['2024', '2025', '2026'].map(y => ({ v: y, n: y }));
+    const sel = selectedValues && selectedValues.length ? selectedValues.map(String) : ['2025', '2026'];
+    w.buildCheckboxPanel(c, items, { allByDefault: false, labelId, prefix: 'Años', onChange });
+    c.querySelectorAll('input[type=checkbox]').forEach(inp => {
+      inp.checked = sel.includes(inp.value);
+    });
+    if (labelId) w.updateDropdownLabel(containerId, labelId, 'Años', items);
+  };
+
+  w.initMesesPanel = function (yearOrYears, containerId, labelId, onChange, selectedValues) {
+    const c = document.getElementById(containerId);
+    if (!c) return;
+    const years = (Array.isArray(yearOrYears) ? yearOrYears : [yearOrYears]).map(String).filter(Boolean);
     const items = [];
-    for (let m = 1; m <= 12; m++) {
-      const mm = String(m).padStart(2, '0');
-      items.push({ v: `${year}-${mm}`, n: MESES[m] });
+    years.forEach(year => {
+      for (let m = 1; m <= 12; m++) {
+        const mm = String(m).padStart(2, '0');
+        const nombre = years.length > 1 ? `${MESES[m]} ${year}` : MESES[m];
+        items.push({ v: `${year}-${mm}`, n: nombre });
+      }
+    });
+    let sel;
+    if (selectedValues == null) {
+      sel = items.map(i => i.v);
+    } else {
+      const allowed = new Set(items.map(i => i.v));
+      sel = selectedValues.map(String).filter(v => allowed.has(v));
+      years.forEach(year => {
+        if (!sel.some(v => v.startsWith(year + '-'))) {
+          items.filter(i => i.v.startsWith(year + '-')).forEach(i => sel.push(i.v));
+        }
+      });
     }
-    const sel = selectedValues == null
-      ? items.map(i => i.v)
-      : selectedValues.filter(v => String(v).startsWith(year + '-'));
     w.buildCheckboxPanel(c, items, { allByDefault: false, labelId, prefix: 'Meses', onChange });
     c.querySelectorAll('input[type=checkbox]').forEach(inp => {
       inp.checked = sel.includes(inp.value);
@@ -956,6 +979,7 @@ tr:hover td{background:#f5f4f0}
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        layout: opts.layout || {},
         plugins: {
           legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
           tooltip: {
@@ -965,7 +989,7 @@ tr:hover td{background:#f5f4f0}
           },
         },
         scales: {
-          x: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 } },
+          x: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: (opts.xTicks || { maxRotation: 45, autoSkip: true, maxTicksLimit: 14 }) },
           y: { grid: { color: 'rgba(128,128,128,0.08)' }, ticks: { callback: v => '$' + Number(v).toLocaleString() } },
         },
       },
@@ -1508,9 +1532,44 @@ function formatChartLabel(lbl) {
   const m = /^(\d{4})-(\d{2})$/.exec(s);
   if (m && (ag === 'mes' || ag === 'anio')) {
     const meses = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
-    return meses[parseInt(m[2], 10)] + ' ' + m[1].slice(2);
+    return meses[parseInt(m[2], 10)] + ' ' + m[1];
+  }
+  const wk = /^(\d{4})-W(\d{2})$/.exec(s);
+  if (wk && typeof isoWeekMonday === 'function') {
+    const mon = isoWeekMonday(parseInt(wk[1], 10), parseInt(wk[2], 10));
+    const iso = `${mon.getFullYear()}-${String(mon.getMonth() + 1).padStart(2, '0')}-${String(mon.getDate()).padStart(2, '0')}`;
+    return `${fmtDiaFecha(iso)}/${iso.slice(2, 4)}`;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const label = fmtDiaFecha(s);
+    return ag === 'dia' ? `${label}/${s.slice(2, 4)}` : label;
   }
   return fmtDiaFecha(s);
+}
+
+function ventasLabelsConFecha(labels) {
+  return (labels || []).some(l => /^\d{4}-\d{2}-\d{2}$/.test(String(l)) || /^\d{4}-W\d{2}$/.test(String(l)));
+}
+
+function ventasChartXTicks(labels) {
+  const fechas = ventasLabelsConFecha(labels);
+  return {
+    source: 'labels',
+    color: '#444441',
+    font: { size: fechas ? 9 : 11 },
+    minRotation: fechas ? 90 : 0,
+    maxRotation: fechas ? 90 : 45,
+    autoSkip: false,
+    maxTicksLimit: 400,
+    padding: 1,
+  };
+}
+
+function fitVentasChartHeight(labels) {
+  const canvas = document.getElementById('cv');
+  const wrap = canvas && canvas.parentElement;
+  if (!wrap) return;
+  wrap.style.height = ventasLabelsConFecha(labels) ? '380px' : '250px';
 }
 
 function periodFilterMatchesLabels(pf, labels) {
@@ -1546,6 +1605,90 @@ let _semanasSelected = null;
 let _diasSelected = null;
 let _mesesDebounce = null;
 let _cargarSeq = 0;
+
+function selectedYears() {
+  const sel = getCheckedValues(document.getElementById('chk-anios'));
+  const years = (sel.length ? sel : ['2026']).map(String).sort();
+  return years;
+}
+
+function defaultVentasMeses(years) {
+  const out = [];
+  years.forEach(y => {
+    for (let m = 1; m <= 12; m++) {
+      const mm = String(m).padStart(2, '0');
+      if (String(y) === '2025' && mm !== '12') continue;
+      out.push(`${y}-${mm}`);
+    }
+  });
+  return out;
+}
+
+function currentYm() {
+  const raw = (document.getElementById('rm') || {}).value || '';
+  const hit = /^(\d{4})-(\d{2})$/.exec(raw);
+  if (hit) return { y: hit[1], m: hit[2], key: raw };
+  const y = selectedYears().slice(-1)[0];
+  const mm = String(raw || '01').padStart(2, '0').slice(-2);
+  return { y, m: mm, key: `${y}-${mm}` };
+}
+
+function monthsAreContiguous(keys) {
+  const sorted = [...keys].sort();
+  if (sorted.length <= 1) return true;
+  const idx = k => {
+    const [y, m] = String(k).split('-').map(Number);
+    return y * 12 + (m - 1);
+  };
+  for (let i = 1; i < sorted.length; i++) {
+    if (idx(sorted[i]) !== idx(sorted[i - 1]) + 1) return false;
+  }
+  return true;
+}
+
+const MES_NOMBRE = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+
+function mesesTitulo(keys) {
+  const sorted = [...keys].sort();
+  if (!sorted.length) return selectedYears().join(', ');
+  const fmt = k => `${MES_NOMBRE[parseInt(k.slice(5), 10)]} ${k.slice(0, 4)}`;
+  if (sorted.length === 1) return fmt(sorted[0]);
+  return `${fmt(sorted[0])} – ${fmt(sorted[sorted.length - 1])}`;
+}
+
+function refreshMesesLabel() {
+  const label = document.getElementById('dd-meses-label');
+  if (!label) return;
+  const meses = getMesesChecked();
+  const total = document.querySelectorAll('#chk-meses input[type=checkbox]').length;
+  if (!meses.length) { label.textContent = 'Meses: ninguno'; return; }
+  if (total && meses.length >= total) { label.textContent = 'Meses: todos'; return; }
+  label.textContent = 'Meses: ' + mesesTitulo(meses);
+}
+
+function refreshRmOptions() {
+  const rm = document.getElementById('rm');
+  if (!rm) return;
+  const prev = rm.value;
+  const keys = [];
+  selectedYears().forEach(y => {
+    for (let m = 1; m <= 12; m++) keys.push(`${y}-${String(m).padStart(2, '0')}`);
+  });
+  rm.innerHTML = '';
+  keys.forEach(k => {
+    const opt = document.createElement('option');
+    opt.value = k;
+    opt.textContent = `${MES_NOMBRE[parseInt(k.slice(5), 10)]} ${k.slice(0, 4)}`;
+    rm.appendChild(opt);
+  });
+  if (keys.includes(prev)) {
+    rm.value = prev;
+    return;
+  }
+  const vh = typeof ventasHastaIso === 'function' ? ventasHastaIso() : '';
+  const cap = vh ? String(vh).slice(0, 7) : keys[keys.length - 1];
+  rm.value = [...keys].reverse().find(k => k <= cap) || keys[keys.length - 1] || '';
+}
 
 function monthEnd(year, monthStr) {
   const y = parseInt(year, 10);
@@ -1929,9 +2072,8 @@ function captureSemanasSelection() {
 
 function refreshSemanasPanel() {
   captureSemanasSelection();
-  const anio = document.getElementById('ra').value;
-  const mes = ag === 'semana' ? document.getElementById('rm').value : null;
-  initSemanasPanel(anio, 'chk-semanas', 'dd-semanas-label', onSemanasCheckChange, _semanasSelected, semanasHastaIso(), mes);
+  const ym = currentYm();
+  initSemanasPanel(ym.y, 'chk-semanas', 'dd-semanas-label', onSemanasCheckChange, _semanasSelected, semanasHastaIso(), ym.m);
 }
 
 function onSemanasCheckChange() {
@@ -1954,9 +2096,8 @@ function captureDiasSelection() {
 
 function refreshDiasPanel() {
   captureDiasSelection();
-  const anio = document.getElementById('ra').value;
-  const mes = document.getElementById('rm').value;
-  initDiasPanel(anio, mes, 'chk-dias', 'dd-dias-label', onDiasCheckChange, _diasSelected, diasHastaIso());
+  const ym = currentYm();
+  initDiasPanel(ym.y, ym.m, 'chk-dias', 'dd-dias-label', onDiasCheckChange, _diasSelected, diasHastaIso());
 }
 
 function onDiasCheckChange() {
@@ -1981,12 +2122,13 @@ function setAg(a, btn) {
   ag = a;
   btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
   btn.classList.add('on');
-  h('ra', true);
+  h('dd-anios-wrap', true);
   h('dd-meses-wrap', a === 'mes' || a === 'anio');
   h('dd-semanas-wrap', a === 'semana');
   h('rm', a === 'semana' || a === 'dia');
   h('dd-dias-wrap', a === 'dia');
   h('dd-dias-sem-wrap', a === 'dia');
+  refreshRmOptions();
   if (a === 'semana') refreshSemanasPanel();
   if (a === 'dia') refreshDiasPanel();
   // Evita reinicializar el dropdown de meses si se ejecuta de nuevo con el mismo modo.
@@ -2006,10 +2148,24 @@ function getMesesChecked() {
   return [];
 }
 
+function onAniosChange() {
+  const years = getCheckedValues(document.getElementById('chk-anios'));
+  if (!years.length) {
+    const inp = document.querySelector('#chk-anios input[value="2026"]');
+    if (inp) inp.checked = true;
+    updateDropdownLabel('chk-anios', 'dd-anios-label', 'Años');
+    return;
+  }
+  onYearChange();
+  cargar();
+}
+
 function onYearChange() {
-  const anio = document.getElementById('ra').value;
-  initMesesPanel(anio, 'chk-meses', 'dd-meses-label', onMesSelectionChange, _mesesSelected);
+  const years = selectedYears();
+  initMesesPanel(years, 'chk-meses', 'dd-meses-label', onMesSelectionChange, _mesesSelected);
   _mesesSelected = getCheckedValues(document.getElementById('chk-meses'));
+  refreshMesesLabel();
+  refreshRmOptions();
   if (ag === 'semana') {
     _semanasSelected = null;
     refreshSemanasPanel();
@@ -2023,6 +2179,7 @@ function onYearChange() {
 function onMesSelectionChange() {
   const meses = getCheckedValues(document.getElementById('chk-meses'));
   _mesesSelected = meses;
+  refreshMesesLabel();
   // 0 meses marcados = transición (ej. "Ninguno"); no recargar año completo.
   if (!meses.length) return;
   clearTimeout(_mesesDebounce);
@@ -2065,38 +2222,31 @@ function isPvGlobal() {
 }
 
 function getSelectedPeriodRange() {
-  const anio = document.getElementById('ra').value;
+  const years = selectedYears();
+  const anio = years[years.length - 1];
   if (ag === 'mes' || ag === 'anio') {
-    const meses = getMesesChecked();
+    const meses = getMesesChecked().slice().sort();
     const total = document.querySelectorAll('#chk-meses input[type=checkbox]').length;
-    // Todos los meses marcados = año completo.
-    if (total && meses.length >= total) {
-      return {
-        desde: `${anio}-01-01`,
-        hasta: capHastaVentas(`${anio}-12-31`),
-        agrup: ag === 'anio' ? 'anio' : 'mes',
-      };
-    }
-    // Subconjunto = solo esos meses (puede ser no contiguo).
     if (meses.length > 0) {
       const r = rangeFromMeses(meses, anio);
+      const contiguous = monthsAreContiguous(meses);
+      const todos = total && meses.length >= total;
       return {
         desde: r.desde,
         hasta: capHastaVentas(r.hasta),
-        agrup: 'mes',
-        _filterLabels: meses,
-        _mesesQuery: meses,
+        agrup: ag === 'anio' ? 'anio' : 'mes',
+        _filterLabels: (ag === 'anio' || contiguous || todos) ? null : meses,
+        _mesesQuery: (contiguous || todos) ? null : meses,
       };
     }
-    // Sin selección activa: no forzar año completo.
     return { desde: `${anio}-01-01`, hasta: capHastaVentas(`${anio}-01-31`), agrup: 'mes' };
   }
+  const ym = currentYm();
   if (ag === 'semana') {
-    const mes = document.getElementById('rm').value;
-    const finMes = monthEnd(anio, mes);
+    const finMes = monthEnd(ym.y, ym.m);
     const mesRange = {
-      desde: `${anio}-${mes}-01`,
-      hasta: capHastaVentas(`${anio}-${mes}-${finMes}`),
+      desde: `${ym.y}-${ym.m}-01`,
+      hasta: capHastaVentas(`${ym.y}-${ym.m}-${finMes}`),
     };
     const sems = getCheckedValues(document.getElementById('chk-semanas'));
     const total = document.querySelectorAll('#chk-semanas input[type=checkbox]').length;
@@ -2114,14 +2264,13 @@ function getSelectedPeriodRange() {
     return { ...mesRange, agrup: 'semana', _filterLabels: sems.length ? sems : null };
   }
   const dias = getCheckedValues(document.getElementById('chk-dias'));
-  const mes = document.getElementById('rm').value;
-  const finMes = monthEnd(anio, mes);
+  const finMes = monthEnd(ym.y, ym.m);
   const totalDias = document.querySelectorAll('#chk-dias input[type=checkbox]').length;
   if (dias.length > 0 && totalDias && dias.length < totalDias) {
     const sorted = [...dias].sort();
     return { desde: sorted[0], hasta: sorted[sorted.length - 1], agrup: 'dia', _filterLabels: dias };
   }
-  return { desde: `${anio}-${mes}-01`, hasta: capHastaVentas(`${anio}-${mes}-${finMes}`), agrup: 'dia', _filterLabels: dias };
+  return { desde: `${ym.y}-${ym.m}-01`, hasta: capHastaVentas(`${ym.y}-${ym.m}-${finMes}`), agrup: 'dia', _filterLabels: dias };
 }
 
 function capHastaVentas(hasta) {
@@ -2138,13 +2287,13 @@ function appendMesesToQuery(q, ranges) {
 }
 
 function getRangesLegacy() {
-  const anio = document.getElementById('ra').value;
-  const mes = document.getElementById('rm').value;
-  const finMes = monthEnd(anio, mes);
-  if (ag === 'anio') return { desde: `${anio}-01-01`, hasta: `${anio}-12-31`, agrup: 'anio' };
-  if (ag === 'mes') return rangeFromMeses(getCheckedValues(document.getElementById('chk-meses')), anio);
-  if (ag === 'semana') return { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'semana' };
-  return { desde: `${anio}-${mes}-01`, hasta: `${anio}-${mes}-${finMes}`, agrup: 'dia' };
+  const ym = currentYm();
+  const finMes = monthEnd(ym.y, ym.m);
+  const years = selectedYears();
+  if (ag === 'anio') return { desde: `${years[0]}-01-01`, hasta: `${years[years.length - 1]}-12-31`, agrup: 'anio' };
+  if (ag === 'mes') return rangeFromMeses(getCheckedValues(document.getElementById('chk-meses')), years[years.length - 1]);
+  if (ag === 'semana') return { desde: `${ym.y}-${ym.m}-01`, hasta: `${ym.y}-${ym.m}-${finMes}`, agrup: 'semana' };
+  return { desde: `${ym.y}-${ym.m}-01`, hasta: `${ym.y}-${ym.m}-${finMes}`, agrup: 'dia' };
 }
 
 function getRanges() {
@@ -2286,19 +2435,20 @@ function rebuildPlatoPanel() {
 }
 
 function getTitle() {
-  const meses = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
   const platoTxt = filtroLabelSuffix();
   if (mode === 'p') {
     const v = id => document.getElementById(id).value;
     const iso = (a, m, d) => `${a}-${m}-${String(Math.min(+d, +monthEnd(a, m))).padStart(2, '0')}`;
     return fmtRangoFechas(iso(v('pd-a'), v('pd-m'), v('pd-d')), iso(v('ph-a'), v('ph-m'), v('ph-d'))) + platoTxt;
   }
-  const anio = document.getElementById('ra').value;
-  const mes = meses[parseInt(document.getElementById('rm').value)];
-  if (ag === 'anio') return `Tendencia anual ${anio}${platoTxt}`;
-  if (ag === 'mes') return `Ventas mensuales ${anio}${platoTxt}`;
-  if (ag === 'semana') return `Semanas de ${mes} ${anio}${platoTxt}`;
-  return `Días de ${mes} ${anio}${platoTxt}`;
+  const ym = currentYm();
+  const mes = MES_NOMBRE[parseInt(ym.m, 10)];
+  const years = selectedYears();
+  const ylbl = years.length > 1 ? `${years[0]}–${years[years.length - 1]}` : years[0];
+  if (ag === 'anio') return `Tendencia anual ${ylbl}${platoTxt}`;
+  if (ag === 'mes') return `Ventas mensuales ${mesesTitulo(getMesesChecked())}${platoTxt}`;
+  if (ag === 'semana') return `Semanas de ${mes} ${ym.y}${platoTxt}`;
+  return `Días de ${mes} ${ym.y}${platoTxt}`;
 }
 
 function getSelectedPuntosVenta() {
@@ -2582,7 +2732,10 @@ function drawChart() {
     return;
   }
   const idx = chartIndices(d.labels);
-  const labels = idx.map(i => formatChartLabel(d.labels[i]));
+  const rawLabels = idx.map(i => d.labels[i]);
+  fitVentasChartHeight(rawLabels);
+  const xTicks = ventasChartXTicks(rawLabels);
+  const labels = rawLabels.map(formatChartLabel);
   const pick = arr => idx.map(i => (arr || [])[i] ?? 0);
   const legend = document.getElementById('chart-legend');
   const showBarra = pvIncludes('BARRA');
@@ -2591,7 +2744,7 @@ function drawChart() {
 
   if (d.filtro_trend && d.filtro_trend.series && d.filtro_trend.series.length && hasPlatoCatFilter()) {
     const ft = {
-      labels: idx.map(i => d.filtro_trend.labels[i]),
+      labels: rawLabels.map(formatChartLabel),
       series: d.filtro_trend.series.map(s => ({
         ...s,
         vta: idx.map(i => (s.vta || [])[i] ?? 0),
@@ -2601,7 +2754,10 @@ function drawChart() {
       const pal = ['#378ADD', '#1D9E75', '#BA7517', '#85B7EB', '#5DCAA5'];
       return `<span><span class="ls" style="background:${pal[i % pal.length]};height:3px;width:14px;border-radius:2px"></span>${s.nombre}</span>`;
     }).join('');
-    ch = drawFiltroTrendChart('cv', ch, ft);
+    ch = drawFiltroTrendChart('cv', ch, ft, {
+      xTicks,
+      layout: ventasLabelsConFecha(rawLabels) ? { padding: { bottom: 8, left: 2, right: 6 } } : {},
+    });
     return;
   }
 
@@ -2625,9 +2781,10 @@ function drawChart() {
     data:{ labels, datasets },
     options:{
       responsive:true, maintainAspectRatio:false,
+      layout: ventasLabelsConFecha(rawLabels) ? { padding: { bottom: 8, left: 2, right: 6 } } : {},
       plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: ctx => `${ctx.dataset.label}: $${ctx.parsed.y.toLocaleString('es-EC')}` } } },
       scales:{
-        x:{ stacked:true, grid:{color:'rgba(128,128,128,0.08)'}, ticks:{color:'#888780',font:{size:11},maxRotation:45,autoSkip:true,maxTicksLimit:12} },
+        x:{ stacked:true, grid:{color:'rgba(128,128,128,0.08)'}, ticks:xTicks },
         y:{ stacked:true, grid:{color:'rgba(128,128,128,0.08)'}, ticks:{color:'#888780', callback:v=>'$'+v.toLocaleString()} }
       }
     }
@@ -2772,6 +2929,8 @@ function bootDashboard() {
   (async () => {
     await loadMeta();
     initPvPanel('pv-panel', 'dd-pv-label', onPvChange);
+    initAniosPanel('chk-anios', 'dd-anios-label', onAniosChange, ['2025', '2026']);
+    _mesesSelected = defaultVentasMeses(['2025', '2026']);
     onYearChange();
     initDiasSemPanel('chk-dias-sem', 'dd-dias-sem-label', onPeriodCheckChange);
     if (typeof initComprasMeses === 'function') initComprasMeses();
