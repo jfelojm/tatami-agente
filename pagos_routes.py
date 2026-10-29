@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import io
 import os
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -33,6 +34,41 @@ _BLOQUEO_SEG = 600
 _fallos: dict[str, list[float]] = {}
 _NO_STORE = {"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"}
 MEDIOS_PAGO = ("TRANSFERENCIA", "EFECTIVO", "CHEQUE", "TARJETA", "DEBITO", "OTRO")
+SYNC_CADA_SEG = int(os.getenv("PAGOS_SYNC_CADA_SEG", "3600"))
+_sync_lock = threading.Lock()
+_ultima_sync: dict = {}
+
+
+def _sincronizar_cxp(origen: str) -> dict:
+    from cuentas_por_pagar import sincronizar
+
+    with _sync_lock:
+        desde = (_hoy() - timedelta(days=45)).isoformat()
+        try:
+            res = sincronizar(desde=desde, dry_run=False)
+            _ultima_sync.update(
+                {"at": datetime.now().isoformat(), "origen": origen, "nuevas": len(res["nuevos"]),
+                 "actualizadas": res["actualizados"], "error": None}
+            )
+        except Exception as e:
+            _ultima_sync.update({"at": datetime.now().isoformat(), "origen": origen, "error": str(e)[:300]})
+            raise
+        return dict(_ultima_sync)
+
+
+def _loop_sync() -> None:
+    time.sleep(90)
+    while True:
+        try:
+            r = _sincronizar_cxp("auto")
+            print(f"[pagos] sync auto: {r.get('nuevas')} nuevas, {r.get('actualizadas')} actualizadas")
+        except Exception as e:
+            print(f"[pagos] sync auto ERROR: {e}")
+        time.sleep(SYNC_CADA_SEG)
+
+
+if os.getenv("RAILWAY_ENVIRONMENT") and os.getenv("PAGOS_SYNC_AUTO", "1") != "0":
+    threading.Thread(target=_loop_sync, name="pagos-sync", daemon=True).start()
 
 
 def _sb():
@@ -201,7 +237,8 @@ def listar_facturas(
         ({**p, "total": round(p["total"], 2), "vencido": round(p["vencido"], 2)} for p in por_prov.values()),
         key=lambda p: -p["total"],
     )
-    return _json({"hoy": hoy.isoformat(), "facturas": rows, "resumen": res, "proveedores": proveedores})
+    return _json({"hoy": hoy.isoformat(), "facturas": rows, "resumen": res, "proveedores": proveedores,
+                  "ultima_sync": _ultima_sync or None})
 
 
 @router.get("/api/pagos/historial/{factura_id}")
@@ -349,12 +386,9 @@ async def editar(request: Request, x_pagos_token: str | None = Header(default=No
 
 @router.post("/api/pagos/sincronizar")
 def sincronizar_ahora(x_pagos_token: str | None = Header(default=None)):
-    _usuario_sesion(x_pagos_token)
-    from cuentas_por_pagar import sincronizar
-
-    desde = (_hoy() - timedelta(days=45)).isoformat()
-    res = sincronizar(desde=desde, dry_run=False)
-    return _json({"ok": True, "nuevas": len(res["nuevos"]), "actualizadas": res["actualizados"]})
+    usuario = _usuario_sesion(x_pagos_token)
+    res = _sincronizar_cxp(usuario)
+    return _json({"ok": True, "nuevas": res["nuevas"], "actualizadas": res["actualizadas"], "ultima_sync": res})
 
 
 @router.get("/api/pagos/export.xlsx")

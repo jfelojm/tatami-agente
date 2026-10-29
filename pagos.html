@@ -76,6 +76,7 @@
 <div id="app" style="display:none">
   <header>
     <h1>Tatami · Control de pagos</h1>
+    <span id="hdr-sync" class="muted" style="color:#aaa"></span>
     <span id="hdr-user" class="muted" style="color:#ccc"></span>
     <button id="btn-sync" title="Traer facturas nuevas del SRI">Actualizar facturas</button>
     <button id="btn-out">Salir</button>
@@ -208,6 +209,9 @@ async function cargar() {
   try {
     const j = await api("/api/pagos/facturas?" + p);
     S.facturas = j.facturas; S.sel.clear();
+    const us = j.ultima_sync;
+    $("#hdr-sync").textContent = us && us.at
+      ? (us.error ? "Error al actualizar facturas" : "Facturas al " + us.at.slice(11, 16)) : "";
     const r = j.resumen;
     $("#c-venc").textContent = fmt(r.vencido); $("#c-venc-n").textContent = r.n_vencidas + " facturas";
     $("#c-prox").textContent = fmt(r.por_vencer_7d); $("#c-prox-n").textContent = r.n_por_vencer + " facturas";
