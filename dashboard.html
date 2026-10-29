@@ -363,6 +363,31 @@ tr:hover td{background:#f5f4f0}
       <button type="button" class="mb on" onclick="setRentSocioFmt('valor',this)">Valores $</button>
       <button type="button" class="mb" onclick="setRentSocioFmt('pct',this)">Porcentaje %</button>
     </div>
+    <div class="bg" id="rent-evo-toggle">
+      <button type="button" class="mb on" onclick="setRentEvoModo('mes',this)">Mes a mes</button>
+      <button type="button" class="mb" onclick="setRentEvoModo('acum',this)">Acumulado</button>
+    </div>
+  </div>
+  <div class="sec" id="rent-costo-sec">
+    <div class="st" id="rent-costo-title">Costo real y margen mes a mes ($)</div>
+    <div class="cw" style="height:280px"><canvas id="cv-rent-costo"></canvas></div>
+    <div style="overflow-x:auto;margin-top:12px">
+      <table>
+        <thead>
+          <tr>
+            <th>Mes</th>
+            <th class="r">Ventas</th>
+            <th class="r">Costo real</th>
+            <th class="r">Margen</th>
+            <th class="r">Margen %</th>
+            <th class="r">Costo acum.</th>
+            <th class="r">Margen acum.</th>
+            <th class="r">Margen acum. %</th>
+          </tr>
+        </thead>
+        <tbody id="rent-costo-tb"></tbody>
+      </table>
+    </div>
   </div>
   <div id="rent-panel-socios" class="panel-socios">
     <div style="margin-bottom:8px">
@@ -1022,6 +1047,7 @@ tr:hover td{background:#f5f4f0}
   let chRent = null;
   let chRentPv = null;
   let chRentSocios = null;
+  let chRentCosto = null;
 
   window.syncSharedFilters = function () {
     const dash = window.currentDash || 'ventas';
@@ -1275,6 +1301,7 @@ tr:hover td{background:#f5f4f0}
   window.renderRentabilidad = function () {
     const d = window._rentData;
     if (!d || !d.resumen) return;
+    renderRentCostoMargen(d);
     const s = d.resumen;
     const aud = window.audience || 'socios';
     const pvInc = typeof window.pvIncludes === 'function' ? window.pvIncludes : () => true;
@@ -1397,6 +1424,150 @@ tr:hover td{background:#f5f4f0}
     }
     if (window._rentData) window.renderRentabilidad();
   };
+
+  window.rentEvoModo = window.rentEvoModo || 'mes';
+
+  window.setRentEvoModo = function (modo, btn) {
+    window.rentEvoModo = modo;
+    if (btn && btn.parentElement) {
+      btn.parentElement.querySelectorAll('.mb').forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+    }
+    if (window._rentData) window.renderRentabilidad();
+  };
+
+  function fmtMesRent(iso) {
+    const meses = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+    const m = /^(\d{4})-(\d{2})$/.exec(String(iso || ''));
+    if (!m) return String(iso || '');
+    return meses[parseInt(m[2], 10)] + ' ' + m[1];
+  }
+
+  function moneyRent(n) {
+    return '$' + Number(n || 0).toLocaleString('es-EC', { maximumFractionDigits: 0 });
+  }
+
+  function filasCostoMargen(d) {
+    let labels = (d.labels_mes || []).slice();
+    let vta = (d.vta_mes || []).slice();
+    let costo = (d.costo_mes || []).slice();
+    let margen = (d.margen_mes || []).slice();
+    const pf = window._periodFilter;
+    if (pf && pf.length && labels.some(l => pf.includes(l))) {
+      const idx = labels.map((l, i) => (pf.includes(l) ? i : -1)).filter(i => i >= 0);
+      labels = idx.map(i => labels[i]);
+      vta = idx.map(i => Number(vta[i]) || 0);
+      costo = idx.map(i => Number(costo[i]) || 0);
+      margen = idx.map(i => Number(margen[i]) || 0);
+    }
+    let va = 0;
+    let ca = 0;
+    const vtaA = [];
+    const costoA = [];
+    const margenA = [];
+    const margenPct = [];
+    const costoPct = [];
+    const margenAPct = [];
+    const costoAPct = [];
+    labels.forEach((_, i) => {
+      const v = Number(vta[i]) || 0;
+      const c = Number(costo[i]) || 0;
+      const m = Number(margen[i]) || 0;
+      va += v;
+      ca += c;
+      vtaA.push(va);
+      costoA.push(ca);
+      margenA.push(va - ca);
+      margenPct.push(v ? Math.round(m / v * 1000) / 10 : 0);
+      costoPct.push(v ? Math.round(c / v * 1000) / 10 : 0);
+      margenAPct.push(va ? Math.round((va - ca) / va * 1000) / 10 : 0);
+      costoAPct.push(va ? Math.round(ca / va * 1000) / 10 : 0);
+    });
+    return { labels, vta, costo, margen, margenPct, costoPct, vtaA, costoA, margenA, margenAPct, costoAPct };
+  }
+
+  function renderRentCostoMargen(d) {
+    const rows = filasCostoMargen(d);
+    const tb = document.getElementById('rent-costo-tb');
+    if (tb) {
+      tb.innerHTML = rows.labels.length
+        ? rows.labels.map((lb, i) => `<tr><td>${fmtMesRent(lb)}</td><td class="r">${moneyRent(rows.vta[i])}</td><td class="r">${moneyRent(rows.costo[i])}</td><td class="r">${moneyRent(rows.margen[i])}</td><td class="r">${rows.margenPct[i]}%</td><td class="r">${moneyRent(rows.costoA[i])}</td><td class="r">${moneyRent(rows.margenA[i])}</td><td class="r">${rows.margenAPct[i]}%</td></tr>`).join('')
+        : '<tr><td colspan="8">Sin meses en el período</td></tr>';
+    }
+    const canvas = document.getElementById('cv-rent-costo');
+    if (!canvas) return;
+    if (chRentCosto) { chRentCosto.destroy(); chRentCosto = null; }
+    if (!rows.labels.length) return;
+    const modo = window.rentEvoModo || 'mes';
+    const fmt = window.rentSocioFmt || 'valor';
+    const pct = fmt === 'pct';
+    const acum = modo === 'acum';
+    const titulo = document.getElementById('rent-costo-title');
+    if (titulo) titulo.textContent = `Costo real y margen ${acum ? 'acumulado' : 'mes a mes'} (${pct ? '%' : '$'})`;
+    const serieA = acum ? (pct ? rows.costoAPct : rows.costoA) : (pct ? rows.costoPct : rows.costo);
+    const serieB = acum ? (pct ? rows.margenAPct : rows.margenA) : (pct ? rows.margenPct : rows.margen);
+    const nombreA = acum ? (pct ? 'Costo acum. %' : 'Costo real acum.') : (pct ? 'Costo real %' : 'Costo real');
+    const nombreB = acum ? (pct ? 'Margen acum. %' : 'Margen acum.') : (pct ? 'Margen %' : 'Margen');
+    const comoLinea = acum || pct;
+    const yTick = pct
+      ? v => Number(v).toFixed(0) + '%'
+      : v => '$' + Number(v).toLocaleString('es-EC');
+    chRentCosto = new Chart(canvas, {
+      data: {
+        labels: rows.labels.map(fmtMesRent),
+        datasets: [
+          {
+            type: comoLinea ? 'line' : 'bar',
+            label: nombreA,
+            data: serieA,
+            borderColor: '#BA7517',
+            backgroundColor: comoLinea ? 'transparent' : '#E8C49A',
+            borderWidth: 2,
+            pointRadius: comoLinea ? 3 : 0,
+            tension: 0.25,
+          },
+          {
+            type: comoLinea ? 'line' : 'bar',
+            label: nombreB,
+            data: serieB,
+            borderColor: '#1D9E75',
+            backgroundColor: comoLinea ? 'transparent' : '#5DCAA5',
+            borderWidth: 2,
+            pointRadius: comoLinea ? 3 : 0,
+            tension: 0.25,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: true, labels: { boxWidth: 12, font: { size: 11 } } },
+          tooltip: {
+            callbacks: {
+              label: ctx => pct
+                ? `${ctx.dataset.label}: ${Number(ctx.parsed.y).toFixed(1)}%`
+                : `${ctx.dataset.label}: $${Number(ctx.parsed.y).toLocaleString('es-EC')}`,
+            },
+          },
+        },
+        scales: {
+          x: {
+            ticks: {
+              source: 'labels',
+              autoSkip: false,
+              maxTicksLimit: 400,
+              maxRotation: rows.labels.length > 8 ? 45 : 0,
+              minRotation: 0,
+              color: '#444441',
+              font: { size: 10 },
+            },
+          },
+          y: { ticks: { color: '#888780', callback: yTick } },
+        },
+      },
+    });
+  }
 
   /* ——— Inventario ——— */
   window.setInvResp = function (resp, btn) {

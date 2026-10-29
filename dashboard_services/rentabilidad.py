@@ -145,6 +145,31 @@ def costo_compras_periodo(rows_entrada: list[dict]) -> float:
     return round(total, 2)
 
 
+def evolucion_costo_margen_mes(serie_mes: dict[str, dict[str, float]]) -> dict[str, list]:
+    """Series mensuales de ventas, costo real y margen, en orden cronológico."""
+    labels = sorted(k for k in serie_mes if k)
+    vta: list[float] = []
+    costo: list[float] = []
+    margen: list[float] = []
+    margen_pct: list[float] = []
+    for k in labels:
+        row = serie_mes[k]
+        v = float(row.get("vta") or 0)
+        c = float(row.get("costo") or 0)
+        m = v - c
+        vta.append(round(v, 2))
+        costo.append(round(c, 2))
+        margen.append(round(m, 2))
+        margen_pct.append(round(m / v * 100, 1) if v else 0.0)
+    return {
+        "labels_mes": labels,
+        "vta_mes": vta,
+        "costo_mes": costo,
+        "margen_mes": margen,
+        "margen_mes_pct": margen_pct,
+    }
+
+
 def costo_mp_por_buckets(rows_entrada: list[dict], agrup: str) -> dict[str, dict[str, float]]:
     """Promedio de costo MP por bucket temporal (mes/semana/día)."""
     grouped: dict[str, list[dict]] = defaultdict(list)
@@ -172,6 +197,9 @@ def build_rentabilidad_from_catalog(
     recetas_por_plato = _recetas_por_plato_cached()
     costo_mp_global = costo_promedio_mp_periodo(rows_entrada)
     costo_mp_buckets = costo_mp_por_buckets(rows_entrada, agrup)
+    costo_mp_meses = (
+        costo_mp_buckets if agrup == "mes" else costo_mp_por_buckets(rows_entrada, "mes")
+    )
     costo_sub = _costo_sub_cached()
 
     platos: dict[str, dict] = {}
@@ -179,6 +207,7 @@ def build_rentabilidad_from_catalog(
     serie: dict[str, dict[str, float]] = defaultdict(
         lambda: {"vta": 0.0, "costo": 0.0, "BARRA": 0.0, "COCINA": 0.0, "OTRO": 0.0}
     )
+    serie_mes: dict[str, dict[str, float]] = defaultdict(lambda: {"vta": 0.0, "costo": 0.0})
     desglose_pv: dict[str, float] = {"BARRA": 0.0, "COCINA": 0.0, "OTRO": 0.0}
     margen_pv: dict[str, float] = {"BARRA": 0.0, "COCINA": 0.0, "OTRO": 0.0}
 
@@ -216,6 +245,11 @@ def build_rentabilidad_from_catalog(
             serie[bucket_key]["vta"] += vta
             serie[bucket_key]["costo"] += costo
             serie[bucket_key][pv] = serie[bucket_key].get(pv, 0.0) + margen
+            mes_key = fecha[:7]
+            costo_mp_mes = costo_mp_meses.get(mes_key) or costo_mp_global
+            cu_mes = unit_cost(cod_rec, meta.get("variedad_smart_menu", ""), costo_mp_mes)
+            serie_mes[mes_key]["vta"] += vta
+            serie_mes[mes_key]["costo"] += cu_mes * uds
 
         desglose_pv[pv] = desglose_pv.get(pv, 0.0) + vta
         margen_pv[pv] = margen_pv.get(pv, 0.0) + margen
@@ -300,10 +334,12 @@ def build_rentabilidad_from_catalog(
             out.append(round(m / vta_b * 100, 1) if vta_b else 0.0)
         return out
 
+    evo_mes = evolucion_costo_margen_mes(serie_mes)
     return {
         "periodo": {"desde": desde.isoformat(), "hasta": hasta.isoformat()},
         "agrup": agrup,
         "labels": labels,
+        **evo_mes,
         "margen": margen_serie,
         "margen_pct": margen_pct_serie,
         "vta_serie": vta_serie,
