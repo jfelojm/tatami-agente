@@ -322,6 +322,84 @@ def _cambios(actual: dict, nuevo: dict) -> dict:
     return out
 
 
+def _cambio_credito(act: dict, proveedores: dict) -> dict:
+    """Recalcula crédito de una factura pendiente ya registrada (fuera de la ventana de fuentes)."""
+    if act.get("estado_pago") != "PENDIENTE" or act.get("fuente_credito") == "MANUAL":
+        return {}
+    dias, fuente = resolver_credito(act["ruc_proveedor"], act.get("plazo_xml"), proveedores)
+    venc = _vencimiento(act.get("fecha_emision"), dias)
+    if dias == act.get("dias_credito") and fuente == act.get("fuente_credito") and venc == act.get("fecha_vencimiento"):
+        return {}
+    return {"dias_credito": dias, "fuente_credito": fuente, "fecha_vencimiento": venc}
+
+
+def actualizar_credito_bd_prov(ruc: str, dias: int, razon_social: str = "", usuario: str = "") -> dict:
+    """Escribe dias_credito/condicion_pago en BD_PROV para todas las filas con ese RUC; si no existe, la crea."""
+    from gspread.utils import rowcol_to_a1
+
+    from procesar_facturas_drive import _get_sheet
+
+    ws = _get_sheet().worksheet("BD_PROV")
+    vals = ws.get_all_values()
+    hi = next(i for i, r in enumerate(vals) if "cod_proveedor" in [c.strip() for c in r])
+    h = [c.strip() for c in vals[hi]]
+    col = {k: h.index(k) for k in h if k}
+    col_ruc = col.get("RUC", col.get("ruc"))
+    ruc_n = re.sub(r"\D", "", ruc or "")
+    condicion = "contado" if dias == 0 else "credito"
+
+    updates, filas = [], []
+    for i, row in enumerate(vals[hi + 1 :], start=hi + 2):
+        if col_ruc is not None and col_ruc < len(row) and re.sub(r"\D", "", row[col_ruc]) == ruc_n:
+            filas.append({"fila": i, "proveedor": row[col["razon_social"]] if col.get("razon_social", 99) < len(row) else ""})
+            updates.append({"range": rowcol_to_a1(i, col["dias_credito"] + 1), "values": [[dias]]})
+            updates.append({"range": rowcol_to_a1(i, col["condicion_pago"] + 1), "values": [[condicion]]})
+    if updates:
+        ws.batch_update(updates, value_input_option="USER_ENTERED")
+        return {"accion": "ACTUALIZADO", "filas": filas}
+
+    cods = [vals[j][col["cod_proveedor"]] for j in range(hi + 1, len(vals)) if col["cod_proveedor"] < len(vals[j])]
+    nums = [int(c) for c in cods if str(c).strip().isdigit()]
+    nuevo_cod = str((max(nums) if nums else 0) + 1).zfill(3)
+    fila = [""] * len(h)
+    valores = {
+        "razon_social": razon_social or ruc_n,
+        "cod_proveedor": nuevo_cod,
+        "RUC": ruc_n,
+        "ruc": ruc_n,
+        "proveedor_inventario": "NO",
+        "activo": "SI",
+        "condicion_pago": condicion,
+        "dias_credito": dias,
+        "observaciones": f"Alta desde control de pagos ({usuario})" if usuario else "Alta desde control de pagos",
+    }
+    for k, v in valores.items():
+        if k in col:
+            fila[col[k]] = v
+    ws.append_row(fila, value_input_option="USER_ENTERED", table_range=rowcol_to_a1(hi + 1, 1))
+    return {"accion": "CREADO", "cod_proveedor": nuevo_cod, "filas": []}
+
+
+def aplicar_credito_proveedor(sb, ruc: str, dias: int) -> list[str]:
+    """Aplica días de crédito del proveedor a sus facturas pendientes (salvo ediciones manuales por factura)."""
+    pend = (
+        sb.table(TABLA).select("id,fecha_emision,dias_credito,fecha_vencimiento,fuente_credito")
+        .eq("ruc_proveedor", ruc).eq("estado_pago", "PENDIENTE").neq("fuente_credito", "MANUAL")
+        .execute().data or []
+    )
+    ahora = datetime.now().isoformat()
+    cambiadas = []
+    for r in pend:
+        venc = _vencimiento(r.get("fecha_emision"), dias)
+        if r.get("dias_credito") == dias and r.get("fecha_vencimiento") == venc and r.get("fuente_credito") == "BD_PROV":
+            continue
+        sb.table(TABLA).update(
+            {"dias_credito": dias, "fuente_credito": "BD_PROV", "fecha_vencimiento": venc, "actualizado_at": ahora}
+        ).eq("id", r["id"]).execute()
+        cambiadas.append(r["id"])
+    return cambiadas
+
+
 def sincronizar(desde: str = DESDE_DEFAULT, dry_run: bool = True, sb=None, proveedores=None) -> dict:
     sb = sb or _supabase()
     proveedores = proveedores if proveedores is not None else cargar_credito_proveedores()
@@ -351,6 +429,14 @@ def sincronizar(desde: str = DESDE_DEFAULT, dry_run: bool = True, sb=None, prove
             ch = _cambios(act, rec)
             if ch:
                 updates.append((act["id"], ch))
+
+    vistos = {(f["num_factura"], f["ruc"]) for f in fuentes}
+    for act in actuales:
+        if (act["num_factura"], act["ruc_proveedor"]) in vistos:
+            continue
+        ch = _cambio_credito(act, proveedores)
+        if ch:
+            updates.append((act["id"], ch))
 
     if not dry_run:
         for i in range(0, len(nuevos), 200):

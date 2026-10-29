@@ -18,6 +18,7 @@
   button.prim { background:var(--blue); color:#fff; border-color:var(--blue); }
   button.prim:disabled { opacity:.45; cursor:default; }
   button.danger { color:var(--red); border-color:var(--red); }
+  button.mini { padding:1px 6px; font-size:11px; margin-left:4px; color:var(--blue); border-color:var(--blue); }
   .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-bottom:14px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; cursor:pointer; }
   .card .lbl { color:var(--muted); font-size:12px; }
@@ -88,7 +89,7 @@
       <div class="card" data-filtro="PENDIENTE"><div class="lbl">Total pendiente</div><div class="val" id="c-pend">—</div><div class="sub" id="c-pend-n"></div></div>
     </div>
 
-    <details id="prov-det">
+    <details id="prov-det" open>
       <summary style="cursor:pointer;margin-bottom:8px"><b>Deuda por proveedor</b> <span class="muted">(clic para filtrar)</span></summary>
       <div class="prov-list" id="prov-list"></div>
     </details>
@@ -216,11 +217,45 @@ async function cargar() {
     $("#c-venc").textContent = fmt(r.vencido); $("#c-venc-n").textContent = r.n_vencidas + " facturas";
     $("#c-prox").textContent = fmt(r.por_vencer_7d); $("#c-prox-n").textContent = r.n_por_vencer + " facturas";
     $("#c-pend").textContent = fmt(r.pendiente); $("#c-pend-n").textContent = r.n_pendientes + " facturas";
+    S.proveedores = j.proveedores;
     $("#prov-list").innerHTML = j.proveedores.map(p =>
-      `<div data-ruc="${esc(p.ruc)}" data-nom="${esc(p.razon_social)}"><span>${esc(p.razon_social)} <span class="muted">(${p.n})</span></span>
-       <span>${fmt(p.total)}${p.vencido ? ` <span class="muted" style="color:var(--red)">venc. ${fmt(p.vencido)}</span>` : ""}</span></div>`).join("");
+      `<div data-ruc="${esc(p.ruc)}" data-nom="${esc(p.razon_social)}">
+       <span>${esc(p.razon_social)} <span class="muted">(${p.n})</span><br>${txtCredito(p)}
+         <button class="mini" data-edit-cred="${esc(p.ruc)}">editar</button></span>
+       <span style="text-align:right">${fmt(p.total)}${p.vencido ? `<br><span class="muted" style="color:var(--red)">venc. ${fmt(p.vencido)}</span>` : ""}</span></div>`).join("");
+    if (S.ruc) pintarFiltroProv();
     pintar();
   } catch (e) { $("#tbody").innerHTML = `<tr><td colspan="7" class="err">${esc(e.message)}</td></tr>`; }
+}
+
+function txtCredito(p) {
+  if (p.dias_credito == null) return `<span class="muted">Crédito: por factura</span>`;
+  const d = p.dias_credito === 0 ? "contado" : p.dias_credito + " días";
+  const nota = { SIN_DATO: " · sin acordar", XML: " · según factura" }[p.fuente_credito] || "";
+  const color = p.fuente_credito === "SIN_DATO" ? "var(--amber)" : "var(--muted)";
+  return `<span class="muted" style="color:${color}">Crédito: <b>${d}</b>${nota}</span>`;
+}
+
+function pintarFiltroProv() {
+  const p = (S.proveedores || []).find(x => x.ruc === S.ruc);
+  $("#prov-filtro").innerHTML = `Proveedor: <b>${esc(S.provNombre)}</b>${p ? " · " + txtCredito(p) +
+    ` <button class="mini" data-edit-cred="${esc(S.ruc)}">editar</button>` : ""} · <a href="#" id="quitar-prov">quitar filtro</a>`;
+}
+
+async function editarCredito(ruc) {
+  const p = (S.proveedores || []).find(x => x.ruc === ruc) || { ruc, razon_social: S.provNombre };
+  const actual = p.dias_credito ?? "";
+  const v = prompt(`Días de crédito para ${p.razon_social}\n(0 = contado). Se guarda en BD_PROV y recalcula sus facturas pendientes.`, actual);
+  if (v === null) return;
+  const dias = parseInt(v, 10);
+  if (isNaN(dias) || dias < 0 || dias > 365) { toast("Ingresa un número entre 0 y 365"); return; }
+  try {
+    const j = await api("/api/pagos/credito_proveedor", { method: "POST",
+      body: JSON.stringify({ ruc, dias_credito: dias, razon_social: p.razon_social }) });
+    toast(`Crédito guardado (${dias} días) · ${j.facturas_actualizadas} factura(s) recalculadas` +
+      (j.bd_prov.accion === "CREADO" ? ` · proveedor agregado a BD_PROV (${j.bd_prov.cod_proveedor})` : ""));
+    cargar();
+  } catch (e) { toast(e.message); }
 }
 
 function filtradas() {
@@ -335,9 +370,10 @@ document.addEventListener("click", (e) => {
     $("#f-vis").style.display = S.estado === "PENDIENTE" ? "" : "none"; cargar(); }
   const card = e.target.closest(".card[data-filtro]");
   if (card) { document.querySelector('#tabs button[data-e="PENDIENTE"]').click(); $("#f-vis").value = card.dataset.filtro === "PENDIENTE" ? "" : card.dataset.filtro; }
+  const ed = e.target.closest("[data-edit-cred]");
+  if (ed) { e.preventDefault(); editarCredito(ed.dataset.editCred); return; }
   const prov = e.target.closest("#prov-list div[data-ruc]");
-  if (prov) { S.ruc = prov.dataset.ruc; S.provNombre = prov.dataset.nom;
-    $("#prov-filtro").innerHTML = `Proveedor: <b>${esc(S.provNombre)}</b> <a href="#" id="quitar-prov">quitar filtro</a>`; cargar(); }
+  if (prov) { S.ruc = prov.dataset.ruc; S.provNombre = prov.dataset.nom; pintarFiltroProv(); cargar(); }
   if (e.target.id === "quitar-prov") { e.preventDefault(); S.ruc = null; $("#prov-filtro").innerHTML = ""; cargar(); }
   const row = e.target.closest("tr.row");
   if (row && !e.target.matches("input")) abrirDetalle(row.dataset.id);

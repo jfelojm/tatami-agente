@@ -16,6 +16,7 @@ import os
 import threading
 import time
 import uuid
+from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -225,16 +226,29 @@ def listar_facturas(
             res["n_por_vencer"] += 1
         p = por_prov.setdefault(
             r["ruc_proveedor"],
-            {"ruc": r["ruc_proveedor"], "razon_social": r.get("razon_social") or r["ruc_proveedor"], "total": 0.0, "vencido": 0.0, "n": 0},
+            {"ruc": r["ruc_proveedor"], "razon_social": r.get("razon_social") or r["ruc_proveedor"], "total": 0.0,
+             "vencido": 0.0, "n": 0, "_dias": Counter(), "_fuente": Counter()},
         )
         p["total"] += t
         p["n"] += 1
+        if r.get("fuente_credito") != "MANUAL":
+            p["_dias"][r.get("dias_credito") or 0] += 1
+            p["_fuente"][r.get("fuente_credito") or "SIN_DATO"] += 1
         if ev == "VENCIDA":
             p["vencido"] += t
     for k in ("vencido", "por_vencer_7d", "pendiente"):
         res[k] = round(res[k], 2)
     proveedores = sorted(
-        ({**p, "total": round(p["total"], 2), "vencido": round(p["vencido"], 2)} for p in por_prov.values()),
+        (
+            {
+                **{k: v for k, v in p.items() if not k.startswith("_")},
+                "total": round(p["total"], 2),
+                "vencido": round(p["vencido"], 2),
+                "dias_credito": p["_dias"].most_common(1)[0][0] if p["_dias"] else None,
+                "fuente_credito": p["_fuente"].most_common(1)[0][0] if p["_fuente"] else "MANUAL",
+            }
+            for p in por_prov.values()
+        ),
         key=lambda p: -p["total"],
     )
     return _json({"hoy": hoy.isoformat(), "facturas": rows, "resumen": res, "proveedores": proveedores,
@@ -382,6 +396,30 @@ async def editar(request: Request, x_pagos_token: str | None = Header(default=No
         {"cambios": cambios, "antes": {k: a.get(k) for k in cambios}},
     )
     return _json({"ok": True, "cambios": cambios})
+
+
+@router.post("/api/pagos/credito_proveedor")
+async def credito_proveedor(request: Request, x_pagos_token: str | None = Header(default=None)):
+    usuario = _usuario_sesion(x_pagos_token)
+    body = await request.json()
+    ruc = str(body.get("ruc") or "").strip()
+    try:
+        dias = int(body.get("dias_credito"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Días de crédito inválidos")
+    if not ruc or dias < 0 or dias > 365:
+        raise HTTPException(status_code=400, detail="Días de crédito fuera de rango (0 a 365)")
+    from cuentas_por_pagar import actualizar_credito_bd_prov, aplicar_credito_proveedor
+
+    try:
+        hoja = actualizar_credito_bd_prov(ruc, dias, str(body.get("razon_social") or ""), usuario)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"No se pudo actualizar BD_PROV: {e}") from e
+    sb = _sb()
+    with _sync_lock:
+        cambiadas = aplicar_credito_proveedor(sb, ruc, dias)
+    _historial(sb, cambiadas, "CREDITO_PROVEEDOR", usuario, {"dias_credito": dias, "bd_prov": hoja["accion"]})
+    return _json({"ok": True, "facturas_actualizadas": len(cambiadas), "bd_prov": hoja})
 
 
 @router.post("/api/pagos/sincronizar")
