@@ -49,6 +49,12 @@
   .modal .acts { display:flex; gap:8px; justify-content:flex-end; margin-top:16px; flex-wrap:wrap; }
   .kv { display:grid; grid-template-columns:130px 1fr; gap:4px 10px; font-size:13px; }
   .kv b { color:var(--muted); font-weight:500; }
+  #m-det .modal { max-width:820px; }
+  .items { margin-top:14px; border-top:1px solid var(--line); padding-top:8px; }
+  .items table { border:none; font-size:12px; }
+  .items th, .items td { padding:5px 6px; }
+  .items .inv { color:var(--green); } .items .noinv { color:var(--amber); }
+  .aviso { background:#fff6e0; border:1px solid #f3d28a; border-radius:6px; padding:6px 10px; font-size:12px; margin:6px 0; }
   .hist { margin-top:12px; font-size:12px; border-top:1px solid var(--line); padding-top:8px; }
   .hist div { padding:4px 0; border-bottom:1px dashed var(--line); }
   #login { max-width:340px; margin:80px auto; background:#fff; padding:24px; border-radius:10px; border:1px solid var(--line); }
@@ -146,6 +152,7 @@
 <div class="modal-bg" id="m-det"><div class="modal">
   <h2 id="md-tit"></h2>
   <div class="kv" id="md-kv"></div>
+  <div class="items" id="md-items"></div>
   <div id="md-edit">
     <label>Días de crédito</label><input type="number" min="0" max="365" id="md-dias">
     <label>Total a pagar</label><input type="number" step="0.01" id="md-total">
@@ -316,6 +323,7 @@ async function confirmarPago() {
 
 async function abrirDetalle(id) {
   const f = S.facturas.find(x => x.id === id); if (!f) return;
+  S.detalleAbierto = id;
   $("#md-tit").textContent = `${f.razon_social || f.ruc_proveedor} · ${f.num_factura}`;
   const filas = [
     ["Estado", `<span class="badge b-${f.estado_visible}">${ETQ[f.estado_visible] || f.estado_visible}</span>`],
@@ -338,7 +346,9 @@ async function abrirDetalle(id) {
     ? `<button class="danger" id="md-anular">Anular</button><button class="prim" id="md-guardar">Guardar cambios</button>`
     : `<button class="danger" id="md-revertir">Volver a pendiente</button>`);
   $("#md-hist").innerHTML = "<span class='muted'>Cargando historial…</span>";
+  $("#md-items").innerHTML = "<span class='muted'>Cargando ítems…</span>";
   $("#m-det").style.display = "flex";
+  cargarItems(id);
   const err = (e) => $("#md-err").textContent = e.message;
   if (pend) {
     $("#md-guardar").onclick = async () => {
@@ -360,6 +370,42 @@ async function abrirDetalle(id) {
       `<div>${esc((x.creado_at || "").slice(0,16).replace("T"," "))} · <b>${esc(x.accion)}</b> · ${esc(x.usuario)}
        <span class="muted">${esc(x.detalle?.motivo || x.detalle?.referencia_pago || "")}</span></div>`).join("") || "<div class='muted'>Sin cambios registrados</div>");
   } catch (e) { $("#md-hist").textContent = ""; }
+}
+
+const ESTADO_INV = {
+  COMPLETA: "Todo ingresado a inventario",
+  PARCIAL: "Ingreso parcial: hay ítems que no entraron a inventario",
+  POR_RECIBIR: "Pendiente de recepción en barra",
+};
+const num = (n, d = 2) => n == null ? "" : Number(n).toLocaleString("es-EC", { maximumFractionDigits: d });
+
+async function cargarItems(id) {
+  try {
+    const d = await api("/api/pagos/detalle/" + id);
+    if (S.detalleAbierto !== id) return;
+    if (!d.items.length) { $("#md-items").innerHTML = "<b>Ítems</b><div class='muted'>Sin detalle disponible para esta factura</div>"; return; }
+    const est = d.estado_inventario;
+    let aviso = "";
+    if (d.fuente === "INVENTARIO") aviso += `<div class="aviso">Factura sin XML: se muestran las líneas ingresadas a inventario (costos sin IVA).</div>`;
+    if (est && est !== "COMPLETA" && d.sin_ingreso) aviso += `<div class="aviso">${ESTADO_INV[est] || est}</div>`;
+    else if (!est) aviso += `<div class="aviso">Esta factura no pasó por inventario (servicio o gasto).</div>`;
+    const conIva = d.fuente === "XML";
+    const filas = d.items.map(it => {
+      const inv = it.ingresos.length
+        ? it.ingresos.map(g => `<div class="inv">✓ ${esc(g.nombre_mp)} <span class="muted">(${esc(g.cod_mp)}) ${num(g.cantidad)} ${esc(g.unidad || "")} → ${esc(g.bodega || "")}</span></div>`).join("")
+        : `<span class="noinv">sin ingreso</span>`;
+      return `<tr><td>${esc(it.descripcion)}<div class="muted">${esc(it.codigo)}</div></td>
+        <td class="num">${num(it.cantidad, 3)}</td><td class="num hide-m">${it.precio_unitario == null ? "" : fmt(it.precio_unitario)}</td>
+        <td class="num">${fmt(it.subtotal)}</td>${conIva ? `<td class="num hide-m">${it.iva ? fmt(it.iva) : "—"}</td>` : ""}
+        <td>${inv}</td></tr>`;
+    }).join("");
+    const st = d.items.reduce((a, i) => a + Number(i.subtotal || 0), 0);
+    const iva = d.items.reduce((a, i) => a + Number(i.iva || 0), 0);
+    $("#md-items").innerHTML = `<b>Ítems (${d.items.length})</b>${d.sin_ingreso && est ? ` <span class="muted">· ${d.sin_ingreso} sin ingreso a inventario</span>` : ""}${aviso}
+      <table><thead><tr><th>Descripción</th><th class="num">Cant.</th><th class="num hide-m">P. unit.</th><th class="num">Subtotal</th>
+      ${conIva ? `<th class="num hide-m">IVA</th>` : ""}<th>Inventario</th></tr></thead><tbody>${filas}</tbody>
+      <tfoot><tr><td colspan="3" class="num"><b>Totales</b></td><td class="num"><b>${fmt(st)}</b></td>${conIva ? `<td class="num hide-m"><b>${fmt(iva)}</b></td>` : ""}<td></td></tr></tfoot></table>`;
+  } catch (e) { $("#md-items").innerHTML = `<span class="err">${esc(e.message)}</span>`; }
 }
 
 document.addEventListener("click", (e) => {

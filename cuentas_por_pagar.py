@@ -115,6 +115,114 @@ def parsear_totales_xml(xml: str) -> dict | None:
     }
 
 
+def items_xml(xml: str) -> list[dict]:
+    try:
+        root = ET.fromstring(xml)
+        comp = root.find(".//comprobante")
+        factura = ET.fromstring(comp.text.strip()) if comp is not None and comp.text else root
+    except ET.ParseError:
+        return []
+    out = []
+    for d in factura.findall(".//detalles/detalle"):
+        iva = 0.0
+        tarifa = None
+        for imp in d.findall(".//impuestos/impuesto"):
+            if _txt(imp, "codigo") == "2":
+                iva += _num(_txt(imp, "valor")) or 0.0
+                tarifa = _num(_txt(imp, "tarifa"))
+        out.append(
+            {
+                "codigo": _txt(d, "codigoPrincipal") or _txt(d, "codigoInterno"),
+                "descripcion": _txt(d, "descripcion"),
+                "cantidad": _num(_txt(d, "cantidad")) or 0.0,
+                "precio_unitario": _num(_txt(d, "precioUnitario")) or 0.0,
+                "descuento": _num(_txt(d, "descuento")) or 0.0,
+                "subtotal": round(_num(_txt(d, "precioTotalSinImpuesto")) or 0.0, 2),
+                "iva": round(iva, 2),
+                "tarifa_iva": tarifa,
+            }
+        )
+    return out
+
+
+def detalle_factura(sb, fila: dict) -> dict:
+    """Ítems de la factura (XML SRI si existe; si no, líneas ingresadas a inventario) + cruce con inventario."""
+    num, ruc = fila["num_factura"], fila["ruc_proveedor"]
+    fp = (
+        sb.table("facturas_procesadas").select("estado,meta").eq("num_factura", num)
+        .eq("ruc_proveedor", ruc).limit(1).execute().data or []
+    )
+    estado_inv = fp[0]["estado"] if fp else None
+    trx = str(((fp[0].get("meta") or {}) if fp else {}).get("trx") or "")
+
+    xml = ""
+    q = sb.table("sri_comprobantes_recibidos").select("xml_autorizado")
+    q = q.eq("clave_acceso", fila["clave_acceso"]) if fila.get("clave_acceso") else q.eq("num_factura", num).eq("ruc_emisor", ruc)
+    r = q.limit(1).execute().data or []
+    if r:
+        xml = r[0].get("xml_autorizado") or ""
+
+    mq = (
+        sb.table("mov_inventario")
+        .select("cod_mp_sistema,nombre_mp,cantidad_mov,unidad_base,costo_total,cod_bodega_destino,observaciones,fecha")
+        .eq("num_documento", num).eq("tipo_mov", "ENTRADA")
+    )
+    if trx:
+        mq = mq.ilike("observaciones", f"%{trx}%")
+    movs = mq.execute().data or []
+    if not trx and fila.get("fecha_emision"):
+        mismos = [m for m in movs if (m.get("fecha") or "")[:10] == fila["fecha_emision"]]
+        movs = mismos or movs
+
+    def _cod_mov(m: dict) -> str:
+        mt = re.search(r"ITEM_XML:([^|]+)", m.get("observaciones") or "")
+        return mt.group(1).strip() if mt else ""
+
+    def _norm_cod(c: str) -> str:
+        c = (c or "").strip().upper()
+        return c.lstrip("0") or c
+
+    def _ingreso(m: dict) -> dict:
+        return {
+            "cod_mp": m.get("cod_mp_sistema"), "nombre_mp": m.get("nombre_mp"),
+            "cantidad": m.get("cantidad_mov"), "unidad": m.get("unidad_base"),
+            "bodega": m.get("cod_bodega_destino"), "costo_total": m.get("costo_total"),
+        }
+
+    if xml:
+        items = items_xml(xml)
+        por_cod: dict[str, list[dict]] = {}
+        for m in movs:
+            por_cod.setdefault(_norm_cod(_cod_mov(m)), []).append(m)
+        usados = set()
+        for it in items:
+            cod = _norm_cod(it["codigo"])
+            it["ingresos"] = [] if cod in usados else [_ingreso(m) for m in por_cod.get(cod, [])]
+            usados.add(cod)
+        fuente = "XML"
+    elif movs:
+        items = [
+            {
+                "codigo": _cod_mov(m).split(":")[-1] if _cod_mov(m) else "",
+                "descripcion": (m.get("observaciones") or "").split("|")[0].strip(),
+                "cantidad": None, "precio_unitario": None, "descuento": 0.0,
+                "subtotal": round(float(m.get("costo_total") or 0), 2), "iva": None, "tarifa_iva": None,
+                "ingresos": [_ingreso(m)],
+            }
+            for m in movs
+        ]
+        fuente = "INVENTARIO"
+    else:
+        items, fuente = [], "NINGUNO"
+
+    return {
+        "fuente": fuente,
+        "estado_inventario": estado_inv,
+        "items": items,
+        "sin_ingreso": sum(1 for it in items if not it.get("ingresos")),
+    }
+
+
 def cargar_credito_proveedores() -> dict[str, dict]:
     """RUC → {cod_proveedor, razon_social, condicion_pago, dias_credito (int|None)}."""
     from procesar_facturas_drive import _get_sheet

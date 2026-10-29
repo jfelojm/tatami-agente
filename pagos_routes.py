@@ -265,6 +265,18 @@ def historial(factura_id: str, x_pagos_token: str | None = Header(default=None))
     return _json({"historial": rows})
 
 
+@router.get("/api/pagos/detalle/{factura_id}")
+def detalle(factura_id: str, x_pagos_token: str | None = Header(default=None)):
+    _usuario_sesion(x_pagos_token)
+    from cuentas_por_pagar import detalle_factura
+
+    sb = _sb()
+    fila = sb.table(TABLA).select("*").eq("id", factura_id).limit(1).execute().data
+    if not fila:
+        raise HTTPException(status_code=404, detail="Factura no encontrada")
+    return _json(detalle_factura(sb, fila[0]))
+
+
 # ── Acciones ─────────────────────────────────────────────────
 
 
